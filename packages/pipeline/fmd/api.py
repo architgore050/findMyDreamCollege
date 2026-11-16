@@ -14,7 +14,7 @@ import json
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -388,6 +388,17 @@ class ProfileRequest(BaseModel):
     limit: int = Field(default=200, ge=1, le=500)
 
 
+class ProgrammeCostRequest(BaseModel):
+    """Profile travels in the body only (never in a URL, never persisted)."""
+
+    profile: dict[str, Any]
+    living: Literal["hostel", "independent"] = "hostel"
+
+
+class ProgrammeFiltersRequest(BaseModel):
+    profile: dict[str, Any]
+
+
 class WeightOverrideError(ValueError):
     pass
 
@@ -451,6 +462,103 @@ def _claim_number(claims: Sequence[Any], *predicates: str) -> float | None:
     return None
 
 
+def _positive_number(value: Any) -> float | None:
+    """Parse a profile-supplied number; UNKNOWN/booleans/strings are not numbers."""
+
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if number > 0 else None
+
+
+def _financing_dict(profile: Mapping[str, Any]) -> Mapping[str, Any]:
+    financing = profile.get("financing")
+    return financing if isinstance(financing, Mapping) else {}
+
+
+def _family_income(profile: Mapping[str, Any]) -> tuple[float | None, str | None]:
+    """Resolve an annual family income *only* from an explicit point value.
+
+    A profile may state ``financing.family_income_band`` instead. Turning a band
+    into a midpoint would invent a number, so the gap stays UNKNOWN and the
+    reason says exactly why. Bands themselves live in the profile schema/config,
+    never as Python constants.
+    """
+
+    financing = _financing_dict(profile)
+    for raw in (
+        profile.get("family_income_annual"),
+        financing.get("annual_family_income"),
+        (profile.get("budget") if isinstance(profile.get("budget"), Mapping) else {}).get(
+            "annual_family_income"
+        ),
+    ):
+        value = _positive_number(raw)
+        if value is not None:
+            return value, None
+    band = financing.get("family_income_band")
+    if isinstance(band, str) and band.strip().lower() not in {"", "unknown"}:
+        return None, (
+            "income: the profile states a family-income band, not a point value; "
+            "affordability_gap stays UNKNOWN rather than inventing a midpoint"
+        )
+    return None, "income: the profile does not supply annual family income"
+
+
+def _financing_context(
+    registry: Registry,
+    claims: Sequence[Any],
+    profile: Mapping[str, Any],
+) -> tuple[Any, float | None, list[str]]:
+    """Loan terms + explicit family income, with honest UNKNOWN reasons."""
+
+    from fmd.cost import loan_terms_from_config
+
+    reasons: list[str] = []
+    loan = loan_terms_from_config(registry.cost_rules)
+    rate = _claim_number(claims, "loan_interest_rate", "loan_rate", "annual_loan_rate")
+    if rate is not None:
+        if rate > 1.0:
+            rate = rate / 100.0
+        loan = loan.model_copy(
+            update={"annual_rate": rate, "assumed_rate": False, "rate_source": "claim"}
+        )
+    if loan.annual_rate is None:
+        reasons.append(
+            "loan_rate: no published rate claim and no configured assumption; "
+            "debt, EMI and DSR₂₅ stay UNKNOWN"
+        )
+
+    financing = _financing_dict(profile)
+    loan_required = financing.get("loan_required")
+    if isinstance(loan_required, str):
+        loan_required = loan_required.strip().lower() not in {"no", "false", "unknown", ""}
+    if loan_required is False:
+        loan = loan.model_copy(update={"principal": 0.0})
+    else:
+        collateral = financing.get("collateral_available")
+        if isinstance(collateral, str):
+            collateral = collateral.strip().lower() not in {"unknown", "", "prefer_not_to_say"}
+        if collateral is None:
+            reasons.append(
+                "collateral: the profile does not state collateral availability; "
+                "lender sanction eligibility is not modelled and no approval is implied"
+            )
+
+    family_income, income_reason = _family_income(profile)
+    if income_reason is not None:
+        reasons.append(income_reason)
+    return loan, family_income, reasons
+
+
 def _cost_snapshot(
     database: Database,
     registry: Registry,
@@ -468,7 +576,6 @@ def _cost_snapshot(
         CostModelError,
         CostRules,
         compute,
-        loan_terms_from_config,
         student_work_from_config,
     )
 
@@ -495,20 +602,7 @@ def _cost_snapshot(
         return None
 
     institution = EntitiesRepo(database).get(programme.institution_id)
-    loan = loan_terms_from_config(registry.cost_rules)
-    rate = _claim_number(claims, "loan_interest_rate", "loan_rate", "annual_loan_rate")
-    if rate is not None:
-        if rate > 1.0:
-            rate = rate / 100.0
-        loan = loan.model_copy(
-            update={"annual_rate": rate, "assumed_rate": False, "rate_source": "claim"}
-        )
-
-    profile = profile or {}
-    budget = profile.get("budget") if isinstance(profile.get("budget"), Mapping) else {}
-    family_income = profile.get("family_income_annual")
-    if family_income is None and budget:
-        family_income = budget.get("annual_family_income")
+    loan, family_income, _reasons = _financing_context(registry, claims, profile or {})
 
     kwargs: dict[str, Any] = {
         "items": items,
@@ -632,12 +726,71 @@ def rankings(
     )
 
 
+def _programme_or_404(database: Database, programme_id: int) -> Any:
+    programme = ProgrammesRepo(database).get(programme_id)
+    if programme is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": f"programme {programme_id} not found"},
+        )
+    return programme
+
+
+def _registry_or_500() -> Registry:
+    registry = _registry()
+    if registry is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "config_invalid", "message": "config registry failed to load"},
+        )
+    return registry
+
+
+def _scenario_totals(snapshot: Any) -> dict[str, Any]:
+    """Per-living-scenario metrics from one already-computed snapshot."""
+
+    return {
+        "living": snapshot.living,
+        "living_cost": snapshot.scenarios[snapshot.living].model_dump(mode="json"),
+        "tcoa": snapshot.tcoa.model_dump(mode="json"),
+        "tcoa_first_year": snapshot.tcoa_first_year.model_dump(mode="json"),
+        "net_price": snapshot.net_price.model_dump(mode="json"),
+        "aid_total": snapshot.aid_total.model_dump(mode="json"),
+        "loan_principal": snapshot.loan_principal.model_dump(mode="json"),
+        "family_out_of_pocket": snapshot.family_out_of_pocket.model_dump(mode="json"),
+        "student_work_offset": snapshot.student_work_offset.model_dump(mode="json"),
+        "debt_at_repayment": snapshot.debt_at_repayment.model_dump(mode="json"),
+        "emi": snapshot.emi.model_dump(mode="json"),
+        "dsr25": snapshot.dsr25.model_dump(mode="json"),
+        "affordability_gap": snapshot.affordability_gap.model_dump(mode="json"),
+        "methods": dict(snapshot.methods),
+        "assumptions": list(snapshot.assumptions),
+        "assumed": dict(snapshot.assumptions_flags),
+        "display": dict(snapshot.display),
+    }
+
+
+def _cost_unknown_reasons(
+    claims: Sequence[Any],
+    financing_reasons: Sequence[str],
+) -> list[str]:
+    reasons = list(financing_reasons)
+    if _claim_number(claims, "p25_first_year_salary") is None:
+        reasons.append(
+            "salary: no P25 first-year salary claim for the placement city; "
+            "DSR₂₅ stays UNKNOWN rather than assuming a salary"
+        )
+    return reasons
+
+
 @app.get("/api/programmes/{programme_id}/cost")
-def programme_cost(
+def programme_cost_needs_profile(
     programme_id: int,
     database: DatabaseDep,
     living: str = Query(default="hostel"),
 ) -> dict[str, Any]:
+    """GET is a pointer, not a number: family financing lives in the profile."""
+
     if living not in {"hostel", "independent"}:
         raise HTTPException(
             status_code=422,
@@ -646,45 +799,196 @@ def programme_cost(
                 "message": "living must be 'hostel' or 'independent'",
             },
         )
-    programme = ProgrammesRepo(database).get(programme_id)
-    if programme is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "not_found", "message": f"programme {programme_id} not found"},
-        )
-    registry = _registry()
-    if registry is None:
-        raise HTTPException(
-            status_code=500,
-            detail={"code": "config_invalid", "message": "config registry failed to load"},
-        )
+    _programme_or_404(database, programme_id)
+    programme = _programme_or_404(database, programme_id)
     claims = _claims_for(database, programme)
-    snapshot = _cost_snapshot(
-        database, registry, programme, claims, living=living, profile={}
-    )
-    if snapshot is None:
-        return _envelope(
-            {
-                "programme_id": programme_id,
-                "living": living,
-                "available": False,
-                "reason": "no complete cost evidence; refusing to model a TCOA from nothing",
-                "scenarios": {},
-            },
-            claims_hash=_claims_hash(claims),
-        )
-    payload = snapshot.render()
-    payload.update(
+    return _envelope(
         {
             "programme_id": programme_id,
             "living": living,
-            "available": True,
-            "non_additive_scenarios": True,
-            "note": "hostel and independent are complete alternatives; never sum them",
-            "assumed": snapshot.assumptions_flags,
+            "available": False,
+            "needs_profile": True,
+            "profile_persisted": False,
+            "reason": (
+                "cost depends on the family financing profile; POST "
+                "{profile, living} to this endpoint. No family-specific number is "
+                "published without one."
+            ),
+            "scenarios": {},
+            "scenario_totals": {},
+            "unknown_reasons": [
+                "profile: no profile was supplied, so DSR₂₅, the affordability gap and "
+                "EMI cannot be computed"
+            ],
+        },
+        claims_hash=_claims_hash(claims),
+    )
+
+
+@app.post("/api/programmes/{programme_id}/cost")
+def programme_cost(
+    programme_id: int,
+    request: ProgrammeCostRequest,
+    database: DatabaseDep,
+) -> dict[str, Any]:
+    programme = _programme_or_404(database, programme_id)
+    registry = _registry_or_500()
+    claims = _claims_for(database, programme)
+
+    _loan, _income, financing_reasons = _financing_context(
+        registry, claims, request.profile
+    )
+    reasons = _cost_unknown_reasons(claims, financing_reasons)
+
+    snapshots: dict[str, Any] = {}
+    for scenario in ("hostel", "independent"):
+        snapshot = _cost_snapshot(
+            database,
+            registry,
+            programme,
+            claims,
+            living=scenario,
+            profile=request.profile,
+        )
+        if snapshot is not None:
+            snapshots[scenario] = snapshot
+
+    if not snapshots:
+        return _envelope(
+            {
+                "programme_id": programme_id,
+                "living": request.living,
+                "available": False,
+                "needs_profile": False,
+                "profile_persisted": False,
+                "reason": (
+                    "no complete cost evidence; refusing to model a TCOA from nothing"
+                ),
+                "scenarios": {},
+                "scenario_totals": {},
+                "unknown_reasons": reasons,
+            },
+            claims_hash=_claims_hash(claims),
+        )
+
+    selected = snapshots.get(request.living) or next(iter(snapshots.values()))
+    totals = {name: _scenario_totals(snapshot) for name, snapshot in snapshots.items()}
+    selected_totals = totals[selected.living]
+
+    assumed: dict[str, Any] = {}
+    for block in totals.values():
+        assumed.update(block["assumed"])
+    if selected_totals["emi"]["method"] == "computed_emi":
+        assumed.setdefault(
+            "loan_terms",
+            {
+                "assumed": True,
+                "source": "assumption",
+                "note": (
+                    "tenure and moratorium are modelled defaults, not published "
+                    "sanction terms"
+                ),
+            },
+        )
+
+    payload: dict[str, Any] = {
+        "programme_id": programme_id,
+        "living": selected.living,
+        "available": True,
+        "needs_profile": False,
+        "profile_persisted": False,
+        "non_additive_scenarios": True,
+        "note": "hostel and independent are complete alternatives; never sum them",
+        "currency": selected.currency,
+        "duration_months": selected.duration_months,
+        # Living components per scenario (old shape, still complete alternatives).
+        "scenarios": {
+            name: selected.scenarios[name].model_dump(mode="json")
+            for name in totals
+            if name in selected.scenarios
+        },
+        # Full metrics per scenario: TCOA, EMI, DSR₂₅ and affordability each.
+        "scenario_totals": totals,
+        "assumed": assumed,
+        "unknown_reasons": reasons,
+        "fx_band_pct": selected.fx_band_pct,
+        "bands": selected.bands,
+        "dsr25_bands": selected.bands,
+    }
+    for key in (
+        "tcoa",
+        "tcoa_first_year",
+        "net_price",
+        "aid_total",
+        "loan_principal",
+        "family_out_of_pocket",
+        "student_work_offset",
+        "debt_at_repayment",
+        "emi",
+        "dsr25",
+        "affordability_gap",
+        "methods",
+        "assumptions",
+        "display",
+    ):
+        payload[key] = selected_totals[key]
+    return _envelope(payload, claims_hash=_claims_hash(claims))
+
+
+@app.get("/api/programmes/{programme_id}/filters")
+def programme_filters_needs_profile(programme_id: int, database: DatabaseDep) -> dict[str, Any]:
+    """No profile means no decisions: UNKNOWN is not a pass and not a guess."""
+
+    _programme_or_404(database, programme_id)
+    return _envelope(
+        {
+            "programme_id": programme_id,
+            "needs_profile": True,
+            "profile_persisted": False,
+            "would_exclude": False,
+            "order": [],
+            "counts": {"pass": 0, "fail": 0, "unknown": 0},
+            "filters": [],
+            "excluded": [],
+            "unverified": [],
+            "reason": (
+                "hard filters compare this programme against a profile; POST {profile} "
+                "to this endpoint. No filter is evaluated without one."
+            ),
         }
     )
-    return _envelope(payload, claims_hash=_claims_hash(claims))
+
+
+@app.post("/api/programmes/{programme_id}/filters")
+def programme_filters(
+    programme_id: int,
+    request: ProgrammeFiltersRequest,
+    database: DatabaseDep,
+) -> dict[str, Any]:
+    from fmd.filters import FilterContext, evaluate_all
+
+    programme = _programme_or_404(database, programme_id)
+    registry = _registry_or_500()
+    claims = _claims_for(database, programme)
+    context = FilterContext.from_registry(registry)
+    summary = evaluate_all(_programme_view(programme, claims), request.profile, context=context)
+    decisions = [
+        summary.decisions[filter_id].as_dict() for filter_id in summary.order
+    ]
+    return _envelope(
+        {
+            "programme_id": programme_id,
+            "needs_profile": False,
+            "profile_persisted": False,
+            "order": list(summary.order),
+            "counts": summary.counts,
+            "filters": decisions,
+            "would_exclude": bool(summary.excluded),
+            "excluded": list(summary.excluded),
+            "unverified": list(summary.unverified),
+        },
+        claims_hash=_claims_hash(claims),
+    )
 
 
 @app.get("/api/compare")

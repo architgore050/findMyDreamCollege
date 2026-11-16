@@ -9,7 +9,10 @@ import {
   examWindowsPayloadSchema,
   exclusionsPayloadSchema,
   healthSchema,
+  programmeCostRequestSchema,
   programmeDetailSchema,
+  programmeFiltersPayloadSchema,
+  programmeFiltersRequestSchema,
   programmeListSchema,
   profileRequestSchema,
   rankingsPayloadSchema,
@@ -299,14 +302,33 @@ export function apiProgrammeEvidence(
 /** WS-F (brief §13). Both living scenarios arrive in one non-additive payload. */
 export function apiProgrammeCost(
   programmeId: number,
-  living: "hostel" | "independent",
+  profile: Profile,
+  living: "hostel" | "independent" = "hostel",
   options?: RequestOptions,
 ) {
-  return request(
-    `/api/programmes/${programmeId}/cost${queryString({ living })}`,
-    costPayloadSchema,
-    options,
-  );
+  return request(`/api/programmes/${programmeId}/cost`, costPayloadSchema, {
+    ...options,
+    method: "POST",
+    body: { profile, living },
+    bodySchema: programmeCostRequestSchema,
+  });
+}
+
+/**
+ * WS-F (brief §12). All eight hard filters for one programme, evaluated against
+ * the local profile. Profile in the body: never a URL, never a log, never stored.
+ */
+export function apiProgrammeFilters(
+  programmeId: number,
+  profile: Profile,
+  options?: RequestOptions,
+) {
+  return request(`/api/programmes/${programmeId}/filters`, programmeFiltersPayloadSchema, {
+    ...options,
+    method: "POST",
+    body: { profile },
+    bodySchema: programmeFiltersRequestSchema,
+  });
 }
 
 /**

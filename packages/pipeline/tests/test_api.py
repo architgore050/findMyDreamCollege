@@ -288,6 +288,11 @@ def test_engine_endpoints_against_real_db(pg_database, monkeypatch) -> None:
         "budget": {"currency": "INR", "total_ceiling": 5_000_000},
         "target_intake_year": 2026,
         "travel_for_exams": "yes",
+        "financing": {
+            "loan_required": True,
+            "collateral_available": True,
+            "annual_family_income": 900_000,
+        },
     }
     try:
         ranked = client.post("/api/rankings", json={"profile": profile})
@@ -333,14 +338,20 @@ def test_engine_endpoints_against_real_db(pg_database, monkeypatch) -> None:
         assert bad.status_code == 422
         assert bad.json()["error"]["code"] == "invalid_weights"
 
-        cost = client.get(f"/api/programmes/{programme.id}/cost", params={"living": "hostel"})
+        cost = client.post(
+            f"/api/programmes/{programme.id}/cost",
+            json={"profile": profile, "living": "hostel"},
+        )
         assert cost.status_code == 200
         cost_body = cost.json()
         assert cost_body.keys() >= ENVELOPE_KEYS
         assert cost_body["available"] is True
+        assert cost_body["profile_persisted"] is False
         assert set(cost_body["scenarios"]) == {"hostel", "independent"}
+        assert set(cost_body["scenario_totals"]) == {"hostel", "independent"}
         assert cost_body["non_additive_scenarios"] is True
         assert cost_body["assumed"]["loan_rate"]["assumed"] is True
+        assert cost_body["assumed"]["loan_terms"]["assumed"] is True
         assert cost_body["dsr25"]["band"] in {
             "comfortable",
             "manageable",
@@ -349,12 +360,44 @@ def test_engine_endpoints_against_real_db(pg_database, monkeypatch) -> None:
             "unknown",
         }
         assert cost_body["tcoa"]["method"]
+        assert cost_body["affordability_gap"]["value"] is not None
+        for scenario in cost_body["scenario_totals"].values():
+            assert scenario["dsr25"]["band"]
+            assert scenario["emi"]["method"]
+            assert scenario["tcoa"]["value"] is not None
+        assert cost_body["unknown_reasons"] == []
 
-        independent = client.get(
-            f"/api/programmes/{programme.id}/cost", params={"living": "independent"}
+        independent = client.post(
+            f"/api/programmes/{programme.id}/cost",
+            json={"profile": profile, "living": "independent"},
         )
         assert independent.status_code == 200
         assert independent.json()["living"] == "independent"
+
+        filters = client.post(
+            f"/api/programmes/{programme.id}/filters", json={"profile": profile}
+        )
+        assert filters.status_code == 200
+        filters_body = filters.json()
+        assert filters_body["needs_profile"] is False
+        assert filters_body["profile_persisted"] is False
+        assert len(filters_body["filters"]) == 8
+        assert filters_body["order"] == [item["filter_id"] for item in filters_body["filters"]]
+        for decision in filters_body["filters"]:
+            assert decision["result"] in {"pass", "fail", "unknown"}
+            assert "reason" in decision and "claim_id" in decision
+        assert isinstance(filters_body["would_exclude"], bool)
+
+        needs_profile = client.get(f"/api/programmes/{programme.id}/cost")
+        assert needs_profile.status_code == 200
+        assert needs_profile.json()["needs_profile"] is True
+        assert needs_profile.json()["available"] is False
+        assert "tcoa" not in needs_profile.json()
+
+        no_profile_filters = client.get(f"/api/programmes/{programme.id}/filters")
+        assert no_profile_filters.status_code == 200
+        assert no_profile_filters.json()["needs_profile"] is True
+        assert no_profile_filters.json()["filters"] == []
 
         compare = client.get(
             "/api/compare", params={"ids": f"{programme.id},{second.id}"}
@@ -380,3 +423,106 @@ def test_engine_endpoints_against_real_db(pg_database, monkeypatch) -> None:
         del institution
     finally:
         app.dependency_overrides.clear()
+
+
+def test_programme_cost_partial_profile_lists_unknown_reasons(pg_database, monkeypatch) -> None:
+    suffix = uuid.uuid4().hex[:10]
+    _institution, programme = _seed_engine_programme(pg_database, suffix)
+    monkeypatch.setattr(api_module, "get_database", lambda: pg_database)
+    app.dependency_overrides[api_module._database_or_503] = lambda: pg_database
+    try:
+        response = client.post(
+            f"/api/programmes/{programme.id}/cost",
+            json={
+                "profile": {"financing": {"family_income_band": "4.5-8L"}},
+                "living": "hostel",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["available"] is True
+        assert body["affordability_gap"]["value"] is None
+        assert body["affordability_gap"]["annual_family_income"] is None
+        joined = " | ".join(body["unknown_reasons"])
+        assert "income:" in joined
+        assert "collateral:" in joined
+        # An income band is not silently turned into a midpoint.
+        assert not any(reason.startswith("salary:") for reason in body["unknown_reasons"])
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_programme_cost_and_filters_reject_malformed_bodies(pg_database) -> None:
+    app.dependency_overrides[api_module._database_or_503] = lambda: pg_database
+    try:
+        suffix = uuid.uuid4().hex[:10]
+        _institution, programme = _seed_engine_programme(pg_database, suffix)
+        for payload in (
+            {"living": "hostel"},
+            {"profile": "not-an-object", "living": "hostel"},
+            {"profile": {}, "living": "hotel"},
+        ):
+            response = client.post(f"/api/programmes/{programme.id}/cost", json=payload)
+            assert response.status_code == 422, payload
+        malformed = client.post(f"/api/programmes/{programme.id}/filters", json={})
+        assert malformed.status_code == 422
+        assert malformed.json()["error"]["code"] == "validation_error"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def _table_names(database) -> list[str]:
+    with database.connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'
+            ORDER BY table_name
+            """
+        ).fetchall()
+    return [str(row["table_name"]) for row in rows]
+
+
+def test_profile_is_never_persisted(pg_database) -> None:
+    import json
+
+    suffix = uuid.uuid4().hex[:10]
+    sentinel = f"SENTINEL-PROFILE-{suffix}"
+    _institution, programme = _seed_engine_programme(pg_database, suffix)
+    app.dependency_overrides[api_module._database_or_503] = lambda: pg_database
+    profile = {
+        "target_field": sentinel,
+        "regions": [sentinel],
+        "financing": {
+            "loan_required": True,
+            "collateral_available": True,
+            "annual_family_income": 750_000,
+        },
+    }
+    try:
+        cost = client.post(
+            f"/api/programmes/{programme.id}/cost",
+            json={"profile": profile, "living": "independent"},
+        )
+        assert cost.status_code == 200
+        assert sentinel not in cost.text
+
+        filters = client.post(
+            f"/api/programmes/{programme.id}/filters", json={"profile": profile}
+        )
+        assert filters.status_code == 200
+        assert sentinel not in filters.text
+
+        with pg_database.connection() as conn:
+            llm_rows = conn.execute("SELECT count(*) AS total FROM llm_calls").fetchone()
+            assert int(llm_rows["total"]) == 0
+            for table in _table_names(pg_database):
+                hit = conn.execute(
+                    f'SELECT count(*) AS total FROM "{table}" WHERE "{table}"::text LIKE %s',
+                    (f"%{sentinel}%",),
+                ).fetchone()
+                assert int(hit["total"]) == 0, table
+            assert json.dumps(profile) not in cost.text
+    finally:
+        app.dependency_overrides.clear()
+

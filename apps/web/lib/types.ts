@@ -382,21 +382,53 @@ export const affordabilitySchema = z.object({
 export type Affordability = z.infer<typeof affordabilitySchema>;
 
 /**
- * `/api/programmes/{id}/cost`. Both living scenarios are returned in one
+ * Per-living-scenario financing block from `POST /api/programmes/{id}/cost`.
+ * Each scenario carries its own TCOA, EMI, DSR₂₅ and affordability gap; the
+ * blocks are complete alternatives and are never summed.
+ */
+export const scenarioTotalsSchema = z.object({
+  living: z.enum(["hostel", "independent"]),
+  living_cost: livingScenarioCostSchema,
+  tcoa: moneyBandSchema,
+  tcoa_first_year: moneyBandSchema,
+  net_price: moneyBandSchema,
+  aid_total: moneyBandSchema.optional(),
+  loan_principal: moneyBandSchema,
+  family_out_of_pocket: moneyBandSchema,
+  student_work_offset: moneyBandSchema.optional(),
+  debt_at_repayment: moneyBandSchema,
+  emi: moneyBandSchema,
+  dsr25: dsr25Schema,
+  affordability_gap: affordabilitySchema,
+  methods: z.record(z.string(), z.string()).optional(),
+  assumptions: z.array(z.string()).optional(),
+  assumed: z.record(z.string(), z.unknown()).optional(),
+  display: z.record(z.string(), z.unknown()).optional(),
+});
+export type ScenarioTotals = z.infer<typeof scenarioTotalsSchema>;
+
+/**
+ * `POST /api/programmes/{id}/cost`. Both living scenarios are returned in one
  * payload and are complete alternatives: never summed (brief §13).
  */
 export const costPayloadSchema = z.object({
   programme_id: z.number(),
   living: z.enum(["hostel", "independent"]),
   available: z.boolean(),
+  needs_profile: z.boolean().optional(),
+  profile_persisted: z.boolean().optional(),
   reason: z.string().optional(),
   note: z.string().optional(),
   non_additive_scenarios: z.boolean().optional(),
   /** True flags for values the model assumed rather than extracted. */
   assumed: z.record(z.string(), z.unknown()).optional(),
+  /** Machine-readable reasons a metric stayed UNKNOWN instead of defaulting. */
+  unknown_reasons: z.array(z.string()).optional(),
   currency: z.string().optional(),
   duration_months: z.number().optional(),
   scenarios: z.record(z.string(), livingScenarioCostSchema).default({}),
+  /** Full financing metrics per scenario, including DSR₂₅ each. */
+  scenario_totals: z.record(z.string(), scenarioTotalsSchema).default({}),
   tcoa: moneyBandSchema.optional(),
   tcoa_first_year: moneyBandSchema.optional(),
   net_price: moneyBandSchema.optional(),
@@ -410,12 +442,28 @@ export const costPayloadSchema = z.object({
   affordability_gap: affordabilitySchema.optional(),
   fx_band_pct: z.number().optional(),
   bands: z.record(z.string(), z.record(z.string(), z.number())).optional(),
+  dsr25_bands: z.record(z.string(), z.record(z.string(), z.number())).optional(),
   methods: z.record(z.string(), z.string()).optional(),
   assumptions: z.array(z.string()).optional(),
   assumptions_flags: z.record(z.string(), z.unknown()).optional(),
   display: z.record(z.string(), z.unknown()).optional(),
 });
 export type CostPayload = z.infer<typeof costPayloadSchema>;
+
+/** `POST /api/programmes/{id}/filters`: all eight hard filters, profile in body. */
+export const programmeFiltersPayloadSchema = z.object({
+  programme_id: z.number().optional(),
+  needs_profile: z.boolean().optional(),
+  profile_persisted: z.boolean().optional(),
+  order: z.array(z.string()).default([]),
+  counts: z.object({ pass: z.number(), fail: z.number(), unknown: z.number() }).optional(),
+  filters: z.array(filterDecisionSchema).default([]),
+  would_exclude: z.boolean().default(false),
+  excluded: z.array(z.string()).optional(),
+  unverified: z.array(z.string()).optional(),
+  reason: z.string().optional(),
+});
+export type ProgrammeFiltersPayload = z.infer<typeof programmeFiltersPayloadSchema>;
 
 // --------------------------------------------------------------------------- costs
 
@@ -561,6 +609,22 @@ export const rankingsRequestSchema = z.object({
   limit: z.number().int().min(1).max(500).optional(),
 });
 export type RankingsRequest = z.infer<typeof rankingsRequestSchema>;
+
+/**
+ * Exact `POST /api/programmes/{id}/cost` body. `living` selects which scenario
+ * the top-level totals mirror; both scenarios always come back.
+ */
+export const programmeCostRequestSchema = z.object({
+  profile: profileSchema,
+  living: z.enum(["hostel", "independent"]),
+});
+export type ProgrammeCostRequest = z.infer<typeof programmeCostRequestSchema>;
+
+/** Exact `POST /api/programmes/{id}/filters` body. Profile only, never in URL. */
+export const programmeFiltersRequestSchema = z.object({
+  profile: profileSchema,
+});
+export type ProgrammeFiltersRequest = z.infer<typeof programmeFiltersRequestSchema>;
 
 // --------------------------------------------------------------------------- WS-F payloads
 

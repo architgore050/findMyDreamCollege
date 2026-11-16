@@ -3,26 +3,15 @@ import Link from "next/link";
 import { ApiFailurePanel, EmptyPanel, EnvelopeStamp } from "@/components/api-state";
 import { EvidenceTierBadge } from "@/components/badges";
 import { ClaimValue } from "@/components/claim-value";
-import { CostPanel } from "@/components/cost-panel";
 import { EvidenceTabs } from "@/components/evidence-tabs";
-import { HardFilterRow, type FilterState } from "@/components/hard-filter";
 import { ScoreBand } from "@/components/score-band";
-import { apiProgramme, apiProgrammeCost, apiProgrammeEvidence, isOk } from "@/lib/api";
+import { apiProgramme, apiProgrammeEvidence, isOk } from "@/lib/api";
 import { formatNumber, titleFromPredicate } from "@/lib/format";
 import { subScoreSchema, type Claim, type ProgrammeDetail } from "@/lib/types";
 
-export const dynamic = "force-dynamic";
+import { ProgrammeProfilePanels } from "./profile-panels";
 
-const HARD_FILTERS = [
-  "credential_level",
-  "recognition_status",
-  "eligibility",
-  "language",
-  "exam_registration_open",
-  "exam_travel",
-  "intake_year_available",
-  "budget_ceiling",
-] as const;
+export const dynamic = "force-dynamic";
 
 function mergeClaims(detail: ProgrammeDetail, evidence: Claim[]): Claim[] {
   const byId = new Map<number, Claim>();
@@ -51,10 +40,9 @@ export default async function ProgrammePage({ params }: { params: Promise<{ id: 
     );
   }
 
-  const [detail, evidence, cost] = await Promise.all([
+  const [detail, evidence] = await Promise.all([
     apiProgramme(programmeId),
     apiProgrammeEvidence(programmeId, { limit: 200 }),
-    apiProgrammeCost(programmeId, "hostel"),
   ]);
 
   if (!isOk(detail)) {
@@ -237,53 +225,7 @@ export default async function ProgrammePage({ params }: { params: Promise<{ id: 
         </section>
       </div>
 
-      <section className="space-y-2" aria-labelledby="filters-title">
-        <div>
-          <h2 id="filters-title" className="text-lg font-bold">
-            Hard filters
-          </h2>
-          <p className="text-xs text-stone-600">
-            Binary cutoffs. A failed filter excludes the programme; it never lowers a score inside a
-            weighted sum.
-          </p>
-        </div>
-        <div className="panel overflow-x-auto">
-          <table>
-            <caption className="sr-only">Hard filter outcomes for this programme</caption>
-            <thead>
-              <tr>
-                <th scope="col">Filter</th>
-                <th scope="col">State</th>
-                <th scope="col">Deciding claim / reason</th>
-              </tr>
-            </thead>
-            <tbody>
-              {HARD_FILTERS.map((filter) => (
-                <HardFilterRow
-                  key={filter}
-                  name={filter}
-                  state={"unknown" as FilterState}
-                  reason="Filter outcomes depend on a profile. This record view carries no profile, so the state is UNKNOWN here; the ranked shortlist and exclusions screens publish the decided outcomes. Unknown is not pass."
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section className="space-y-2" aria-labelledby="cost-title">
-        <div>
-          <h2 id="cost-title" className="text-lg font-bold">
-            Cost scenarios
-          </h2>
-          <p className="text-xs text-stone-600">
-            Hostel and independent are complete alternatives, returned together and never added
-            together. Published components carry their method; modelled or assumed values are
-            labelled as such.
-          </p>
-        </div>
-        {isOk(cost) ? <CostPanel cost={cost.data} /> : <ApiFailurePanel result={cost} />}
-      </section>
+      <ProgrammeProfilePanels programmeId={programmeId} />
 
       <section className="space-y-2" aria-labelledby="subscores-title">
         <div>
