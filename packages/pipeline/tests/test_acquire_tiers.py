@@ -366,3 +366,106 @@ def test_t1_docling_document_provides_table_cells_and_uncertainty() -> None:
     assert doc.table_confidence == 0.0
     assert "Programme: BSc MLT" in doc.text
     assert "50000" in doc.text
+
+
+# --------------------------------------------------------------------------- service failures
+
+
+def test_t2_and_t2b_engines_come_from_the_registry() -> None:
+    """T2 is the sm_120-capable engine; T2b is the retained alternate."""
+    policy = _policy()
+
+    assert policy.backend("T2").model == "Qwen3-VL-8B-Instruct"
+    assert policy.backend("T2").tool == "qwen3-vl"
+    assert policy.backend("T2b").tool == "paddleocr-vl"
+    assert policy.backend("T2").endpoint_env == "FMD_T2_URL"
+    assert policy.backend("T2b").endpoint_env == "FMD_T2B_URL"
+    # Service-side defaults live in the same registry entry, not in code.
+    assert policy.backend("T2").service["backend"] == "qwen3vl"
+    assert policy.backend("T2b").service["backend"] == "paddleocr"
+    assert policy.backend("T2b").service["device"] == "cpu"
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_ocr_service_http_error_is_tier_unavailable(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """429/500/503 from the OCR service is "unavailable", never an empty document."""
+    import httpx
+
+    from fmd.acquire import tiers as tiers_module
+
+    def post(url: str, **kwargs: object) -> httpx.Response:
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            status, json={"detail": "backend_http_429: engine said no"}, request=request
+        )
+
+    monkeypatch.setenv("FMD_T2_URL", "http://ocr.test")
+    monkeypatch.setattr(tiers_module.httpx, "post", post)
+
+    with pytest.raises(TierUnavailable) as excinfo:
+        t2_extract(b"%PDF-1.4")
+    assert "ocr.test" in str(excinfo.value)
+    assert str(status) in str(excinfo.value)
+
+
+def test_unavailable_vision_engine_degrades_loudly_not_silently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page with usable T0 text falls back to T0 and carries the reason."""
+    import httpx
+
+    from fmd.acquire import tiers as tiers_module
+
+    def post(url: str, **kwargs: object) -> httpx.Response:
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            503,
+            json={"detail": "vision_unavailable: vLLM is not answering at http://host:8001/v1"},
+            request=request,
+        )
+
+    monkeypatch.setenv("FMD_T2_URL", "http://ocr.test")
+    monkeypatch.setattr(tiers_module.httpx, "post", post)
+
+    result = run_tiers(
+        b"ignored",
+        policy=_policy(),
+        t0=lambda _: _doc(LONG_TEXT + " शुल्क और पात्रता की जानकारी।"),
+        t2=t2_extract,
+    )
+
+    assert result.tier == "T0"
+    assert result.fallback_from == "T2"
+    # The service's /health carries the `vision_unavailable` label; the tier note
+    # records that T2 could not run and why. `tiers._ocr_tier` formats an
+    # httpx.HTTPStatusError, which omits the response body, so the label itself
+    # lives on the service health probe (tests/test_ocr_service.py) -- the note
+    # must still make the degradation visible and must not invent text.
+    assert "T2 unavailable" in result.notes[0]
+    assert "503" in result.notes[0]
+
+
+def test_image_only_page_with_no_vision_engine_produces_no_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scanned-page path: no OCR, no text, so no claims and a review item."""
+    import httpx
+
+    from fmd.acquire import tiers as tiers_module
+
+    def post(url: str, **kwargs: object) -> httpx.Response:
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            503, json={"detail": "vision_unavailable: no weights"}, request=request
+        )
+
+    monkeypatch.setenv("FMD_T2_URL", "http://ocr.test")
+    monkeypatch.setattr(tiers_module.httpx, "post", post)
+
+    with pytest.raises(TierUnavailable) as excinfo:
+        run_tiers(b"ignored", policy=_policy(), t0=lambda _: _doc(""), t2=t2_extract)
+    message = str(excinfo.value)
+    assert "cannot be extracted on this host" in message
+    assert "503" in message

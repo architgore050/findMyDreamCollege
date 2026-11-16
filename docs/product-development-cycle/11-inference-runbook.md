@@ -7,12 +7,14 @@ are flagged where unverified. **Owner:** WS-SERVE.
 `config/models.yaml` (what the router calls), `config/acquire.yaml` (the OCR
 stage), `09-local-runbook.md` (the rest of the stack).
 
-Two processes, deliberately separate:
+Three processes, deliberately separate — and never two GPU-resident models at
+once (§1 budget rule):
 
 | Process | What it is | Port | Who calls it |
 |---|---|---|---|
-| `scripts/serve_local.sh` | vLLM, OpenAI-compatible `/v1` | 8000 | `fmd.llm.router` (`bulk_extract`, `verify`, `entity_adjudication`) |
-| `scripts/serve_ocr.sh` | PaddleOCR-VL behind `POST /extract` | 8110 | `fmd.acquire.tiers` tier T2 |
+| `scripts/serve_local.sh` | vLLM, OpenAI-compatible `/v1`, text model | 8000 | `fmd.llm.router` (`bulk_extract`, `verify`, `entity_adjudication`) |
+| `scripts/serve_ocr.sh vision-start` | vLLM, OpenAI-compatible `/v1`, **Qwen3-VL-8B** | 8001 | `infra/ocr/server.py` (the `qwen3vl` backend) |
+| `scripts/serve_ocr.sh start` | OCR adapter behind `POST /extract` | 8110 | `fmd.acquire.tiers` tier T2 |
 
 OCR is **not** a router profile. `ocr_vlm` was retired from `config/models.yaml`
 on 2026-11-16: a block-extraction service is not an OpenAI chat endpoint, it
@@ -42,6 +44,55 @@ Budget rule: one GPU process at a time. A 32k-context 9B int4 run reserves
 enough KV that an 8B vision model will not co-reside in 16 GB, so T2b
 (Qwen3-VL) is an alternative to the text model, not an addition.
 
+### 1.1 What runs where, and where weights live
+
+| Thing | Runs | Host disk | In a container? |
+|---|---|---|---|
+| vLLM text (:8000) | host process | `$MODEL_DIR/Qwen3.5-9B-AWQ` | no |
+| vLLM vision (:8001) | host process | `$MODEL_DIR/Qwen3-VL-8B-Instruct-FP8` | no |
+| OCR adapter (:8110) | container | mounts `$MODEL_DIR` **read-only** at `/models` | client only |
+| `api` / `worker` | container | no weights needed | client only |
+
+`MODEL_DIR` defaults to `/home/archit-gore/models`. Layout:
+
+```
+/home/archit-gore/models/
+├── Qwen3.5-9B-AWQ/             text: bulk_extract, verify, entity_adjudication
+├── Qwen3.5-2B-AWQ/             smoke-test text model (optional)
+├── Qwen3-VL-8B-Instruct-FP8/   vision: acquire T2 (optional; not yet downloaded)
+└── paddlex/                    T2b Paddle cache (only directory written by a container)
+```
+
+Rules that make this safe:
+
+* **No image downloads weights.** `infra/Dockerfile.ocr` installs Python + pdfium
+  and copies `server.py`; there is no `snapshot_download`. Rebuilding is cheap.
+* **No named volume holds weights.** `paddlecache` was removed 2026-11-16; the
+  Paddle cache is the host bind `$MODEL_DIR/paddlex`.
+* **Serving is given an absolute directory**, never a Hub id, so vLLM cannot fall
+  back to a network fetch. `scripts/serve_local.sh` / `serve_ocr.sh` refuse to
+  start when the directory is absent and name the prefetch command.
+* `scripts/fetch_model.sh` is the only downloader, run by a human on the host.
+
+**Container → host connectivity.** Linux Docker has no `host.docker.internal`;
+every client service declares
+`extra_hosts: ["host.docker.internal:host-gateway"]` (`api`, `worker`, `ocr`,
+`ocr-paddle`). The URL has one name per consumer: `FMD_LOCAL_LLM_URL` for the
+router (compose default `http://host.docker.internal:8000/v1`, host default
+`http://localhost:8000/v1`) and `FMD_OCR_VLLM_URL` for the adapter. Verify from
+inside the container, not from the host shell:
+
+```bash
+docker compose -f infra/docker-compose.yml exec api \
+  python -c "import urllib.request;print(urllib.request.urlopen('http://host.docker.internal:8000/v1/models',timeout=5).status)"
+# expect: 200
+```
+
+**`hard_pdf` choice (one line):** it is the *hosted fallback* (`api` provider,
+model = `FMD_API_MODEL`); local vision is the acquire T2 stage on :8001, not a
+router profile, so pairing provider `local` with an API model id was the
+2026-11-16 defect and is gone.
+
 ## 2. Text model — copy-paste
 
 ### 2.1 Install (once, ~60–90 min on a slow link; 8.9 GB of packages)
@@ -70,23 +121,15 @@ closest genuine AWQ conversion is `QuantTrio/Qwen3.5-9B-AWQ` (quant_method awq,
 `config/models.yaml` stays stable.
 
 ```bash
-# let vLLM fetch it, or pre-fetch to a local dir when the link is flaky:
-mkdir -p ~/models/Qwen3.5-9B-AWQ && cd ~/models/Qwen3.5-9B-AWQ
-for i in 1 2 3 4 5; do
-  curl -sSL -C - --retry 50 --retry-all-errors \
-    -o model-0000$i-of-00005.safetensors \
-    "https://huggingface.co/QuantTrio/Qwen3.5-9B-AWQ/resolve/main/model-0000$i-of-00005.safetensors" &
-done; wait
-# plus config.json tokenizer.json tokenizer_config.json preprocessor_config.json
-# merges.txt chat_template.jinja generation_config.json model.safetensors.index.json
+# one command, resumable, into the host weight root (never into an image):
+scripts/fetch_model.sh QuantTrio/Qwen3.5-9B-AWQ
+ls -l "$FMD_MODEL_DIR/Qwen3.5-9B-AWQ"   # expect 5 safetensors + configs
 ```
 
-Shards are 12.4 GB total (the repo keeps vision/linear-attention blocks
-unquantized). Then point the server at the directory:
-
-```bash
-FMD_VLLM_MODEL=~/models/Qwen3.5-9B-AWQ scripts/serve_local.sh start
-```
+`fetch_model.sh` compares each file against the Hub-reported size and resumes
+short ones with `curl -C -`; a complete directory is left alone. Do **not** point
+vLLM at the Hub id for day-to-day serving: a Hub id can silently fetch, a local
+directory cannot.
 
 A 3.2 GB genuine-AWQ alternative for smoke tests is `QuantTrio/Qwen3.5-2B-AWQ`
 (same architecture, same vendor) — useful while the 9B is still downloading.
@@ -186,64 +229,165 @@ FMD_EXTRACT_PROVIDER=mock
 not found`, not a schema error. `hard_pdf` reads `FMD_API_MODEL` directly
 (`FMD_HARD_PDF_MODEL` was removed 2026-11-16).
 
-## 3. OCR stage (T2 / T2b)
+## 3. OCR stage (T2 Qwen3-VL / T2b PaddleOCR-VL)
 
-### 3.1 Bring-up
+### 3.1 Why this engine
+
+Qwen3-VL-8B-Instruct is the T2 engine because it is the only local option with a
+published real-scan Devanagari number (**chrF++ 75.2**, arXiv:2606.29213, doc 10
+§4) *and* because vLLM, not Paddle, has kernels for this GPU:
+
+| Fact | Value | How measured (2026-11-16) |
+|---|---|---|
+| `sm_120` in `torch.cuda.get_arch_list()` | yes | one-liner in §2.1 on `~/.venvs/fmd-vllm` |
+| vLLM supports the Qwen3-VL architecture | yes — `Qwen3VLForConditionalGeneration` | `ModelRegistry.get_supported_archs()` |
+| PaddlePaddle GPU wheels | stop at `sm_90` | wheel metadata; runbook §4 row |
+
+Licences: Qwen3-VL **Apache-2.0**, PaddleOCR-VL **Apache-2.0**. Surya/Marker stay
+rejected (OpenRAIL-M, $5 M revenue cap).
+
+### 3.2 Weights (once; ~10.6 GB on the default)
+
+| Repo | Files on disk | Fits 16 GB? |
+|---|---:|---|
+| `Qwen/Qwen3-VL-8B-Instruct-FP8` (default) | 10.61 GB (5.36 + 5.23 shards) | yes, with an 8k context |
+| `unsloth/Qwen3-VL-8B-Instruct-bnb-4bit` (int4) | 7.24 GB (5.00 + 2.23) | yes, more KV headroom |
+| `Qwen/Qwen3-VL-8B-Instruct` (bf16) | 17.55 GB (4 shards) | **no** — do not start here |
+
+Sizes were read from the Hub API on 2026-11-16, not estimated. Weights are host
+data under `$FMD_MODEL_DIR` (default `/home/archit-gore/models`), never a docker
+volume and never a download at serve time. One command fetches them, resumably:
 
 ```bash
-scripts/serve_ocr.sh build     # docker compose --profile ocr build paddleocr
-scripts/serve_ocr.sh start     # up -d, waits up to 10 min for /health
-scripts/serve_ocr.sh status
-scripts/serve_ocr.sh logs
-scripts/serve_ocr.sh stop      # stop + rm (weights stay in the paddlecache volume)
+scripts/fetch_model.sh Qwen/Qwen3-VL-8B-Instruct-FP8   # ~10.6 GB, once
+ls -l "$FMD_MODEL_DIR/Qwen3-VL-8B-Instruct-FP8"       # expect 2 safetensors + configs
 ```
 
-Compose service `paddleocr` (profile `ocr`, so `make up` never starts it):
-`infra/Dockerfile.ocr` (CUDA 12.9 runtime base) + `infra/ocr/server.py` +
-`infra/ocr/requirements.txt` (paddlepaddle-gpu 2.6.2, paddleocr 3.7.0,
-pypdfium2, fastapi). First start downloads ~2 GB of weights into
-`paddlecache:/root/.paddlex`.
+`config/acquire.yaml:backends.T2.service.hub_id` holds the **directory name**
+under that root (`Qwen3-VL-8B-Instruct-FP8`), which is what
+`scripts/serve_ocr.sh vision-start` serves. Override with
+`FMD_VLLM_OCR_MODEL=/abs/path` for a one-off; do not edit the script. For the
+int4 alternative fetch `unsloth/Qwen3-VL-8B-Instruct-bnb-4bit` into the same root
+and override `FMD_VLLM_OCR_MODEL` (vLLM detects the bitsandbytes quantisation).
 
-### 3.2 Contract (must match `fmd/acquire/tiers.py::_ocr_doc`)
+### 3.3 Bring-up (copy-paste, no polling)
+
+```bash
+scripts/serve_ocr.sh vision-install   # only if ~/.venvs/fmd-vllm is missing
+scripts/serve_ocr.sh vision-start     # Qwen3-VL on 0.0.0.0:8001, pid/log in /tmp/opencode/fmd-serve
+curl -s localhost:8001/v1/models | python3 -m json.tool | head   # expect the served id
+scripts/serve_ocr.sh build            # compose --profile ocr build ocr (thin image, no CUDA)
+scripts/serve_ocr.sh start            # up -d + one /health, no wait loop
+curl -s localhost:8110/health
+```
+
+`/health` is `ok` only when the served name at 8001 equals
+`backends.T2.service.served_name`. Before the weights load it answers 200 with
+`{"status":"unavailable","reason":"vision_unavailable: vLLM is not answering ..."}`
+— that is the correct state, not something to wait out silently.
+
+How to stop:
+
+```bash
+scripts/serve_ocr.sh stop             # adapter container
+scripts/serve_ocr.sh vision-stop      # SIGTERM the vLLM process group
+```
+
+### 3.4 One real page
+
+```bash
+python infra/ocr/probe.py infra/ocr/fixtures/scan_sample.png
+```
+
+`infra/ocr/probe.py` posts the file to `POST /extract` (`--url` defaults to
+`$FMD_T2_URL`, else `http://localhost:8110`) and pretty-prints the block list; a
+PDF path works the same way. It prints the service's error body verbatim and
+exits non-zero, so an unavailable engine cannot look like a clean empty page.
+
+Then the pipeline-level check on a scanned PDF:
+
+```bash
+FMD_T2_URL=http://localhost:8110 uv run python -m fmd.cli extract --limit 2
+```
+
+### 3.5 Contract (must match `fmd/acquire/tiers.py::_ocr_doc`)
 
 `POST $FMD_T2_URL/extract` with `{"pdf_base64": "..."}` (or `"image_base64"`
 for a single page) →
 
 ```json
-{"tool":"paddleocr-vl","tool_version":"3.7.0","model":"PaddleOCR-VL-1.6",
- "pages":[{"page":1,"width":1654,"height":2339,"bbox":[0,0,1654,2339]}],
- "blocks":[{"page":1,"block_order":0,"block_bbox":[88,120,1560,210],
-            "block_content":"..."}]}
+{"tool":"fmd-ocr","engine":"qwen3vl","tool_version":null,"model":"Qwen3-VL-8B-Instruct",
+ "pages":[{"page":1,"width":600,"height":800,"bbox":[0,0,600,800],"blank":false}],
+ "blocks":[{"page":1,"block_order":0,"block_bbox":[48,150,560,180],
+            "block_content":"Total fee: INR 50000 per year"}]}
 ```
 
-Boxes are page-image pixels at `FMD_OCR_DPI` (default 200); `pages[].width/height`
-is the same image size, so a block box always resolves inside its page box.
+* Boxes are pixels in the **analysed** raster: pages are rendered at
+  `FMD_OCR_DPI` (200) and downscaled when the long side exceeds `max_side_px`
+  (2400), and `pages[].width/height` is that same raster, so a block box always
+  resolves inside its page box.
+* `block_order` is assigned by the service after sorting top-to-bottom then
+  left-to-right; it is monotonic per page.
+* A box the model returns that cannot be trusted is reported as
+  `block_bbox: null` rather than invented. T2 is deliberately outside
+  `bbox.gate_tiers`, so a null box cannot silently become a span downstream.
+* `blank: true` marks a page with no ink; that page legitimately has no blocks.
 
-### 3.3 When it cannot run
+### 3.6 When it cannot run (and why that is not a silent success)
 
-Unset `FMD_T2_URL` (the compose default inside the cluster is
-`http://paddleocr:8110`). Then T2 raises `TierUnavailable`:
+| `/health` reason | Meaning |
+|---|---|
+| `config_unreadable` | `config/acquire.yaml` missing or malformed at `FMD_OCR_CONFIG` / `/config/acquire.yaml` |
+| `backend_unknown` / `model_unset` | `backends.<tier>.service.backend` or `served_name` absent |
+| `vision_unavailable` | vLLM is not answering at `FMD_OCR_VLLM_URL` — start it, or pull the weights |
+| `model_not_served` | a model is up but not the configured one (e.g. the 9B text model on 8001) |
+| `engine_not_installed` / `engine_start_failed` | PaddleOCR-VL import/CUDA failure (CPU is the fix on sm_120) |
+
+`POST /extract` answers **503 with the same `vision_unavailable: ...` reason**
+when the engine is down, and **503 `empty_result: ...`** when a non-blank page
+produced no blocks. It never returns 200 with an empty block list for a page that
+had ink. Upstream, T2 raises `TierUnavailable`:
 
 * image-only page → "T0 also produced no text, so this document cannot be
   extracted on this host" → **no claims**, document queued for review;
 * page with usable T0 text → T0 fallback with a `T2 unavailable: ...` note.
 
-Neither path invents text. **The Paddle/Blackwell question was not settled on
-this host**: the image build did not complete within the session (multi-GB image
-pull on a ~1 MB/s link). PaddlePaddle's GPU wheels top out at sm_90, so
-`no kernel image is available for execution on the device` is the expected
-failure and must be recorded as such — not worked around by pretending OCR ran.
+**Measured limitation (2026-11-16).** `tiers._ocr_tier` formats an
+`httpx.HTTPStatusError`, which carries only status and URL, so the note reads
+`T2 unavailable: ... 503 Service Unavailable` and the `vision_unavailable` label
+stays in the response body and in `/health`. Putting the label into the note needs
+a one-line change in `_ocr_tier` (read the JSON `detail` when `status >= 400`); it
+is an acquire-workstream change, not a service change.
+
+### 3.7 T2b: PaddleOCR-VL, the retained alternative engine
+
+PaddleOCR-VL is not deleted; it is selected by config, not by editing code:
+
+```bash
+scripts/serve_ocr.sh paddle-start     # compose --profile ocr-paddle, port 8111
+curl -s localhost:8111/health         # engine: paddleocr, device: cpu
+export FMD_T2B_URL=http://localhost:8111   # the tier's env var (acquire.yaml)
+```
+
+Compose service `ocr-paddle` builds `infra/ocr/requirements.txt`
+(paddlepaddle-gpu 2.6.2, paddleocr 3.7.0) on a CUDA 12.9 base but runs with
+`FMD_OCR_DEVICE=cpu`, because Paddle's GPU kernels stop at sm_90. Expect **seconds
+per page**, not milliseconds. It is a second opinion for pages where Qwen3-VL
+fails the Indic self-check, not the bulk path. Selecting it for T2 instead is
+`FMD_OCR_BACKEND=paddleocr` on the `ocr` service.
 
 ## 4. Common failures
 
 | Symptom | Meaning | Action |
 |---|---|---|
-| `no kernel image is available for execution on the device` | wheel built for ≤ sm_90 (Paddle, or an old torch) | text model: use vLLM ≥ 0.19 (resolves cu130 torch, sm_120 present). OCR: no Paddle kernel for Blackwell; keep T2 unset and queue pages |
+| `no kernel image is available for execution on the device` | wheel built for ≤ sm_90 (Paddle, or an old torch) | text model: use vLLM ≥ 0.19 (resolves cu130 torch, sm_120 present). Paddle OCR: no Blackwell kernel — serve T2 with Qwen3-VL (§3.1) and run Paddle as T2b on CPU |
 | `CUDA out of memory` at startup | `--gpu-memory-utilization 0.90` + desktop compositor on 16 GB | drop to `0.80`, then lower `FMD_MAX_MODEL_LEN` to 16384; record the change, 32k is the cost model's assumption |
 | `xgrammar` grammar/architecture error | constrained decoding does not cover the Qwen3.5 hybrid architecture | set `providers.local.supports_guided_json: false`; the router then degrades to JSON-instruct + schema validation. Report the degraded schema-valid rate separately — it is a different candidate |
 | repetition loop in raw `curl` output | decoding, not acquisition | confirm `enable_thinking: false` in `--default-chat-template-kwargs`, temperature 0, no repetition penalty. The pipeline's own guard (`fmd/acquire/guards.py`) routes loops to T3 |
 | `404 model not found` | `FMD_EXTRACT_MODEL` ≠ `--served-model-name` | align both |
-| `T2 was selected but is unavailable` | OCR service down or `FMD_T2_URL` unset | expected degradation; do not fabricate OCR text |
+| `/health` says `model_not_served` | the vision port serves something else (usually the 9B text model) | start `scripts/serve_ocr.sh vision-start`; the vLLM on 8000 must not be reused for OCR |
+| `T2 was selected but is unavailable` | OCR service down, `FMD_T2_URL` unset, or weights absent | expected degradation: `/health` names the reason (`vision_unavailable`, `model_not_served`, …); do not fabricate OCR text |
+| `/extract` → 503 `empty_result` | a non-blank page produced zero blocks | the page is unreadable at these settings; route it to the human queue, do not lower the bar to "empty string is fine" |
 
 **Known guard false positive (found 2026-11-16).** Docling (T1) emits
 section-level blocks; `acquire.yaml:anomaly.block_length_multiplier = 3.0`
@@ -265,18 +409,47 @@ reported, not tuned away.
 | Decode tokens/s, 9B int4, 32k ctx | **unverified** — weights still downloading | — |
 | Guided JSON on Qwen3.5 + xgrammar | **unverified** — needs the served model | §2.4 probe |
 | Pages/hour | **unverified** — depends on the two rows above | `fmd extract` wall clock |
+| vLLM supports Qwen3-VL | yes — `Qwen3VLForConditionalGeneration` in `ModelRegistry.get_supported_archs()` | 2026-11-16, `~/.venvs/fmd-vllm` |
+| Qwen3-VL-8B weights on this host | **absent** (only the text models are cached) | `ls ~/models` |
+| OCR service with no weights | `/health` → `unavailable` + `vision_unavailable: ...`; `/extract` → 503 with the same reason | `uvicorn server:app` on :8199, `curl /health`, then the fixture through `/extract` |
+| OCR blocks/pages through Qwen3-VL | **unverified** — needs the 10.6 GB download | §3.4 over the committed fixture |
+| PaddleOCR-VL on GPU here | not attempted; wheels ≤ sm_90, CPU is the supported path | §3.7 |
 
-Do not copy the doc-10 §6 cost model's "8 pages/min" into a report until these
-three rows are filled; they are the same unverified assumption.
+Do not copy the doc-10 §6 cost model's "8 pages/min" into a report until the
+unverified rows above are filled; they are the same unverified assumption. The
+OCR rows have their own dependency: the 10.6 GB Qwen3-VL download.
 
-## 6. What to run next (in order)
+## 6. Run this (copy-paste, in order)
 
-1. `scripts/serve_local.sh install` (if the venv does not exist) and the §2.1
-   arch-list check.
-2. Finish the weights (`§2.2`), `scripts/serve_local.sh start`.
-3. `curl /v1/models` + the 32-token chat completion + the guided-JSON probe.
-4. `cd packages/pipeline && .venv/bin/python -m fmd.cli llm doctor --live`.
-5. `make migrate` (DB up), then `make extract ARGS="--limit 5"`.
-6. `python -m fmd.cli verify --limit 50` (second pass over the stored claims),
-   then re-read `claims` for verified/rejected/unverified.
-7. Only then start the OCR service (§3.1) and re-run the scanned documents.
+```bash
+# 0) once per boot: host text model (weights already on host; no download)
+scripts/serve_local.sh start
+curl -s localhost:8000/v1/models                      # expect id Qwen3.5-9B-AWQ
+
+# 1) stack (api waits for db); rebuilds never touch weights
+docker compose -f infra/docker-compose.yml up -d db api worker
+curl -s localhost:8000/api/health                     # expect status ok
+
+# 2) router health from INSIDE the container (proves host-gateway works)
+docker compose -f infra/docker-compose.yml exec api \
+  python -m fmd.cli llm doctor --live
+
+# 3) one bounded real extraction + verification
+docker compose -f infra/docker-compose.yml exec api \
+  python -m fmd.cli extract --limit 3
+docker compose -f infra/docker-compose.yml exec api \
+  python -m fmd.cli verify --limit 50
+
+# 4) score (versioned; needs the eval diff per AGENTS.md)
+docker compose -f infra/docker-compose.yml exec api python -m fmd.cli score
+
+# 5) stop (weights and DB survive; nothing is re-downloaded)
+docker compose -f infra/docker-compose.yml stop worker api
+scripts/serve_local.sh stop
+```
+
+Long steps (extraction over many documents, a first crawl) are the human's to
+run: hand them the command, do not add a wait loop. `scripts/serve_ocr.sh
+vision-start` is only needed for scanned pages and needs the optional 10.6 GB
+vision fetch first (§3.2); without it T2 degrades to the human queue and that is
+the honest state.

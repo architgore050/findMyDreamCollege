@@ -247,12 +247,14 @@ def test_every_profile_provider_and_model_are_env_switchable() -> None:
         "FMD_EXTRACT_PROVIDER": "anthropic",
         "FMD_EXTRACT_MODEL": "claude-test",
         "FMD_HARD_PDF_PROVIDER": "gemini",
-        "FMD_HARD_PDF_MODEL": "gemini-test",
+        # `hard_pdf` reads the shared FMD_API_MODEL: FMD_HARD_PDF_MODEL was
+        # removed on 2026-11-16 (docs/.../10-...md §8).
+        "FMD_API_MODEL": "gemini-test",
         "FMD_ADJUDICATE_PROVIDER": "api",
         "FMD_ADJUDICATE_MODEL": "gpt-test",
         "FMD_ENTITY_ADJUDICATE_MODEL": "entity-test",
         "FMD_NLP_MODEL": "nlp-test",
-        "FMD_OCR_MODEL": "ocr-test",
+        "FMD_VERIFY_MODEL": "verify-test",
         "FMD_EMBED_MODEL": "embed-test",
         "FMD_EMBED_PROVIDER": "mock",
     }
@@ -265,9 +267,12 @@ def test_every_profile_provider_and_model_are_env_switchable() -> None:
     assert models.profiles["adjudicate"].model == "gpt-test"
     assert models.profiles["entity_adjudication"].model == "entity-test"
     assert models.profiles["nlp_rubric"].model == "nlp-test"
-    assert models.profiles["ocr_vlm"].model == "ocr-test"
+    assert models.profiles["verify"].model == "verify-test"
     assert models.profiles["embed"].provider == "mock"
     assert models.profiles["embed"].model == "embed-test"
+    # OCR is an acquisition stage, not a router profile: `ocr_vlm` was retired on
+    # 2026-11-16 and must not come back as a doctor-visible capability.
+    assert "ocr_vlm" not in models.profiles
 
 
 def _diagnostic_models() -> ModelsConfig:

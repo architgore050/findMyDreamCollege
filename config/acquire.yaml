@@ -96,7 +96,13 @@ backends:
       backend: qwen3vl
       # vLLM on the host, OpenAI-compatible. `scripts/serve_ocr.sh vision-start`
       # serves exactly this pair. Served name must match --served-model-name.
-      hub_id: Qwen/Qwen3-VL-8B-Instruct-FP8
+      #
+      # hub_id is a DIRECTORY NAME under the host weight root
+      # ($FMD_MODEL_DIR, default /home/archit-gore/models), never a Hub id: the
+      # weights are host data mounted read-only, and serving must not download.
+      # Prefetch once with `scripts/fetch_model.sh Qwen/Qwen3-VL-8B-Instruct-FP8`.
+      # Override the path itself with FMD_VLLM_OCR_MODEL (absolute or a name).
+      hub_id: Qwen3-VL-8B-Instruct-FP8
       served_name: Qwen3-VL-8B-Instruct
       vllm_url: http://host.docker.internal:8001/v1
       # 10.6 GB of FP8 weights; fits 16 GB with an 8k context. The int4

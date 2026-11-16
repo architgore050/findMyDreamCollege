@@ -3,6 +3,17 @@ name: findmydreamcollege
 # Everything is overridable from a `.env` file, but none is required:
 #   cp .env.example .env    # optional; defaults below match .env.example
 # Credentials here are local-development defaults, not secrets. Never commit .env.
+#
+# Models are never baked into an image and never live in a named volume. The
+# host directory ${MODEL_DIR:-/home/archit-gore/models} holds every weight set;
+# containers that need weights mount it read-only at /models. Serving (vLLM for
+# text and vision, the OCR adapter) is a host process, so a container rebuild can
+# never trigger a re-download.
+#
+# On Linux `host.docker.internal` does not exist unless a service declares it;
+# every container that calls the host vLLM (port 8000/8001) therefore carries
+# `extra_hosts: ["host.docker.internal:host-gateway"]`. The URL itself has one
+# name: FMD_LOCAL_LLM_URL (router) / FMD_OCR_VLLM_URL (OCR adapter).
 
 services:
   db:
@@ -32,27 +43,85 @@ services:
       - ./searxng:/etc/searxng:rw
     restart: unless-stopped
 
-  # OCR stage (T2). Not a model-router profile any more: acquisition calls it over
-  # HTTP at $FMD_T2_URL/extract and gets block-level boxes back. Behind a profile
-  # because the Paddle GPU stack does not cover sm_120 (Blackwell); the tier is
-  # optional and degrades to TierUnavailable + human queue when it is down.
-  paddleocr:
+  # OCR stage (T2). Not a model-router profile: acquisition calls it over HTTP at
+  # $FMD_T2_URL/extract and gets block-level boxes back. This container is the
+  # thin adapter; the vision weights are served by vLLM on the host
+  # (`scripts/serve_ocr.sh vision-start`, port 8001) because that is where the
+  # sm_120 (Blackwell) kernels are. Behind a profile so `make up` never starts it,
+  # and the tier degrades to TierUnavailable + human queue when it is down.
+  ocr:
     profiles: ["ocr"]
     build:
       context: ..
       dockerfile: infra/Dockerfile.ocr
       args:
+        OCR_REQUIREMENTS: requirements-vision.txt
         VCS_REF: ${VCS_REF:-unknown}
     image: findmydreamcollege/ocr:${FMD_IMAGE_TAG:-local}
     environment:
-      FMD_OCR_MODEL: ${FMD_OCR_MODEL:-PaddleOCR-VL-1.6}
+      FMD_OCR_CONFIG: /config/acquire.yaml
+      FMD_OCR_TIER: ${FMD_OCR_TIER:-T2}
+      # Empty means "use backends.T2.service from config/acquire.yaml".
+      FMD_OCR_BACKEND: ${FMD_OCR_BACKEND:-}
+      # The vLLM vision process runs on the host; reach it by name, not by IP.
+      FMD_OCR_VLLM_URL: ${FMD_OCR_VLLM_URL:-http://host.docker.internal:8001/v1}
+      # Weights are host data, mounted read-only. This container is a client of
+      # vLLM, not a loader, so it never copies or downloads a model.
+      FMD_MODEL_DIR: /models
       FMD_OCR_DPI: ${FMD_OCR_DPI:-200}
-      FMD_OCR_DEVICE: ${FMD_OCR_DEVICE:-gpu:0}
       FMD_OCR_MAX_PAGES: ${FMD_OCR_MAX_PAGES:-40}
+      FMD_OCR_MAX_SIDE_PX: ${FMD_OCR_MAX_SIDE_PX:-2400}
+    extra_hosts: ["host.docker.internal:host-gateway"]
     ports: ["${FMD_T2_PORT:-8110}:8110"]
-    # The model is downloaded on first start (~2 GB) into the paddle cache.
     volumes:
-      - paddlecache:/root/.paddlex
+      - ../config:/config:ro
+      - ${MODEL_DIR:-/home/archit-gore/models}:/models:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,urllib.request,sys; d=json.load(urllib.request.urlopen('http://127.0.0.1:8110/health', timeout=5)); sys.exit(0 if d.get('status')=='ok' else 1)",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  # T2b: PaddleOCR-VL, the alternative engine. GPU wheels stop at sm_90, so this
+  # runs on CPU on an sm_120 host: correct, slow, and never faked. Port 8111,
+  # FMD_T2B_URL. Enable only when you actually need the second opinion.
+  ocr-paddle:
+    profiles: ["ocr-paddle"]
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.ocr
+      args:
+        OCR_BASE_IMAGE: nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04
+        OCR_REQUIREMENTS: requirements.txt
+        OCR_APT_PACKAGES: libgl1 libglib2.0-0 libgomp1
+        OCR_NEEDS_VENV_PACKAGES: "1"
+        VCS_REF: ${VCS_REF:-unknown}
+    image: findmydreamcollege/ocr-paddle:${FMD_IMAGE_TAG:-local}
+    environment:
+      FMD_OCR_CONFIG: /config/acquire.yaml
+      FMD_OCR_TIER: T2b
+      FMD_OCR_DEVICE: cpu
+      FMD_OCR_DPI: ${FMD_OCR_DPI:-200}
+      FMD_OCR_MAX_PAGES: ${FMD_OCR_MAX_PAGES:-40}
+      # Weights live on the host, not in a docker volume: a rebuild or a volume
+      # prune must never re-download 2 GB. Paddle caches its weights here.
+      FMD_MODEL_DIR: /models
+      PADDLE_PDX_CACHE_HOME: /models/paddlex
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["${FMD_T2B_PORT:-8111}:8110"]
+    volumes:
+      - ../config:/config:ro
+      - ${MODEL_DIR:-/home/archit-gore/models}:/models:ro
+      # Paddle writes a cache on first start; only this subdirectory is writable.
+      - ${MODEL_DIR:-/home/archit-gore/models}/paddlex:/models/paddlex
     healthcheck:
       test:
         [
@@ -65,13 +134,6 @@ services:
       timeout: 10s
       retries: 20
       start_period: 120s
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     restart: unless-stopped
 
   api:
@@ -92,12 +154,18 @@ services:
       FMD_SNAPSHOT_DIR: /data/snapshots
       # Opt-in: `make seed` is the explicit path; set to 1 for auto-seed on boot.
       FMD_AUTO_SEED: ${FMD_AUTO_SEED:-0}
-      # OCR tier endpoints (T2 PaddleOCR-VL, T2b Qwen3-VL shim). Empty T2B means
-      # "not deployed": the tier raises TierUnavailable and the document goes to
-      # the human queue instead of producing claims from a guess.
-      FMD_T2_URL: ${FMD_T2_URL_COMPOSE:-http://paddleocr:8110}
+      # OCR tier endpoints (T2 Qwen3-VL service, T2b PaddleOCR-VL shim). Empty
+      # T2B means "not deployed": the tier raises TierUnavailable and the document
+      # goes to the human queue instead of producing claims from a guess.
+      FMD_T2_URL: ${FMD_T2_URL_COMPOSE:-http://ocr:8110}
       FMD_T2B_URL: ${FMD_T2B_URL:-}
+      # One name for the host text model. The Linux default works because of
+      # extra_hosts below; on the host itself use http://localhost:8000/v1.
+      FMD_LOCAL_LLM_URL: ${FMD_LOCAL_LLM_URL:-http://host.docker.internal:8000/v1}
     ports: ["${API_PORT:-8000}:8000"]
+    # Linux has no built-in host.docker.internal. This alias (Docker >= 20.10)
+    # is what makes the host vLLM reachable from any container without an IP.
+    extra_hosts: ["host.docker.internal:host-gateway"]
     # Docker copies the host's resolv.conf; on hosts using systemd-resolved the
     # 127.0.0.53 stub is unreachable from the container and every fetch fails
     # with "Temporary failure in name resolution". Override per host if needed.
@@ -143,8 +211,10 @@ services:
       FMD_MIGRATIONS_DIR: /db/migrations
       FMD_SNAPSHOT_DIR: /data/snapshots
       FMD_AUTO_SEED: "0"
-      FMD_T2_URL: ${FMD_T2_URL_COMPOSE:-http://paddleocr:8110}
+      FMD_T2_URL: ${FMD_T2_URL_COMPOSE:-http://ocr:8110}
       FMD_T2B_URL: ${FMD_T2B_URL:-}
+      FMD_LOCAL_LLM_URL: ${FMD_LOCAL_LLM_URL:-http://host.docker.internal:8000/v1}
+    extra_hosts: ["host.docker.internal:host-gateway"]
     dns: ["${FMD_DNS_1:-1.1.1.1}", "${FMD_DNS_2:-8.8.8.8}"]
     volumes:
       - ../packages/pipeline:/app
@@ -175,4 +245,3 @@ services:
 volumes:
   dbdata:
   snapshots:
-  paddlecache:

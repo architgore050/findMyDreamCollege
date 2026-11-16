@@ -291,8 +291,12 @@ def test_models_config_defaults_and_every_profile_is_env_overridable() -> None:
     assert defaults.profiles["bulk_extract"].quantization == "int4"
     assert defaults.profiles["bulk_extract"].thinking is False
     assert defaults.profiles["bulk_extract"].guided_json is True
-    assert defaults.profiles["ocr_vlm"].model == "Qwen3-VL-8B-Instruct"
-    assert defaults.profiles["hard_pdf"].model is None
+    # OCR has no router profile: the `ocr_vlm` profile was retired 2026-11-16 and
+    # OCR now lives in config/acquire.yaml (T2/T2b backends, an HTTP stage).
+    assert "ocr_vlm" not in defaults.profiles
+    # Unset FMD_API_MODEL interpolates to "" (not None): the optional hard-PDF
+    # profile is simply unconfigured and degrades per document.
+    assert not defaults.profiles["hard_pdf"].model
     assert defaults.profiles["adjudicate"].provider == "gemini"
     assert defaults.profiles["adjudicate"].model == "gemini-2.5-flash"
     assert defaults.profiles["nlp_rubric"].model == "gemini-2.5-flash"
@@ -307,8 +311,6 @@ def test_models_config_defaults_and_every_profile_is_env_overridable() -> None:
     env = {
         "FMD_EXTRACT_PROVIDER": "api",
         "FMD_EXTRACT_MODEL": "custom-bulk",
-        "FMD_OCR_PROVIDER": "api",
-        "FMD_OCR_MODEL": "custom-ocr",
         "FMD_ADJUDICATE_PROVIDER": "anthropic",
         "FMD_ADJUDICATE_MODEL": "custom-adjudicate",
         "FMD_NLP_PROVIDER": "api",
@@ -317,11 +319,10 @@ def test_models_config_defaults_and_every_profile_is_env_overridable() -> None:
     overridden = ModelsConfig.model_validate(interpolate_env(raw, env))
     assert overridden.profiles["bulk_extract"].provider == "api"
     assert overridden.profiles["bulk_extract"].model == "custom-bulk"
-    assert overridden.profiles["ocr_vlm"].provider == "api"
-    assert overridden.profiles["ocr_vlm"].model == "custom-ocr"
     assert overridden.profiles["adjudicate"].provider == "anthropic"
     assert overridden.profiles["adjudicate"].model == "custom-adjudicate"
     assert overridden.profiles["nlp_rubric"].model == "custom-nlp"
+    assert set(overridden.profiles) == set(defaults.profiles)
 
 
 def test_doctor_never_prints_secret_values() -> None:

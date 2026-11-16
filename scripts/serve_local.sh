@@ -13,20 +13,23 @@
 #   scripts/serve_local.sh fg        # foreground (Ctrl-C to stop)
 #
 # Environment (all optional):
+#   FMD_MODEL_DIR   host weight root          (default /home/archit-gore/models)
 #   FMD_VLLM_VENV   venv path                 (default ~/.venvs/fmd-vllm)
-#   FMD_VLLM_MODEL  hub repo or local path    (default QuantTrio/Qwen3.5-9B-AWQ)
+#   FMD_VLLM_MODEL  local dir or hub repo     (default $FMD_MODEL_DIR/Qwen3.5-9B-AWQ)
 #   FMD_SERVED_NAME OpenAI model id           (default Qwen3.5-9B-AWQ)
 #   FMD_VLLM_PORT   port                      (default 8000)
 #   FMD_MAX_MODEL_LEN context                 (default 32768)
 #   FMD_VLLM_GPU_MEM_UTIL                     (default 0.90)
 #
-# The served name must match `config/models.yaml:profiles.bulk_extract.model`,
-# otherwise every router call 404s with "model not found".
+# Weights are host data: they live under FMD_MODEL_DIR and are never downloaded
+# by an image build or a docker volume. Passing the local directory (not the Hub
+# id) is what guarantees a restart cannot trigger a re-download.
 
 set -euo pipefail
 
+MODEL_DIR="${FMD_MODEL_DIR:-/home/archit-gore/models}"
 VENV="${FMD_VLLM_VENV:-$HOME/.venvs/fmd-vllm}"
-MODEL="${FMD_VLLM_MODEL:-QuantTrio/Qwen3.5-9B-AWQ}"
+MODEL="${FMD_VLLM_MODEL:-$MODEL_DIR/Qwen3.5-9B-AWQ}"
 SERVED="${FMD_SERVED_NAME:-Qwen3.5-9B-AWQ}"
 PORT="${FMD_VLLM_PORT:-8000}"
 MAX_LEN="${FMD_MAX_MODEL_LEN:-32768}"
@@ -49,6 +52,14 @@ cmd_install() {
 
 cmd_serve() {
   [ -x "$VENV/bin/vllm" ] || { echo "no vLLM in $VENV — run: $0 install" >&2; exit 1; }
+  # A missing local path would make vLLM fall back to a network fetch. Refuse
+  # instead: weights are host data, and this script never downloads.
+  if [ ! -d "$MODEL" ]; then
+    echo "no weights at $MODEL" >&2
+    echo "prefetch once: scripts/fetch_model.sh QuantTrio/Qwen3.5-9B-AWQ" >&2
+    echo "or point FMD_VLLM_MODEL at an existing directory" >&2
+    exit 1
+  fi
   # Thinking is disabled in the served chat template, not in the client: the
   # router does not forward `thinking: false` yet (config/models.yaml comment).
   # `--default-chat-template-kwargs` is the vLLM 0.33 spelling; `--chat-template-kwargs`
@@ -66,6 +77,10 @@ cmd_start() {
   if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     echo "already running: pid $(cat "$PID_FILE")"; exit 0
   fi
+  [ -d "$MODEL" ] || {
+    echo "no weights at $MODEL — prefetch once: scripts/fetch_model.sh QuantTrio/Qwen3.5-9B-AWQ" >&2
+    exit 1
+  }
   echo "serving $MODEL as '$SERVED' on 0.0.0.0:$PORT (ctx $MAX_LEN)"
   echo "log: $LOG_FILE"
   setsid nohup bash -c "$(printf '%q ' "$0" fg)" >>"$LOG_FILE" 2>&1 &

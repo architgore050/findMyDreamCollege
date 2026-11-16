@@ -7,7 +7,12 @@
 
 providers:
   local:
-    base_url: ${FMD_LOCAL_LLM_URL:-http://host.docker.internal:8000/v1}
+    # Single knob for the host vLLM. On the host the default is localhost; inside
+    # compose, infra/docker-compose.yml sets the same variable to
+    # http://host.docker.internal:8000/v1 and defines that alias via
+    # `extra_hosts: ["host.docker.internal:host-gateway"]` (Linux has no such
+    # name out of the box). Never put a container-only hostname here as default.
+    base_url: ${FMD_LOCAL_LLM_URL:-http://localhost:8000/v1}
     api_key: ${FMD_LOCAL_LLM_KEY:-not-needed}
     kind: openai_compatible
     base_url_env: FMD_LOCAL_LLM_URL
@@ -80,13 +85,21 @@ profiles:
     required: true             # text PDFs cannot be extracted without this
   hard_pdf:
     # evidence: hosted escalation on local failure
-    # `hard_pdf` is the only profile that defaults to the `api` provider, so it
-    # reads the shared FMD_API_MODEL directly. One variable sets the hosted
-    # fallback for every api-provider profile; FMD_HARD_PDF_MODEL is gone.
+    # CHOICE (2026-11-16): hosted fallback, not local vision. The API provider is
+    # the only one that can serve a vision-capable id on this host without a new
+    # multigigabyte download, and local vision is already a first-class *stage*
+    # (config/acquire.yaml T2, Qwen3-VL-8B on :8001) rather than a router profile.
+    # Pairing `local` with an API model id (the old .env) was the defect: a local
+    # provider must name a model that vLLM actually serves on :8000.
+    # `hard_pdf` is thus the only profile that defaults to `api`; it reads the
+    # shared FMD_API_MODEL directly — one variable for the hosted fallback.
     # Unset => model is None => this optional profile degrades per document with
     # `vision_unavailable`; text PDFs still extract.
     provider: ${FMD_HARD_PDF_PROVIDER:-api}
-    model: ${FMD_API_MODEL:-}
+    # No `:-` default: an unset FMD_API_MODEL must interpolate to None, which is
+    # what "unset => degrades per document" means. `:-` would yield "" and make
+    # the doctor report an empty model instead of an unresolved one.
+    model: ${FMD_API_MODEL}
     provider_env: FMD_HARD_PDF_PROVIDER
     model_env: FMD_API_MODEL
     model_example: gemini-2.5-flash

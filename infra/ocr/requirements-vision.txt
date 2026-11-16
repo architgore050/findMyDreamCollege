@@ -1,0 +1,12 @@
+# OCR service dependencies — vision backend (Qwen3-VL through vLLM).
+#
+# Deliberately torch-free: the model runs in the vLLM process on the host
+# (`scripts/serve_ocr.sh vision-start`), so this container is only an HTTP
+# adapter plus PDF rasterisation. That keeps the image small and means the
+# sm_120 question is answered once, in vLLM, where CUDA wheels exist.
+pypdfium2==5.15.2
+pillow==13.0.0
+fastapi==0.163.1
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+PyYAML==6.0.3

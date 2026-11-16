@@ -302,6 +302,26 @@ class MemoryClaims:
     def list_for_entity(self, entity_id: int, **_: Any) -> list[ClaimRecord]:
         return [row for row in self.rows if row.entity_id == entity_id]
 
+    def list_unverified(self, limit: int = 500) -> list[ClaimRecord]:
+        pending = [row for row in self.rows if row.verification_status == "unverified"]
+        return sorted(pending, key=lambda row: row.id)[:limit]
+
+    def record_verification(self, claim_id: int, verification: Any) -> ClaimRecord:
+        for index, row in enumerate(self.rows):
+            if row.id != claim_id:
+                continue
+            updated = row.model_copy(
+                update={
+                    "verification_status": verification.status,
+                    "verified_by": verification.verified_by,
+                    "verified_at": verification.verified_at,
+                    "verification_notes": verification.notes,
+                }
+            )
+            self.rows[index] = updated
+            return updated
+        raise ValueError(f"claim {claim_id} does not exist")
+
 
 class MemoryEntities:
     def __init__(self, rows: Iterable[EntityRecord] | None = None) -> None:
