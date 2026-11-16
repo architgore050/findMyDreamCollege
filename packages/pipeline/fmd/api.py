@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -19,6 +21,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from fmd import __version__
 from fmd.config import ConfigError, Registry, get_registry
@@ -32,6 +35,7 @@ from fmd.db.repositories import (
     ProgrammesRepo,
     ScoresRepo,
 )
+from fmd.score.config import ScoringConfig
 from fmd.settings import get_settings
 
 EMPTY_CLAIMS_HASH = hashlib.sha256(b"").hexdigest()
@@ -47,18 +51,25 @@ def _registry() -> Registry | None:
         return None
 
 
-def _meta(claims_hash: str | None = None) -> dict[str, Any]:
+def _meta(
+    claims_hash: str | None = None, weights_version: str | None = None
+) -> dict[str, Any]:
     registry = _registry()
     return {
         "scorer_version": registry.scorer_version if registry else "unknown",
-        "weights_version": registry.weights_version if registry else "unknown",
+        "weights_version": weights_version
+        or (registry.weights_version if registry else "unknown"),
         "claims_hash": claims_hash or EMPTY_CLAIMS_HASH,
         "generated_at": datetime.now(UTC).isoformat(),
     }
 
 
-def _envelope(payload: dict[str, Any], claims_hash: str | None = None) -> dict[str, Any]:
-    return {**payload, **_meta(claims_hash)}
+def _envelope(
+    payload: dict[str, Any],
+    claims_hash: str | None = None,
+    weights_version: str | None = None,
+) -> dict[str, Any]:
+    return {**payload, **_meta(claims_hash, weights_version)}
 
 
 def _claims_hash(claims: list[Any]) -> str:
@@ -359,7 +370,595 @@ def programme_evidence(
     )
 
 
-# --------------------------------------------------------------------------- other workstreams
+# --------------------------------------------------------------------------- WS-F engine
+#
+# Profiles arrive in the request body (the browser keeps them in localStorage)
+# and are never persisted server-side. Weight overrides are validated here and
+# never written back to config.
+
+
+class RankingsRequest(BaseModel):
+    profile: dict[str, Any]
+    weights: dict[str, float] | None = None
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class ProfileRequest(BaseModel):
+    profile: dict[str, Any]
+    limit: int = Field(default=200, ge=1, le=500)
+
+
+class WeightOverrideError(ValueError):
+    pass
+
+
+def _resolved_scoring(
+    registry: Registry, override: Mapping[str, float] | None
+) -> tuple[ScoringConfig, str]:
+    config = ScoringConfig.from_config(registry.weights)
+    problems = config.validate()
+    if problems:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "config_invalid", "message": "; ".join(problems)},
+        )
+    if not override:
+        return config, config.weights_version
+
+    try:
+        normalized = {str(key): float(value) for key, value in override.items()}
+    except (TypeError, ValueError) as exc:
+        raise WeightOverrideError(f"weights must be numbers: {exc}") from exc
+    unknown = sorted(set(normalized) - set(config.weights))
+    if unknown:
+        raise WeightOverrideError(
+            "unknown sub-score weights: " + ", ".join(unknown)
+        )
+    missing = sorted(set(config.weights) - set(normalized))
+    if missing:
+        raise WeightOverrideError(
+            "weight override must cover every sub-score; missing: " + ", ".join(missing)
+        )
+    total = sum(normalized.values())
+    if any(value < 0 for value in normalized.values()):
+        raise WeightOverrideError("weight overrides must be non-negative")
+    if abs(total - 100.0) > 1e-6:
+        raise WeightOverrideError(f"weight overrides sum to {total:g}, expected 100")
+
+    from dataclasses import replace
+
+    digest = hashlib.sha256(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:12]
+    version = f"{config.weights_version}+override.{digest}"
+    return replace(config, weights=normalized, weights_version=version), version
+
+
+def _programme_view(programme: Any, claims: Sequence[Any]) -> dict[str, Any]:
+    payload = _programme_json(programme)
+    payload["claims"] = claims
+    return payload
+
+
+def _claim_number(claims: Sequence[Any], *predicates: str) -> float | None:
+    from fmd.score.evidence import ClaimIndex
+
+    index = ClaimIndex.build(claims)
+    for predicate in predicates:
+        value = index.number(predicate)
+        if value is not None:
+            return value
+    return None
+
+
+def _cost_snapshot(
+    database: Database,
+    registry: Registry,
+    programme: Any,
+    claims: Sequence[Any],
+    *,
+    living: str,
+    profile: Mapping[str, Any] | None = None,
+) -> Any | None:
+    """Build a cost snapshot from stored cost items; ``None`` when unmodellable."""
+
+    from fmd.cost import (
+        CostInputs,
+        CostItem,
+        CostModelError,
+        CostRules,
+        compute,
+        loan_terms_from_config,
+        student_work_from_config,
+    )
+
+    records = CostItemsRepo(database).list_for_programme(programme.id)
+    if not records:
+        return None
+    items = [
+        CostItem(
+            category=record.category,
+            label=record.label,
+            amount=float(record.amount),
+            currency=record.currency,
+            period=record.period,
+            method="extracted",
+            confidence=float(record.confidence if record.confidence is not None else 1.0),
+            basis=record.basis,
+            source_claim_id=record.source_claim_id,
+        )
+        for record in records
+    ]
+    try:
+        rules = CostRules.from_config(registry.cost_rules)
+    except CostModelError:
+        return None
+
+    institution = EntitiesRepo(database).get(programme.institution_id)
+    loan = loan_terms_from_config(registry.cost_rules)
+    rate = _claim_number(claims, "loan_interest_rate", "loan_rate", "annual_loan_rate")
+    if rate is not None:
+        if rate > 1.0:
+            rate = rate / 100.0
+        loan = loan.model_copy(
+            update={"annual_rate": rate, "assumed_rate": False, "rate_source": "claim"}
+        )
+
+    profile = profile or {}
+    budget = profile.get("budget") if isinstance(profile.get("budget"), Mapping) else {}
+    family_income = profile.get("family_income_annual")
+    if family_income is None and budget:
+        family_income = budget.get("annual_family_income")
+
+    kwargs: dict[str, Any] = {
+        "items": items,
+        "living": living,
+        "loan": loan,
+        "p25_first_year_salary": _claim_number(claims, "p25_first_year_salary"),
+        "family_income_annual": family_income,
+    }
+    if programme.duration_months:
+        kwargs["duration_months"] = programme.duration_months
+    if institution is not None and institution.country:
+        with suppress(CostModelError):
+            kwargs["student_work"] = student_work_from_config(
+                registry.cost_rules, institution.country
+            )
+    try:
+        return compute(CostInputs(**kwargs), rules)
+    except (CostModelError, ValueError):
+        return None
+
+
+def _score_row(
+    database: Database,
+    registry: Registry,
+    config: ScoringConfig,
+    programme: Any,
+    claims: Sequence[Any],
+    profile: Mapping[str, Any],
+) -> dict[str, Any]:
+    from fmd.filters import evaluate_all
+    from fmd.score import score_programme
+
+    view = _programme_view(programme, claims)
+    summary = evaluate_all(view, profile)
+    cost = _cost_snapshot(database, registry, programme, claims, living="hostel", profile=profile)
+    result = score_programme(
+        programme.id,
+        view,
+        profile,
+        claims,
+        config=config,
+        cost=cost,
+        cost_rules=registry.cost_rules,
+        filter_decisions=list(summary.decisions.values()),
+    )
+    composite = result.composite.as_dict()
+    return {
+        "programme": _programme_json(programme),
+        "score": result.as_dict(),
+        "composite_band": {
+            "point": composite["point"],
+            "lo": composite["lo"],
+            "hi": composite["hi"],
+            "method": "weighted_composite",
+            "bound": composite["bound"],
+        },
+        "evidence_tier": result.evidence_tier,
+        "filters": summary.as_dict(),
+        "excluded": bool(summary.excluded),
+        "insights": None if result.insights is None else result.insights.as_dict(),
+        "cost": None if cost is None else cost.render(),
+    }
+
+
+def _all_programmes(database: Database, limit: int) -> list[Any]:
+    return ProgrammesRepo(database).list(ProgrammeFilter(limit=limit, offset=0))
+
+
+def _claims_for(database: Database, programme: Any) -> list[Any]:
+    return ClaimsRepo(database).list_for_entity(programme.institution_id)
+
+
+def _sorted_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def key(row: dict[str, Any]) -> tuple[int, float, float]:
+        point = row["composite_band"]["point"]
+        return (
+            1 if row["excluded"] else 0,
+            -(point if point is not None else -1.0),
+            -row["composite_band"]["hi"],
+        )
+
+    return sorted(rows, key=key)
+
+
+@app.post("/api/rankings")
+def rankings(
+    request: RankingsRequest,
+    database: DatabaseDep,
+) -> dict[str, Any]:
+    registry = _registry()
+    if registry is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "config_invalid", "message": "config registry failed to load"},
+        )
+    try:
+        config, version = _resolved_scoring(registry, request.weights)
+    except WeightOverrideError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_weights", "message": str(exc)},
+        ) from exc
+
+    programmes = _all_programmes(database, request.limit)
+    rows: list[dict[str, Any]] = []
+    all_claims: list[Any] = []
+    for programme in programmes:
+        claims = _claims_for(database, programme)
+        all_claims.extend(claims)
+        rows.append(_score_row(database, registry, config, programme, claims, request.profile))
+
+    return _envelope(
+        {
+            "items": _sorted_rows(rows),
+            "total": len(rows),
+            "weights": dict(config.weights),
+            "profile_persisted": False,
+        },
+        claims_hash=_claims_hash(all_claims),
+        weights_version=version,
+    )
+
+
+@app.get("/api/programmes/{programme_id}/cost")
+def programme_cost(
+    programme_id: int,
+    database: DatabaseDep,
+    living: str = Query(default="hostel"),
+) -> dict[str, Any]:
+    if living not in {"hostel", "independent"}:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_living_scenario",
+                "message": "living must be 'hostel' or 'independent'",
+            },
+        )
+    programme = ProgrammesRepo(database).get(programme_id)
+    if programme is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": f"programme {programme_id} not found"},
+        )
+    registry = _registry()
+    if registry is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "config_invalid", "message": "config registry failed to load"},
+        )
+    claims = _claims_for(database, programme)
+    snapshot = _cost_snapshot(
+        database, registry, programme, claims, living=living, profile={}
+    )
+    if snapshot is None:
+        return _envelope(
+            {
+                "programme_id": programme_id,
+                "living": living,
+                "available": False,
+                "reason": "no complete cost evidence; refusing to model a TCOA from nothing",
+                "scenarios": {},
+            },
+            claims_hash=_claims_hash(claims),
+        )
+    payload = snapshot.render()
+    payload.update(
+        {
+            "programme_id": programme_id,
+            "living": living,
+            "available": True,
+            "non_additive_scenarios": True,
+            "note": "hostel and independent are complete alternatives; never sum them",
+            "assumed": snapshot.assumptions_flags,
+        }
+    )
+    return _envelope(payload, claims_hash=_claims_hash(claims))
+
+
+@app.get("/api/compare")
+def compare_programmes(
+    database: DatabaseDep,
+    ids: str = Query(..., description="comma-separated programme ids"),
+) -> dict[str, Any]:
+    from fmd.score.aggregate import compare, pareto_matrix
+
+    try:
+        requested = [int(item) for item in ids.split(",") if item.strip()]
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_ids", "message": "ids must be comma-separated integers"},
+        ) from exc
+    requested = list(dict.fromkeys(requested))
+    if len(requested) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_ids", "message": "at least two programme ids are required"},
+        )
+    registry = _registry()
+    if registry is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "config_invalid", "message": "config registry failed to load"},
+        )
+    config, version = _resolved_scoring(registry, None)
+    repo = ProgrammesRepo(database)
+    rows: dict[str, dict[str, Any]] = {}
+    programmes: dict[str, Any] = {}
+    all_claims: list[Any] = []
+    for programme_id in requested:
+        programme = repo.get(programme_id)
+        if programme is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "not_found", "message": f"programme {programme_id} not found"},
+            )
+        claims = _claims_for(database, programme)
+        all_claims.extend(claims)
+        view = _programme_view(programme, claims)
+        from fmd.score import score_programme
+
+        result = score_programme(
+            programme.id, view, {}, claims, config=config, cost_rules=registry.cost_rules
+        )
+        programmes[str(programme_id)] = programme
+        rows[str(programme_id)] = {
+            key: value.as_dict() for key, value in result.sub_scores.items()
+        }
+
+    matrix = pareto_matrix(rows)
+    comparisons: dict[str, Any] = {}
+    for left in sorted(rows):
+        for right in sorted(rows):
+            if left >= right:
+                continue
+            verdict = compare(rows[left], rows[right])
+            differing = [
+                dimension
+                for dimension in rows[left]
+                if rows[left][dimension]["point"] is not None
+                and rows[right][dimension]["point"] is not None
+                and rows[left][dimension]["point"] != rows[right][dimension]["point"]
+            ]
+            comparisons[f"{left}|{right}"] = {
+                "verdict": verdict,
+                "differing_sub_scores": differing,
+                "differing_claims": {
+                    "left": {
+                        dimension: [
+                            component["claim_id"]
+                            for component in rows[left][dimension]["components"]
+                            if component["claim_id"] is not None
+                        ]
+                        for dimension in differing
+                    },
+                    "right": {
+                        dimension: [
+                            component["claim_id"]
+                            for component in rows[right][dimension]["components"]
+                            if component["claim_id"] is not None
+                        ]
+                        for dimension in differing
+                    },
+                },
+            }
+
+    return _envelope(
+        {
+            "ids": requested,
+            "matrix": matrix,
+            "comparisons": comparisons,
+            "not_comparable_pairs": [
+                key for key, item in comparisons.items() if item["verdict"] == "not_comparable"
+            ],
+        },
+        claims_hash=_claims_hash(all_claims),
+        weights_version=version,
+    )
+
+
+def _exam_status(
+    *,
+    now: datetime,
+    closes: datetime | None,
+    observed_at: datetime | None,
+    ttl_days: int,
+) -> tuple[str, bool, str]:
+    if closes is None:
+        return "unverified", False, "no registration window extracted"
+    if observed_at is None:
+        return "unverified", False, "window has no observed_at; cannot verify freshness"
+    observed = observed_at
+    if (now.tzinfo is None) != (observed.tzinfo is None):
+        observed = observed.replace(tzinfo=UTC) if observed.tzinfo is None else observed
+        now = now.replace(tzinfo=UTC) if now.tzinfo is None else now
+    age_days = (now - observed).total_seconds() / 86_400.0
+    if age_days > ttl_days:
+        return "unverified", True, f"window observed {age_days:.1f}d ago exceeds TTL {ttl_days}d"
+    close_at = closes
+    if (now.tzinfo is None) != (close_at.tzinfo is None):
+        close_at = close_at.replace(tzinfo=UTC) if close_at.tzinfo is None else close_at
+    if now < close_at:
+        return "open", False, f"registration closes {close_at.date().isoformat()}"
+    return "closed", False, f"registration closed {close_at.date().isoformat()}"
+
+
+@app.post("/api/exams")
+def exam_windows(request: ProfileRequest) -> dict[str, Any]:
+    registry = _registry()
+    if registry is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "config_invalid", "message": "config registry failed to load"},
+        )
+    try:
+        database: Database | None = get_database()
+    except DatabaseError:
+        database = None
+
+    policy = registry.weights.filter_policy
+    ttl = int(policy.stale_exam_window_ttl_days)
+    now = datetime.now(UTC)
+    profile = request.profile
+    travel_pref = str(profile.get("travel_for_exams", "")).strip().lower()
+    forbids_travel = travel_pref in {"no", "false", "none", "not_allowed", "avoids"}
+
+    windows: dict[str, Any] = {}
+    if database is not None:
+        repo = ExamsRepo(database)
+        for exam in registry.exams.exams:
+            found = repo.list_windows(exam.id)
+            if found:
+                windows[exam.id] = found[0]
+
+    items: list[dict[str, Any]] = []
+    for exam in registry.exams.exams:
+        window = windows.get(exam.id)
+        closes = getattr(window, "registration_closes", None) if window else None
+        observed = getattr(window, "observed_at", None) if window else None
+        if window is None and exam.registration is not None:
+            closes = _parse_exam_datetime(exam.registration.closes)
+        status, stale, reason = _exam_status(
+            now=now, closes=closes, observed_at=observed, ttl_days=ttl
+        )
+        requires_travel = bool(exam.requires_travel and not exam.remote_options)
+        blocked = requires_travel and forbids_travel
+        if blocked and status == "open":
+            status = "closed"
+            reason = f"{reason}; profile forbids required travel"
+        items.append(
+            {
+                "exam_id": exam.id,
+                "name": exam.name,
+                "country": exam.country,
+                "status": status,
+                "observed_at": observed.isoformat() if observed else None,
+                "stale": stale,
+                "ttl_days": ttl,
+                "requires_travel": requires_travel,
+                "remote_options": bool(exam.remote_options),
+                "travel_blocked": blocked,
+                "deciding_claim_id": getattr(window, "source_claim_id", None)
+                if window
+                else None,
+                "reason": reason,
+            }
+        )
+
+    return _envelope(
+        {
+            "items": items,
+            "counts": {
+                "open": sum(1 for item in items if item["status"] == "open"),
+                "closed": sum(1 for item in items if item["status"] == "closed"),
+                "unverified": sum(1 for item in items if item["status"] == "unverified"),
+            },
+            "profile_persisted": False,
+        }
+    )
+
+
+def _parse_exam_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("/", "-"))
+    except ValueError:
+        return None
+
+
+@app.post("/api/exclusions")
+def exclusions(
+    request: ProfileRequest,
+    database: DatabaseDep,
+) -> dict[str, Any]:
+    registry = _registry()
+    if registry is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "config_invalid", "message": "config registry failed to load"},
+        )
+    config, version = _resolved_scoring(registry, None)
+    from fmd.filters import evaluate_all
+
+    programmes = _all_programmes(database, request.limit)
+    histogram: dict[str, int] = {}
+    unknown_histogram: dict[str, int] = {}
+    excluded: list[dict[str, Any]] = []
+    all_claims: list[Any] = []
+    for programme in programmes:
+        claims = _claims_for(database, programme)
+        all_claims.extend(claims)
+        summary = evaluate_all(_programme_view(programme, claims), request.profile)
+        for filter_id, decision in summary.decisions.items():
+            if decision.result == "fail":
+                histogram[filter_id] = histogram.get(filter_id, 0) + 1
+            elif decision.result == "unknown":
+                unknown_histogram[filter_id] = unknown_histogram.get(filter_id, 0) + 1
+        if summary.excluded:
+            deciding = [
+                summary.decisions[filter_id].as_dict() for filter_id in summary.excluded
+            ]
+            excluded.append(
+                {
+                    "programme": _programme_json(programme),
+                    "deciding_filters": deciding,
+                    "deciding_claim_ids": [
+                        decision["claim_id"]
+                        for decision in deciding
+                        if decision["claim_id"] is not None
+                    ],
+                }
+            )
+    return _envelope(
+        {
+            "histogram": histogram,
+            "unknown_histogram": unknown_histogram,
+            "excluded": excluded,
+            "excluded_total": len(excluded),
+            "evaluated_total": len(programmes),
+            "profile_persisted": False,
+        },
+        claims_hash=_claims_hash(all_claims),
+        weights_version=version,
+    )
+
+
+# --------------------------------------------------------------------------- review (WS-G)
 
 
 def _not_implemented(endpoint: str, workstream: str, section: str) -> JSONResponse:
@@ -369,26 +968,6 @@ def _not_implemented(endpoint: str, workstream: str, section: str) -> JSONRespon
         f"{endpoint} is not implemented ({workstream}, see brief §{section})",
         workstream=workstream,
     )
-
-
-@app.get("/api/programmes/{programme_id}/cost")
-def programme_cost(programme_id: int) -> JSONResponse:
-    return _not_implemented("/api/programmes/{id}/cost", "WS-F", "13")
-
-
-@app.get("/api/rankings")
-def rankings() -> JSONResponse:
-    return _not_implemented("/api/rankings", "WS-F", "11")
-
-
-@app.get("/api/compare")
-def compare() -> JSONResponse:
-    return _not_implemented("/api/compare", "WS-F", "11")
-
-
-@app.get("/api/exams")
-def exams() -> JSONResponse:
-    return _not_implemented("/api/exams", "WS-F", "12.5")
 
 
 @app.get("/api/review/queue")
@@ -402,5 +981,46 @@ def review_claim(claim_id: int, _: None = Depends(require_admin)) -> JSONRespons
 
 
 @app.post("/api/scoring/rerun")
-def scoring_rerun(_: None = Depends(require_admin)) -> JSONResponse:
-    return _not_implemented("/api/scoring/rerun", "WS-F", "11")
+def scoring_rerun(
+    database: DatabaseDep,
+    _: None = Depends(require_admin),
+) -> dict[str, Any]:
+    registry = _registry()
+    if registry is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "config_invalid", "message": "config registry failed to load"},
+        )
+    from fmd.score.persist import persist_score
+
+    config, version = _resolved_scoring(registry, None)
+    programmes = _all_programmes(database, 500)
+    written = 0
+    skipped = 0
+    from fmd.score import score_programme
+
+    for programme in programmes:
+        claims = _claims_for(database, programme)
+        scored = score_programme(
+            programme.id,
+            _programme_view(programme, claims),
+            {},
+            claims,
+            config=config,
+            cost_rules=registry.cost_rules,
+        )
+        latest = ScoresRepo(database).latest_for_entity(programme.institution_id)
+        if (
+            latest is not None
+            and latest.claims_hash == scored.claims_hash
+            and latest.scorer_version == scored.scorer_version
+            and latest.weights_version == scored.weights_version
+        ):
+            skipped += 1
+            continue
+        persist_score(database, scored)
+        written += 1
+    return _envelope(
+        {"written": written, "skipped": skipped, "total": len(programmes)},
+        weights_version=version,
+    )

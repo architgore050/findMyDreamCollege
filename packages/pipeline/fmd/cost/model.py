@@ -34,9 +34,9 @@ class _Model(BaseModel):
 
 
 class MoneyBand(_Model):
-    value: float
-    lo: float
-    hi: float
+    value: float | None = None
+    lo: float | None = None
+    hi: float | None = None
     currency: str
     method: str
     assumptions: list[str] = Field(default_factory=list)
@@ -45,14 +45,19 @@ class MoneyBand(_Model):
     def is_modelled(self) -> bool:
         return self.method.startswith("modelled")
 
+    @property
+    def is_known(self) -> bool:
+        return self.value is not None
+
     def as_dict(self) -> dict[str, Any]:
         return {
-            "value": round(self.value, 2),
-            "lo": round(self.lo, 2),
-            "hi": round(self.hi, 2),
+            "value": None if self.value is None else round(self.value, 2),
+            "lo": None if self.lo is None else round(self.lo, 2),
+            "hi": None if self.hi is None else round(self.hi, 2),
             "currency": self.currency,
             "method": self.method,
             "assumptions": list(self.assumptions),
+            "known": self.is_known,
         }
 
 
@@ -79,14 +84,18 @@ class CostItem(_Model):
 
 class LoanTerms(_Model):
     principal: float | None = None
-    annual_rate: float = 0.0
+    annual_rate: float | None = None
     moratorium_months: int | None = None
     tenure_months: int = 120
     interest_basis: Literal["simple", "monthly_compound"] = "simple"
+    assumed_rate: bool = False
+    rate_source: Literal["claim", "assumption", "provided", "unknown"] = "unknown"
 
     @field_validator("annual_rate")
     @classmethod
-    def _rate_range(cls, value: float) -> float:
+    def _rate_range(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
         if not 0.0 <= value < 1.0:
             raise ValueError("annual_rate must be in [0, 1)")
         return value
@@ -112,6 +121,7 @@ class CostRules:
     base_currency: str
     fx_sensitivity_pct: float
     band_pct: float
+    cost_categories: tuple[str, ...]
     living_scenarios: Mapping[str, tuple[str, ...]]
     dsr_bands: Mapping[str, Mapping[str, float]]
     affordability_flag_above: float
@@ -119,13 +129,58 @@ class CostRules:
     loan_defaults: Mapping[str, Any] = field(default_factory=dict)
     as_of_required: bool = True
 
+    def validate(self) -> list[str]:
+        """Registry-independent checks the loader must not be trusted for."""
+
+        problems: list[str] = []
+        if not self.base_currency.strip():
+            problems.append("currency.base must be a non-empty currency code")
+        if not self.cost_categories:
+            problems.append("cost_categories must not be empty")
+        known = set(self.cost_categories)
+        for scenario, components in self.living_scenarios.items():
+            for component in components:
+                if component not in known:
+                    problems.append(
+                        f"living_scenarios.{scenario}: component {component!r} "
+                        "is not in cost_categories"
+                    )
+        ordered = list(self.dsr_bands.items())
+        if not ordered:
+            problems.append("dsr25.bands must not be empty")
+        else:
+            previous_upper: float | None = 0.0
+            for position, (name, spec) in enumerate(ordered):
+                lower = float(spec.get("min", 0.0))
+                upper = spec.get("max")
+                if position == 0 and lower != 0.0:
+                    problems.append("dsr25.bands must start at min=0")
+                if previous_upper is not None and abs(lower - previous_upper) > 1e-9:
+                    problems.append(
+                        f"dsr25.bands.{name}: min {lower:g} does not continue the previous "
+                        f"band (expected {previous_upper:g})"
+                    )
+                if upper is not None and float(upper) <= lower:
+                    problems.append(f"dsr25.bands.{name}: max must exceed min")
+                previous_upper = None if upper is None else float(upper)
+            if previous_upper is not None:
+                problems.append("dsr25.bands must end with an open-ended band (no max)")
+        return problems
+
     @classmethod
     def from_config(cls, cost_rules: Any) -> CostRules:
         raw = _plain(cost_rules)
-        return cls(
-            base_currency=str((raw.get("currency") or {}).get("base", "INR")),
-            fx_sensitivity_pct=float((raw.get("currency") or {}).get("fx_sensitivity_pct", 10)),
+        currency = raw.get("currency") or {}
+        base_currency = currency.get("base")
+        if not base_currency:
+            raise CostModelError(
+                "cost_rules.currency.base is required; refusing to assume a currency"
+            )
+        rules = cls(
+            base_currency=str(base_currency),
+            fx_sensitivity_pct=float(currency.get("fx_sensitivity_pct", 10)),
             band_pct=float((raw.get("modelled_defaults") or {}).get("band_pct", 20)),
+            cost_categories=tuple(str(c) for c in (raw.get("cost_categories") or ())),
             living_scenarios={
                 name: tuple(spec.get("components") or ())
                 for name, spec in (raw.get("living_scenarios") or {}).items()
@@ -139,8 +194,12 @@ class CostRules:
             ),
             modelled_defaults=dict(raw.get("modelled_defaults") or {}),
             loan_defaults=dict(raw.get("loan_defaults") or {}),
-            as_of_required=bool((raw.get("currency") or {}).get("as_of_required", True)),
+            as_of_required=bool(currency.get("as_of_required", True)),
         )
+        problems = rules.validate()
+        if problems:
+            raise CostModelError("; ".join(problems))
+        return rules
 
 
 def _plain(value: Any) -> Any:
@@ -155,14 +214,57 @@ def _plain(value: Any) -> Any:
 
 def student_work_from_config(cost_rules: Any, country: str) -> StudentWork:
     raw = _plain(cost_rules)
+    base = (raw.get("currency") or {}).get("base")
+    if not base:
+        raise CostModelError(
+            "cost_rules.currency.base is required; refusing to assume a currency"
+        )
     entry = ((raw.get("student_work") or {}).get(country)) or {}
     informal = entry.get("realistic_informal_monthly") or {}
+    currency = informal.get("currency") or base
     return StudentWork(
         legal_hours_per_week=float(entry.get("legal_hours_per_week", 0.0)),
         realistic_monthly=float(informal.get("amount", 0.0)),
-        currency=str(informal.get("currency", (raw.get("currency") or {}).get("base", "INR"))),
+        currency=str(currency),
         cap_pct_of_tcoa=float(entry.get("cap_pct_of_tcoa", 0.0)),
         label=str(entry.get("label", "informal_earnings")),
+    )
+
+
+def loan_terms_from_config(
+    cost_rules: Any,
+    *,
+    scheme: str | None = None,
+    principal: float | None = None,
+) -> LoanTerms:
+    """Resolve modelled loan terms from config.
+
+    Numeric rates in ``loan_defaults`` are assumptions (``assumed: true``), not
+    published scheme terms. A rate from a claim should be passed directly in
+    ``LoanTerms`` instead. When no scheme publishes an assumed rate, the rate
+    stays ``None`` and DSR25 becomes UNKNOWN rather than zero.
+    """
+
+    raw = _plain(cost_rules)
+    defaults = raw.get("loan_defaults") or {}
+    chosen = scheme
+    if chosen is None:
+        scopes = raw.get("financing_scopes") or {}
+        domestic = scopes.get("domestic") or {}
+        candidates = list(domestic.get("schemes") or defaults.keys())
+        chosen = next((name for name in candidates if name in defaults), None)
+    entry = dict(defaults.get(chosen) or {}) if chosen else {}
+    rate_pct = entry.get("assumed_rate_pct")
+    rate = float(rate_pct) / 100.0 if rate_pct is not None else None
+    tenure = entry.get("assumed_tenure_months") or entry.get("max_tenure_months")
+    if tenure is None:
+        tenure = 120
+    return LoanTerms(
+        principal=principal,
+        annual_rate=rate,
+        tenure_months=int(tenure),
+        assumed_rate=bool(entry.get("assumed") and rate is not None),
+        rate_source="assumption" if rate is not None else "unknown",
     )
 
 
@@ -241,6 +343,7 @@ class CostSnapshot(_Model):
     bands: dict[str, dict[str, float]]
     methods: dict[str, str]
     assumptions: list[str]
+    assumptions_flags: dict[str, Any] = Field(default_factory=dict)
     display: dict[str, Any] = Field(default_factory=dict)
 
     def render(self) -> dict[str, Any]:
@@ -370,17 +473,19 @@ def capitalised_debt(
 
 
 def dsr_band(value: float | None, bands: Mapping[str, Mapping[str, float]]) -> str:
-    """Classify DSR25 using config bands; ``None`` is ``unknown``, never 0."""
+    """Classify DSR25 using ordered half-open config bands.
+
+    Each band is ``[min, max)``; the final band omits ``max``. ``None`` is
+    ``unknown``, never 0.
+    """
 
     if value is None:
         return "unknown"
-    ordered = list(bands.items())
-    for name, spec in ordered:
-        maximum = spec.get("max")
-        if maximum is not None and value <= float(maximum):
+    for name, spec in bands.items():
+        lower = float(spec.get("min", 0.0))
+        upper = spec.get("max")
+        if value >= lower and (upper is None or value < float(upper)):
             return name
-    if ordered:
-        return ordered[-1][0]
     return "unknown"
 
 
@@ -573,35 +678,65 @@ def compute(inputs: CostInputs, rules: CostRules) -> CostSnapshot:
     )
     if loan.moratorium_months is None:
         assumptions.append("moratorium defaulted to course_plus_1y (IBA model scheme)")
-    debt_value = capitalised_debt(
-        principal, loan.annual_rate, moratorium_months, basis=loan.interest_basis
-    )
-    debt_lo = capitalised_debt(
-        principal_lo, loan.annual_rate, moratorium_months, basis=loan.interest_basis
-    )
-    debt_hi = capitalised_debt(
-        principal_hi, loan.annual_rate, moratorium_months, basis=loan.interest_basis
-    )
-    debt = MoneyBand(
-        value=debt_value,
-        lo=min(debt_lo, debt_value),
-        hi=max(debt_hi, debt_value),
-        currency=currency,
-        method="computed_capitalised_moratorium_interest",
-        assumptions=[
-            f"{loan.interest_basis} interest over {moratorium_months} moratorium months",
-        ],
-    )
+    rate = loan.annual_rate
+    if rate is None:
+        assumptions.append(
+            "no loan rate available from a claim or an explicit assumption: "
+            "debt, EMI and DSR25 are UNKNOWN"
+        )
+        debt = MoneyBand(
+            value=None,
+            lo=None,
+            hi=None,
+            currency=currency,
+            method="unknown_rate",
+            assumptions=["refusing to assume an interest rate"],
+        )
+        emi_band = MoneyBand(
+            value=None,
+            lo=None,
+            hi=None,
+            currency=currency,
+            method="unknown_rate",
+            assumptions=["refusing to emit an EMI without a rate"],
+        )
+        emi_value = None
+    else:
+        debt_value = capitalised_debt(
+            principal, rate, moratorium_months, basis=loan.interest_basis
+        )
+        debt_lo = capitalised_debt(
+            principal_lo, rate, moratorium_months, basis=loan.interest_basis
+        )
+        debt_hi = capitalised_debt(
+            principal_hi, rate, moratorium_months, basis=loan.interest_basis
+        )
+        debt = MoneyBand(
+            value=debt_value,
+            lo=min(debt_lo, debt_value),
+            hi=max(debt_hi, debt_value),
+            currency=currency,
+            method="computed_capitalised_moratorium_interest",
+            assumptions=[
+                f"{loan.interest_basis} interest over {moratorium_months} moratorium months",
+                f"rate source={loan.rate_source}"
+                + (", assumed: true (not a published scheme rate)" if loan.assumed_rate else ""),
+            ],
+        )
 
-    emi_value = emi(debt_value, loan.annual_rate, loan.tenure_months)
-    emi_band = MoneyBand(
-        value=emi_value,
-        lo=emi(debt_lo, loan.annual_rate, loan.tenure_months),
-        hi=emi(debt_hi, loan.annual_rate, loan.tenure_months),
-        currency=currency,
-        method="computed_emi",
-        assumptions=[f"tenure {loan.tenure_months} months at {loan.annual_rate:.4f}"],
-    )
+        emi_value = emi(debt_value, rate, loan.tenure_months)
+        emi_band = MoneyBand(
+            value=emi_value,
+            lo=emi(debt_lo, rate, loan.tenure_months),
+            hi=emi(debt_hi, rate, loan.tenure_months),
+            currency=currency,
+            method="computed_emi",
+            assumptions=[
+                f"tenure {loan.tenure_months} months at {rate:.4f}",
+                f"rate source={loan.rate_source}"
+                + (", assumed: true (not a published scheme rate)" if loan.assumed_rate else ""),
+            ],
+        )
 
     # --- student work: out-of-pocket only, capped, never TCOA
     offset_value = 0.0
@@ -645,8 +780,12 @@ def compute(inputs: CostInputs, rules: CostRules) -> CostSnapshot:
         assumptions=["net price minus loan principal disbursed minus capped student-work offset"],
     )
 
-    annuity = emi_value * 12.0
-    dsr_value = (annuity / inputs.p25_first_year_salary) if inputs.p25_first_year_salary else None
+    annuity = None if emi_value is None else emi_value * 12.0
+    dsr_value = (
+        (annuity / inputs.p25_first_year_salary)
+        if annuity is not None and inputs.p25_first_year_salary
+        else None
+    )
     band_name = dsr_band(dsr_value, rules.dsr_bands)
     dsr = DSRResult(
         value=dsr_value,
@@ -659,6 +798,9 @@ def compute(inputs: CostInputs, rules: CostRules) -> CostSnapshot:
             "emi_monthly": emi_value,
             "emi_months_in_first_year": 12,
             "salary_source": "modelled_or_extracted_p25",
+            "rate_source": loan.rate_source,
+            "rate_assumed": loan.assumed_rate,
+            "dsr_available": dsr_value is not None,
         },
     )
 
@@ -717,6 +859,17 @@ def compute(inputs: CostInputs, rules: CostRules) -> CostSnapshot:
         bands={name: dict(spec) for name, spec in rules.dsr_bands.items()},
         methods=methods,
         assumptions=assumptions,
+        assumptions_flags=(
+            {
+                "loan_rate": {
+                    "assumed": True,
+                    "source": loan.rate_source,
+                    "note": "modelled assumption, not a published scheme rate",
+                }
+            }
+            if loan.assumed_rate
+            else {}
+        ),
     )
     snapshot.display = _display(snapshot)
     return snapshot
@@ -726,6 +879,8 @@ def _display(snapshot: CostSnapshot) -> dict[str, Any]:
     """Pre-rendered strings/cards so the UI never recomputes a number."""
 
     def money(band: MoneyBand) -> str:
+        if band.value is None:
+            return f"unknown ({band.method})"
         return f"{band.currency} {band.value:,.0f} ({band.lo:,.0f}-{band.hi:,.0f}, {band.method})"
 
     cards = []

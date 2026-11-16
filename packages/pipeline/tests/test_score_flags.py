@@ -12,7 +12,7 @@ NOW = datetime(2026, 11, 16, tzinfo=UTC)
 
 @pytest.fixture(scope="module")
 def weights(registry) -> dict[str, float]:
-    return dict(registry.weights.gaming_flags)
+    return dict(registry.weights.confidence_penalties)
 
 
 def claim(predicate: str, value: object, **overrides) -> ClaimView:
@@ -180,6 +180,43 @@ def test_confidence_penalties_are_multiplicative(weights: dict[str, float]) -> N
         if flag.claim_id == 7:
             expected *= 1.0 - weights[flag.flag_id]
     assert penalties["7"] == pytest.approx(1.0 - expected)
+
+
+def test_confidence_penalties_are_not_shares(registry) -> None:
+    from fmd.score.config import ScoringConfig
+
+    penalties = ScoringConfig.from_config(registry.weights).confidence_penalty_weights
+    # They are multipliers, so the sum is irrelevant and may exceed 1.
+    assert all(0.0 <= value < 1.0 for value in penalties.values())
+    assert sum(penalties.values()) != pytest.approx(1.0)
+
+
+def test_confidence_penalty_composition_has_a_floor(weights: dict[str, float]) -> None:
+    from fmd.score.flags import MIN_CONFIDENCE, GamingFlag
+
+    flags = [
+        GamingFlag(
+            flag_id=f"flag_{index}",
+            weight=0.5,
+            claim_id=1,
+            predicate="placement_rate",
+            evidence="test",
+            detail={},
+        )
+        for index in range(20)
+    ]
+    penalties = confidence_penalties(flags)
+    assert penalties["1"] == pytest.approx(1.0 - MIN_CONFIDENCE)
+    assert all(0.0 <= weight < 1.0 for weight in weights.values())
+
+
+def test_penalty_weights_outside_unit_interval_are_rejected(registry) -> None:
+    from fmd.score.config import ScoringConfig
+
+    raw = registry.weights.model_dump()
+    raw["confidence_penalties"]["missing_denominator"] = 1.0
+    config = ScoringConfig.from_config(raw)
+    assert any("0 <= w < 1" in problem for problem in config.validate())
 
 
 def test_unknown_flag_ids_are_not_silently_applied() -> None:

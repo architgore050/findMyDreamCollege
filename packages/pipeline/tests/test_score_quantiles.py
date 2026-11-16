@@ -96,6 +96,16 @@ def test_unknown_sector_falls_back_to_unknown_prior(rules: QuantileRules) -> Non
     assert result.sigma == pytest.approx(0.55)
 
 
+def test_widen_interval_when_n_lt_semantics(rules: QuantileRules) -> None:
+    assert rules.widen_interval_when_n_lt == 30
+    assert rules.widen_factor(15) == pytest.approx(math.sqrt(2.0))
+    assert rules.widen_factor(30) == 1.0
+    assert rules.widen_factor(120) == 1.0
+    small = from_median_iqr(300_000, 250_000, 380_000, 20, rules)
+    large = from_median_iqr(300_000, 250_000, 380_000, 120, rules)
+    assert (small.hi / small.lo) > (large.hi / large.lo)
+
+
 def test_sigma_helpers() -> None:
     assert sigma_from_iqr(250_000, 380_000) == pytest.approx(0.31039, abs=1e-4)
     assert sigma_from_mean_median(360_000, 300_000) == pytest.approx(0.603857, abs=1e-6)

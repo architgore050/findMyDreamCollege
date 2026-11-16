@@ -35,6 +35,7 @@ class QuantileRules:
     sigma_prior_by_sector: Mapping[str, float]
     fallback_sigma: float
     confidence: float = DEFAULT_CONFIDENCE
+    widen_interval_when_n_lt: int = 30
 
     @classmethod
     def from_config(cls, salary: Any, *, confidence: float = DEFAULT_CONFIDENCE) -> QuantileRules:
@@ -60,7 +61,17 @@ class QuantileRules:
             sigma_prior_by_sector=priors,
             fallback_sigma=fallback,
             confidence=confidence,
+            widen_interval_when_n_lt=int(read("widen_interval_when_n_lt", 30)),
         )
+
+    def widen_factor(self, n: int) -> float:
+        """Small samples widen: ``sqrt(min_n / n)`` while ``n < min_n``."""
+
+        if self.widen_interval_when_n_lt <= 0:
+            return 1.0
+        if n >= self.widen_interval_when_n_lt:
+            return 1.0
+        return math.sqrt(self.widen_interval_when_n_lt / max(n, 1))
 
     def sigma_for(self, sector: str | None) -> float:
         if sector is None:
@@ -200,7 +211,7 @@ def _prior_estimate(
 
     sigma = rules.sigma_for(sector)
     q25 = _positive("location", location) * math.exp(Z25 * sigma)
-    widen = math.sqrt(rules.min_n_for_empirical_quantile / max(n, 1))
+    widen = rules.widen_factor(n)
     lo, hi = _interval(q25, sigma, n, rules=rules, widen=widen)
     return QuantileEstimate(
         q25=q25,
@@ -245,7 +256,7 @@ def from_median_iqr(
         )
     sigma = sigma_from_iqr(q1, q3)
     q25 = float(q1)
-    lo, hi = _interval(q25, sigma, n, rules=rules)
+    lo, hi = _interval(q25, sigma, n, rules=rules, widen=rules.widen_factor(n))
     return QuantileEstimate(
         q25=q25,
         lo=max(0.0, lo),
@@ -292,7 +303,7 @@ def from_median_range(
     cv = sd / mean
     sigma = math.sqrt(math.log(1.0 + cv * cv))
     q25 = median * math.exp(Z25 * sigma)
-    lo, hi = _interval(q25, sigma, n, rules=rules)
+    lo, hi = _interval(q25, sigma, n, rules=rules, widen=rules.widen_factor(n))
     return QuantileEstimate(
         q25=q25,
         lo=max(0.0, lo),
@@ -334,7 +345,7 @@ def from_mean_median(
             assumptions=("published mean and median",),
         )
     q25 = median * math.exp(Z25 * sigma)
-    lo, hi = _interval(q25, sigma, n, rules=rules)
+    lo, hi = _interval(q25, sigma, n, rules=rules, widen=rules.widen_factor(n))
     return QuantileEstimate(
         q25=q25,
         lo=max(0.0, lo),

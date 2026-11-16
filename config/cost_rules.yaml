@@ -12,6 +12,7 @@ cost_categories:
   - rent
   - utilities
   - food
+  - food_topup          # extra hostel mess top-up (modelled default), a living component
   - transport
   - equipment          # apron, lab coat, consumable kits, logbook, dissection kit
   - exam_fee
@@ -53,14 +54,16 @@ student_work:
   US: {legal_hours_per_week: 20, on_campus_only: true}
 
 # Debt service ratio at the 25th percentile salary. The headline affordability metric.
+# Single ordered list of half-open bands: lower bound inclusive, upper exclusive.
+# The last band has no upper bound. Exactly one band matches any non-negative DSR.
 dsr25:
   formula: first_year_emi / p25_first_year_gross_salary
   horizon_years: 1
   bands:
-    comfortable: {max: 0.20}
-    manageable: {max: 0.30}
-    stressed: {max: 0.40}
-    not_financeable: {min: 0.40}
+    comfortable:      {min: 0.00, max: 0.20}   # [0.00, 0.20)
+    manageable:       {min: 0.20, max: 0.30}   # [0.20, 0.30)
+    stressed:         {min: 0.30, max: 0.40}   # [0.30, 0.40)
+    not_financeable:  {min: 0.40}              # [0.40, inf)
   always_publish_inputs: true
 
 affordability_gap:
@@ -78,12 +81,21 @@ financing_scopes:
     fx_band_required: true
 
 loan_defaults:
+  # Numeric rates/tenures here are ASSUMPTIONS for modelling only (`assumed: true`).
+  # They are never presented as published scheme terms and never override a
+  # rate available from a claim. Without either, DSR25 is UNKNOWN.
   iba_model_scheme:
+    assumed: true
+    assumed_rate_pct: 9.50
+    assumed_tenure_months: 180
     collateral_free_upto: {amount: 750000, currency: INR}
     no_margin_upto: {amount: 400000, currency: INR}
     moratorium: course_plus_1y
     max_tenure_months: 180
   pm_vidyalaxmi:
+    assumed: true
+    assumed_rate_pct: 8.50
+    assumed_tenure_months: 180
     collateral_free: true
     subvention_pct: 3
     subvention_max_principal: {amount: 1000000, currency: INR}
@@ -92,6 +104,9 @@ loan_defaults:
     max_tenure_months: 180
     excluded: [foreign_universities, nri_quota, management_quota]
   csis:
+    assumed: true
+    assumed_rate_pct: 4.00
+    assumed_tenure_months: 180
     interest_subvention_pct: 100
     during: moratorium
     max_principal: {amount: 1000000, currency: INR}

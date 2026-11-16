@@ -27,6 +27,7 @@ from fmd.cost.model import (
     dsr_band,
     emi,
     living_annual,
+    loan_terms_from_config,
     student_work_from_config,
 )
 
@@ -49,6 +50,7 @@ __all__ = [
     "dsr_band",
     "emi",
     "living_annual",
+    "loan_terms_from_config",
     "student_work_from_config",
 ]
 

@@ -46,7 +46,7 @@ class ScoringConfig:
     min_claims_for_confidence: int
     transforms: Mapping[str, Any]
     evidence_tiers: Mapping[str, Mapping[str, Any]]
-    gaming_flag_weights: Mapping[str, float]
+    confidence_penalty_weights: Mapping[str, float]
     salary: QuantileRules
     insights: InsightRules
     peer_group_keys: tuple[str, ...] = ()
@@ -83,8 +83,8 @@ class ScoringConfig:
                 }
                 for name, spec in tiers.items()
             },
-            gaming_flag_weights={
-                str(k): float(v) for k, v in (raw.get("gaming_flags") or {}).items()
+            confidence_penalty_weights={
+                str(k): float(v) for k, v in (raw.get("confidence_penalties") or {}).items()
             },
             salary=QuantileRules.from_config(salary_raw),
             insights=InsightRules(
@@ -118,7 +118,7 @@ class ScoringConfig:
                     "min_claims_for_confidence",
                     "transforms",
                     "evidence_tiers",
-                    "gaming_flags",
+                    "confidence_penalties",
                     "salary",
                     "insights",
                     "peer_groups",
@@ -138,6 +138,14 @@ class ScoringConfig:
             problems.append("sub-score weights must be non-negative")
         if self.salary.min_n_for_empirical_quantile < 2:
             problems.append("salary.min_n_for_empirical_quantile must be >= 2")
+        if self.salary.widen_interval_when_n_lt < 1:
+            problems.append("salary.widen_interval_when_n_lt must be >= 1")
         if not 0.5 < self.salary.confidence < 1.0:
             problems.append("salary confidence must be between 0.5 and 1")
+        for flag_id, penalty in self.confidence_penalty_weights.items():
+            if not 0.0 <= float(penalty) < 1.0:
+                problems.append(
+                    f"confidence_penalties[{flag_id!r}] must satisfy 0 <= w < 1, "
+                    f"got {penalty!r} (it is a multiplier penalty, not a share)"
+                )
         return problems

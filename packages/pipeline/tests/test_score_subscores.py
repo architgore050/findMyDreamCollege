@@ -148,6 +148,30 @@ def test_no_shrinkage_when_evidence_is_sufficient(scoring: ScoringConfig) -> Non
     assert score.prior_adjusted == score.measured
 
 
+def test_absent_prior_is_explicit_not_silent(scoring: ScoringConfig) -> None:
+    claims = [
+        {
+            "predicate": "city_safety_index",
+            "value": 70,
+            "claim_id": 1,
+            "source_id": 1,
+        },
+        {
+            "predicate": "hostel_available",
+            "value": True,
+            "claim_id": 2,
+            "source_id": 2,
+        },
+    ]
+    context = ScoreContext(config=scoring, profile={})
+    score = compute_sub_scores(ClaimIndex.build(claims), context, profile={})[
+        "student_life_safety"
+    ]
+    assert score.shrinkage_inactive is True
+    assert score.prior_adjusted == score.measured
+    assert score.as_dict()["shrinkage_inactive"] is True
+
+
 def test_configured_naac_transform_is_monotone(scoring: ScoringConfig) -> None:
     spec = scoring.transforms["naac_grade"]
     assert apply_transform("A++", spec) == 100.0

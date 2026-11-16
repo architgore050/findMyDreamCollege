@@ -60,7 +60,7 @@ class FilterContext:
 
     stale_exam_window_ttl_days: int = 3
     budget_uses: str = "tcoa_lo"
-    currency: str = "INR"
+    currency: str | None = None
     exams: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     now: datetime | None = None
     unknown_blocks_ranking: bool = False
@@ -699,7 +699,19 @@ def budget_ceiling(
     ctx = context or default_context()
     ceiling = _profile(profile, "budget.total_ceiling", None)
     annual_ceiling = _profile(profile, "budget.annual_ceiling", None)
-    currency = _profile(profile, "budget.currency", None) or ctx.currency
+    currency = _profile(profile, "budget.currency", None)
+    if ctx.currency is None:
+        return _decide(
+            "budget_ceiling",
+            "unknown",
+            "cost currency is not configured; refusing to assume one",
+        )
+    if currency is None:
+        return _decide(
+            "budget_ceiling",
+            "unknown",
+            "profile does not state a budget currency",
+        )
     if ceiling is None:
         if annual_ceiling is not None:
             return _decide(

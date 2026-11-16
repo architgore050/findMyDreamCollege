@@ -63,22 +63,57 @@ def test_database_unavailable_is_503(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("method", "path", "workstream"),
+    ("method", "path"),
     [
-        ("get", "/api/programmes/1/cost", "WS-F"),
-        ("get", "/api/rankings", "WS-F"),
-        ("get", "/api/compare", "WS-F"),
-        ("get", "/api/exams", "WS-F"),
-        ("get", "/api/review/queue", "WS-G"),
+        ("get", "/api/review/queue"),
+        ("post", "/api/review/claims/1"),
     ],
 )
-def test_unimplemented_endpoints_are_501(method: str, path: str, workstream: str) -> None:
-    response = getattr(client, method)(path)
+def test_unbuilt_endpoints_are_501(method: str, path: str, monkeypatch) -> None:
+    monkeypatch.setenv("FMD_ADMIN_TOKEN", "test-token")
+    kwargs = {"headers": {"X-Admin-Token": "test-token"}} if path.endswith("/1") else {}
+    response = getattr(client, method)(path, **kwargs)
     assert response.status_code == 501
     body = response.json()
-    assert body["error"]["workstream"] == workstream
+    assert body["error"]["workstream"] == "WS-G"
     assert "not implemented" in body["error"]["message"]
     assert body.keys() >= ENVELOPE_KEYS
+
+
+def test_engine_endpoints_require_a_database(monkeypatch) -> None:
+    def boom() -> None:
+        raise DatabaseError("cannot connect")
+
+    monkeypatch.setattr(api_module, "get_database", boom)
+    for response in (
+        client.post("/api/rankings", json={"profile": {}}),
+        client.get("/api/programmes/1/cost"),
+        client.get("/api/compare", params={"ids": "1,2"}),
+        client.post("/api/exclusions", json={"profile": {}}),
+    ):
+        assert response.status_code == 503
+        assert response.json().keys() >= ENVELOPE_KEYS
+
+
+def test_exams_is_a_post_and_degrades_without_db(monkeypatch) -> None:
+    def boom() -> None:
+        raise DatabaseError("cannot connect")
+
+    monkeypatch.setattr(api_module, "get_database", boom)
+    response = client.post("/api/exams", json={"profile": {"travel_for_exams": "no"}})
+    assert response.status_code == 200
+    body = response.json()
+    assert body.keys() >= ENVELOPE_KEYS
+    assert body["items"]
+    assert body["profile_persisted"] is False
+    for item in body["items"]:
+        assert {"status", "observed_at", "stale", "requires_travel", "deciding_claim_id"} <= (
+            item.keys()
+        )
+        assert item["status"] in {"open", "closed", "unverified"}
+
+    # The old GET contract is gone; profiles live in the request body.
+    assert client.get("/api/exams").status_code == 405
 
 
 def test_admin_write_endpoints_are_gated(monkeypatch) -> None:
@@ -88,9 +123,6 @@ def test_admin_write_endpoints_are_gated(monkeypatch) -> None:
     monkeypatch.setenv("FMD_ADMIN_TOKEN", "test-token")
     assert client.post("/api/scoring/rerun").status_code == 401
     assert client.post("/api/scoring/rerun", headers={"X-Admin-Token": "wrong"}).status_code == 401
-    allowed = client.post("/api/scoring/rerun", headers={"X-Admin-Token": "test-token"})
-    assert allowed.status_code == 501
-    assert allowed.json()["error"]["workstream"] == "WS-F"
 
 
 def test_db_backed_programme_reads(pg_database) -> None:
@@ -136,5 +168,215 @@ def test_db_backed_programme_reads(pg_database) -> None:
 
         missing = client.get("/api/programmes/99999999")
         assert missing.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+
+
+def _seed_engine_programme(database, suffix: str):
+    import hashlib
+
+    from fmd.db.repositories import (
+        ClaimCreate,
+        ClaimsRepo,
+        CostItemCreate,
+        CostItemsRepo,
+        DocumentsRepo,
+        DocumentUpsert,
+        ExtractionCreate,
+        ExtractionsRepo,
+        SnapshotCreate,
+        SnapshotsRepo,
+    )
+
+    institution = EntitiesRepo(database).create(
+        EntityCreate(
+            kind="institution",
+            canonical_name=f"Engine Institute {suffix}",
+            country="IN",
+            state="MH",
+        )
+    )
+    programme = ProgrammesRepo(database).create(
+        ProgrammeCreate(
+            institution_id=institution.id,
+            name=f"BSc MLT Engine {suffix}",
+            credential_level="degree",
+            recognition_status="recognised",
+            duration_months=48,
+        )
+    )
+    Costs = CostItemsRepo(database)
+    for category, amount in (("tuition", 100000), ("hostel", 60000), ("mess", 40000)):
+        Costs.create(
+            CostItemCreate(
+                programme_id=programme.id,
+                category=category,
+                label=category,
+                amount=amount,
+                currency="INR",
+                period="per_year",
+            )
+        )
+
+    document = DocumentsRepo(database).upsert(
+        DocumentUpsert(url=f"https://example.ac.in/{suffix}.pdf", domain="example.ac.in")
+    )
+    data = b"%PDF engine evidence"
+    digest = hashlib.sha256(data).hexdigest()
+    snapshot = SnapshotsRepo(database).create(
+        SnapshotCreate(
+            document_id=document.id,
+            sha256=digest,
+            bytes_path=f"objects/{digest[:2]}/{digest}",
+            fetcher_tier="httpx",
+            content_type="application/pdf",
+        )
+    )
+    extraction = ExtractionsRepo(database).create(
+        ExtractionCreate(
+            snapshot_id=snapshot.id,
+            tool="test",
+            text="engine evidence text",
+            prompt_version="v1",
+        )
+    )
+    claims = ClaimsRepo(database)
+    for index, (predicate, value, unit) in enumerate(
+        [
+            ("recognition_status", "recognised", None),
+            ("naac_grade", "A", None),
+            ("internship_hours", 1200, "hours"),
+            ("p25_first_year_salary", 300000, "INR"),
+            ("city_safety_index", 70, "percent"),
+        ]
+    ):
+        claims.create(
+            ClaimCreate(
+                extraction_id=extraction.id,
+                entity_id=institution.id,
+                predicate=predicate,
+                value=value,
+                unit=unit,
+                qualifier={"cohort_year": 2025},
+                quote="engine evidence text",
+                char_start=0,
+                char_end=5,
+                confidence=1.0,
+                method="extracted",
+            )
+        )
+        del index
+    return institution, programme
+
+
+def test_engine_endpoints_against_real_db(pg_database, monkeypatch) -> None:
+    suffix = uuid.uuid4().hex[:10]
+    institution, programme = _seed_engine_programme(pg_database, suffix)
+    second = ProgrammesRepo(pg_database).create(
+        ProgrammeCreate(
+            institution_id=institution.id,
+            name=f"BSc MLT Engine B {suffix}",
+            credential_level="degree",
+            recognition_status="recognised",
+            duration_months=48,
+        )
+    )
+    monkeypatch.setattr(api_module, "get_database", lambda: pg_database)
+    app.dependency_overrides[api_module._database_or_503] = lambda: pg_database
+    profile = {
+        "credential_levels": ["degree"],
+        "budget": {"currency": "INR", "total_ceiling": 5_000_000},
+        "target_intake_year": 2026,
+        "travel_for_exams": "yes",
+    }
+    try:
+        ranked = client.post("/api/rankings", json={"profile": profile})
+        assert ranked.status_code == 200
+        body = ranked.json()
+        assert body.keys() >= ENVELOPE_KEYS
+        assert body["profile_persisted"] is False
+        assert set(body["weights"]) == {
+            "outcomes",
+            "affordability_roi",
+            "clinical_training",
+            "academic_quality",
+            "student_life_safety",
+            "admission_realism",
+            "financing_feasibility",
+        }
+        item = next(row for row in body["items"] if row["programme"]["id"] == programme.id)
+        assert {
+            "programme",
+            "score",
+            "composite_band",
+            "evidence_tier",
+            "filters",
+            "insights",
+        } <= item.keys()
+        assert item["composite_band"]["method"]
+        assert item["filters"]["counts"]
+        assert item["score"]["sub_scores"]["outcomes"]["evidence_tier"]
+        for sub_score in item["score"]["sub_scores"].values():
+            for component in sub_score["components"]:
+                assert component["method"]
+
+        override = dict.fromkeys(body["weights"], 0.0)
+        override["outcomes"] = 100.0
+        overridden = client.post(
+            "/api/rankings", json={"profile": profile, "weights": override}
+        )
+        assert overridden.status_code == 200
+        assert "+override." in overridden.json()["weights_version"]
+        bad = client.post(
+            "/api/rankings", json={"profile": profile, "weights": {"outcomes": 10}}
+        )
+        assert bad.status_code == 422
+        assert bad.json()["error"]["code"] == "invalid_weights"
+
+        cost = client.get(f"/api/programmes/{programme.id}/cost", params={"living": "hostel"})
+        assert cost.status_code == 200
+        cost_body = cost.json()
+        assert cost_body.keys() >= ENVELOPE_KEYS
+        assert cost_body["available"] is True
+        assert set(cost_body["scenarios"]) == {"hostel", "independent"}
+        assert cost_body["non_additive_scenarios"] is True
+        assert cost_body["assumed"]["loan_rate"]["assumed"] is True
+        assert cost_body["dsr25"]["band"] in {
+            "comfortable",
+            "manageable",
+            "stressed",
+            "not_financeable",
+            "unknown",
+        }
+        assert cost_body["tcoa"]["method"]
+
+        independent = client.get(
+            f"/api/programmes/{programme.id}/cost", params={"living": "independent"}
+        )
+        assert independent.status_code == 200
+        assert independent.json()["living"] == "independent"
+
+        compare = client.get(
+            "/api/compare", params={"ids": f"{programme.id},{second.id}"}
+        )
+        assert compare.status_code == 200
+        compare_body = compare.json()
+        assert compare_body["matrix"]
+        assert compare_body["comparisons"]
+        assert isinstance(compare_body["not_comparable_pairs"], list)
+
+        compared = client.get("/api/compare", params={"ids": f"{programme.id}"})
+        assert compared.status_code == 422
+
+        excluded = client.post("/api/exclusions", json={"profile": profile})
+        assert excluded.status_code == 200
+        ex_body = excluded.json()
+        assert {"histogram", "excluded", "excluded_total"} <= ex_body.keys()
+        assert ex_body["profile_persisted"] is False
+
+        exams = client.post("/api/exams", json={"profile": profile})
+        assert exams.status_code == 200
+        assert exams.json()["items"]
+        del institution
     finally:
         app.dependency_overrides.clear()

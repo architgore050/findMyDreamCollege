@@ -88,6 +88,7 @@ class SubScore:
     unknown_reason: str | None = None
     modelled_share: float = 0.0
     widened: bool = False
+    shrinkage_inactive: bool = False
 
     @property
     def known(self) -> bool:
@@ -109,6 +110,7 @@ class SubScore:
             "unknown_reason": self.unknown_reason,
             "modelled_share": round(self.modelled_share, 4),
             "widened": self.widened,
+            "shrinkage_inactive": self.shrinkage_inactive,
         }
 
 
@@ -138,6 +140,7 @@ def unknown_sub_score(reason: str, *, n_claims: int = 0, n_sources: int = 0) -> 
         n_sources=n_sources,
         evidence_tier="insufficient",
         unknown_reason=reason,
+        shrinkage_inactive=True,
     )
 
 
@@ -411,6 +414,7 @@ def _finalise(
                 f"{n_claims} usable claims < min_claims_for_score={config.min_claims_for_score}"
             ),
             modelled_share=modelled_share,
+            shrinkage_inactive=True,
         )
 
     weights = [1.0 for _ in components]
@@ -422,6 +426,7 @@ def _finalise(
     prior = context.peer_prior.get(sub_score_id)
     threshold = config.min_claims_for_confidence
     widened = False
+    shrinkage_inactive = prior is None
     if prior is not None and n_claims < threshold:
         shrink = n_claims / (n_claims + threshold) if (n_claims + threshold) else 0.0
         adjusted = shrink * measured + (1.0 - shrink) * float(prior)
@@ -430,6 +435,7 @@ def _finalise(
         hi = clamp(adjusted + (hi - adjusted) * widen)
         widened = True
     else:
+        # No suppliable prior: never invent one. Report measured unchanged.
         adjusted = measured
 
     return SubScore(
@@ -444,6 +450,7 @@ def _finalise(
         components=tuple(components),
         modelled_share=modelled_share,
         widened=widened,
+        shrinkage_inactive=shrinkage_inactive,
     )
 
 

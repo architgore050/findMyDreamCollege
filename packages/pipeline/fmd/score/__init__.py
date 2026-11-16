@@ -143,7 +143,11 @@ def score_programme(
         scoring = config
     index = ClaimIndex.build(claims)
 
-    flags = detect(index, scoring.gaming_flag_weights)
+    problems = scoring.validate()
+    if problems:
+        raise ValueError("invalid scoring config: " + "; ".join(problems))
+
+    flags = detect(index, scoring.confidence_penalty_weights)
     penalties = confidence_penalties(flags)
 
     context = ScoreContext(

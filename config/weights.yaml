@@ -1,8 +1,8 @@
 # Scoring configuration. Changing anything here requires bumping `weights_version`.
 # Sub-scores return {point, lo, hi, n_claims, n_sources, evidence_tier}. UNKNOWN propagates as [0,100].
 
-weights_version: "2026-11-16.1"
-scorer_version: "0.1.0"
+weights_version: "2026-11-16.2"
+scorer_version: "0.2.0"
 
 weights:
   outcomes: 30
@@ -19,7 +19,10 @@ min_claims_for_score: 2
 min_claims_for_confidence: 5
 
 peer_groups:
-  keys: [ownership, state, affiliation_type]   # shrinkage target
+  # Shrinkage target keys. v1 ships no numeric priors: until a caller supplies
+  # one, `prior_adjusted` equals `measured` and `shrinkage_inactive: true` is
+  # surfaced. Do not invent priors here.
+  keys: [ownership, state, affiliation_type]
   min_group_size: 8
   fallback: country_prior
 
@@ -61,7 +64,11 @@ filter_policy:
   budget_uses: tcoa_lo               # fail only when tcoa_lo > ceiling
 
 # Red flags reduce claim confidence and are displayed verbatim in the UI.
-gaming_flags:
+# Each value is a per-flag confidence MULTIPLIER penalty applied to the claim:
+# remaining confidence = confidence * product(1 - penalty) over flags on that claim.
+# They are NOT shares and must not sum to anything; each must satisfy 0 <= w < 1.
+# Composition is multiplicative with a floor (fmd/score/flags.py:MIN_CONFIDENCE).
+confidence_penalties:
   missing_denominator: 0.25
   no_distribution: 0.10
   headline_is_highest_package: 0.15
@@ -84,7 +91,9 @@ salary:
     private_hospital: 0.45
     diagnostic_chain: 0.50
     unknown: 0.55
-  narrow_interval_when_n_lt: 30
+  # Small samples WIDEN the interval: multiply the log-space half-width by
+  # sqrt(widen_interval_when_n_lt / n) when n is below this threshold.
+  widen_interval_when_n_lt: 30
 
 # Cost-of-living frame. PPP for cross-country, city basket within-country. Never both.
 col:

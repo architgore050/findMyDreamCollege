@@ -14,6 +14,7 @@ from fmd.cost import (
     compute,
     dsr_band,
     emi,
+    loan_terms_from_config,
     student_work_from_config,
 )
 
@@ -84,15 +85,47 @@ def test_dsr25_bands_at_boundaries(rules: CostRules) -> None:
     bands = rules.dsr_bands
     assert dsr_band(0.0, bands) == "comfortable"
     assert dsr_band(0.1999, bands) == "comfortable"
-    # config uses `max`, so the boundary belongs to the lower band
-    assert dsr_band(0.20, bands) == "comfortable"
-    assert dsr_band(0.2001, bands) == "manageable"
-    assert dsr_band(0.30, bands) == "manageable"
-    assert dsr_band(0.3001, bands) == "stressed"
-    assert dsr_band(0.40, bands) == "stressed"
-    assert dsr_band(0.4001, bands) == "not_financeable"
+    # half-open [min, max): 0.20 belongs to the next band
+    assert dsr_band(0.20, bands) == "manageable"
+    assert dsr_band(0.2999, bands) == "manageable"
+    assert dsr_band(0.30, bands) == "stressed"
+    assert dsr_band(0.3999, bands) == "stressed"
+    assert dsr_band(0.40, bands) == "not_financeable"
+    assert dsr_band(5.0, bands) == "not_financeable"
+    # exactly one band matches any number: no overlaps and no gaps
+    names = [dsr_band(value / 10_000, bands) for value in range(0, 20_001)]
+    assert set(names) == {"comfortable", "manageable", "stressed", "not_financeable"}
+    assert "unknown" not in names
     # missing salary is unknown, never 0
     assert dsr_band(None, bands) == "unknown"
+
+
+def test_food_topup_is_a_known_cost_category(registry, rules: CostRules) -> None:
+    assert "food_topup" in rules.cost_categories
+    for scenario, components in rules.living_scenarios.items():
+        for component in components:
+            assert component in rules.cost_categories, f"{scenario}:{component}"
+
+
+def test_living_scenario_component_must_be_a_known_category(registry) -> None:
+    raw = registry.cost_rules.model_dump()
+    raw["living_scenarios"]["hostel"]["components"].append("bribes")
+    with pytest.raises(CostModelError, match="not in cost_categories"):
+        CostRules.from_config(raw)
+
+
+def test_overlapping_dsr_bands_are_rejected(registry) -> None:
+    raw = registry.cost_rules.model_dump()
+    raw["dsr25"]["bands"]["manageable"]["min"] = 0.25
+    with pytest.raises(CostModelError, match="does not continue"):
+        CostRules.from_config(raw)
+
+
+def test_currency_is_required_not_defaulted(registry) -> None:
+    raw = registry.cost_rules.model_dump()
+    raw["currency"]["base"] = ""
+    with pytest.raises(CostModelError, match="currency"):
+        CostRules.from_config(raw)
 
 
 def test_tcoa_counts_each_rupee_once(rules: CostRules) -> None:
@@ -201,3 +234,33 @@ def test_snapshot_render_is_json_ready(rules: CostRules) -> None:
 def test_unknown_living_scenario_is_rejected(rules: CostRules) -> None:
     with pytest.raises((CostModelError, ValueError)):
         CostInputs(items=base_items(), living="commute")
+
+
+def test_loan_defaults_expose_assumed_terms(registry) -> None:
+    terms = loan_terms_from_config(registry.cost_rules)
+    assert terms.annual_rate is not None
+    assert 0.0 <= terms.annual_rate < 1.0
+    assert terms.tenure_months > 0
+    assert terms.assumed_rate is True
+    assert terms.rate_source == "assumption"
+    defaults = registry.cost_rules.loan_defaults
+    assert all(spec.get("assumed") is True for spec in defaults.values())
+    assert all(spec.get("assumed_rate_pct") is not None for spec in defaults.values())
+
+
+def test_dsr25_is_unknown_without_a_rate(registry, rules: CostRules) -> None:
+    no_rate = LoanTerms(principal=300_000, annual_rate=None, tenure_months=120)
+    snapshot = compute(inputs(loan=no_rate), rules)
+    assert snapshot.dsr25.value is None
+    assert snapshot.dsr25.band == "unknown"
+    assert snapshot.emi.value is None
+    assert snapshot.emi.method == "unknown_rate"
+    assert snapshot.debt_at_repayment.value is None
+
+
+def test_assumed_rate_is_flagged_not_presented_as_published(registry, rules: CostRules) -> None:
+    terms = loan_terms_from_config(registry.cost_rules)
+    snapshot = compute(inputs(loan=terms), rules)
+    assert snapshot.assumptions_flags["loan_rate"]["assumed"] is True
+    assert any("assumed: true" in note for note in snapshot.emi.assumptions)
+    assert snapshot.dsr25.inputs["rate_assumed"] is True

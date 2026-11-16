@@ -1,9 +1,16 @@
 """Gaming / red-flag detectors (brief §11 "gaming resistance").
 
 Flags attach to the *claim*, never to the university, and reduce that claim's
-confidence. They are displayed verbatim. Weights come from
-``config/weights.yaml:gaming_flags``; a detector with no configured weight is
-still reported via :data:`MISSING_DETECTORS` rather than silently ignored.
+confidence. They are displayed verbatim. Penalties come from
+``config/weights.yaml:confidence_penalties``; a detector with no configured
+weight is still reported via :data:`MISSING_DETECTORS` rather than silently
+ignored.
+
+Each configured value is a per-flag multiplier penalty (``0 <= w < 1``), never a
+share. Penalties on one claim compose multiplicatively::
+
+    remaining = max(MIN_CONFIDENCE, prod(1 - w_i))
+    penalty   = 1 - remaining
 
 Every detector is pure: claims in, flags out.
 """
@@ -22,6 +29,9 @@ from fmd.score.evidence import (
     is_rate_claim,
     numeric,
 )
+
+# Composition floor: repeated flags may never drive claim confidence below this.
+MIN_CONFIDENCE = 0.05
 
 # Detectors implemented in code; validated against the config keys.
 DETECTORS: tuple[str, ...] = (
@@ -326,8 +336,14 @@ def detect(
     return tuple(sorted(flags, key=lambda f: (f.flag_id, str(f.claim_id), f.predicate)))
 
 
-def confidence_penalties(flags: Iterable[GamingFlag]) -> dict[str, float]:
-    """Per-claim multiplicative penalty: ``1 - prod(1 - weight)``, capped at 1."""
+def confidence_penalties(
+    flags: Iterable[GamingFlag], *, floor: float = MIN_CONFIDENCE
+) -> dict[str, float]:
+    """Per-claim multiplicative penalty: ``1 - max(floor, prod(1 - weight))``.
+
+    A floor keeps a pile-up of low-weight flags from reducing confidence to
+    zero (which would silently erase a claim instead of displaying it).
+    """
 
     by_claim: dict[str, float] = {}
     for flag in flags:
@@ -336,4 +352,7 @@ def confidence_penalties(flags: Iterable[GamingFlag]) -> dict[str, float]:
         key = str(flag.claim_id)
         remaining = by_claim.get(key, 1.0) * (1.0 - min(1.0, max(0.0, flag.weight)))
         by_claim[key] = remaining
-    return {key: min(1.0, max(0.0, 1.0 - remaining)) for key, remaining in by_claim.items()}
+    return {
+        key: min(1.0, max(0.0, 1.0 - max(floor, remaining)))
+        for key, remaining in by_claim.items()
+    }
