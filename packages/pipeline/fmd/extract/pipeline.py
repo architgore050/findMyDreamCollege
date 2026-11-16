@@ -32,7 +32,7 @@ from fmd.extract.pdf import (
 )
 from fmd.extract.prompts import load_prompt, user_message
 from fmd.extract.schemas import FamilyDocument, UnknownFamily, schema_for
-from fmd.extract.validate import Bands, Rejection, SpanRewrite, validate_document
+from fmd.extract.validate import Bands, FieldOutcome, Rejection, SpanRewrite, validate_document
 from fmd.llm import ModelRouter
 from fmd.store import SnapshotStore
 
@@ -83,6 +83,7 @@ class ExtractResult:
     claims: list[Any] = field(default_factory=list)
     rejections: list[Rejection] = field(default_factory=list)
     rewrites: list[SpanRewrite] = field(default_factory=list)
+    outcomes: list[FieldOutcome] = field(default_factory=list)
     adjudications: list[dict[str, Any]] = field(default_factory=list)
     skipped: bool = False
 
@@ -187,6 +188,8 @@ class ExtractPipeline:
                     "prompt_sha256": prompt.sha256,
                     "rejections": [item.as_dict() for item in validation.rejections],
                     "rewrites": [item.as_dict() for item in validation.rewrites],
+                    "outcomes": [item.as_dict() for item in validation.outcomes],
+                    "outcome_counts": validation.outcome_counts(),
                     "adjudications": adjudications,
                 },
             )
@@ -206,6 +209,7 @@ class ExtractPipeline:
             claims=stored,
             rejections=validation.rejections,
             rewrites=validation.rewrites,
+            outcomes=validation.outcomes,
             adjudications=adjudications,
         )
 

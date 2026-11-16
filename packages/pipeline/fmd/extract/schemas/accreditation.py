@@ -10,7 +10,7 @@ class Accreditation(FamilyDocument):
     SPECS = {
         "institution_name": FieldSpec("accreditation.institution_name", unit_kind="text"),
         "programme_name": FieldSpec("accreditation.programme_name", unit_kind="text"),
-        "naac_grade": FieldSpec("accreditation.naac_grade", unit_kind="text"),
+        "naac_grade": FieldSpec("accreditation.naac_grade", unit_kind="grade"),
         "recognition_status": FieldSpec("accreditation.recognition_status", unit_kind="text"),
         "recognition_body": FieldSpec("accreditation.body", unit_kind="text"),
         "valid_until": FieldSpec("accreditation.valid_until", unit_kind="date"),

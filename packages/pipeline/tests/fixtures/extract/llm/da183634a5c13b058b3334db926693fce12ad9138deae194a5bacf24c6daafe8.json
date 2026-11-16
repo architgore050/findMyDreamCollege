@@ -1,68 +1,44 @@
 {
   "content": {
     "cohort_year": {
-      "value": "2024-25",
-      "unit": null,
       "quote": "2024-25",
-      "char_start": 51,
-      "char_end": 58,
-      "confidence": 0.92
+      "confidence": 0.92,
+      "reason_if_null": null
     },
     "eligible_count": {
-      "value": 120,
-      "unit": "count",
       "quote": "Eligible students: 120",
-      "char_start": 59,
-      "char_end": 81,
-      "confidence": 0.95
+      "confidence": 0.95,
+      "reason_if_null": null
     },
     "placed_count": {
-      "value": 96,
-      "unit": "count",
       "quote": "Students placed: 96",
-      "char_start": 82,
-      "char_end": 101,
-      "confidence": 0.95
+      "confidence": 0.95,
+      "reason_if_null": null
     },
     "placement_rate": {
-      "value": "80%",
-      "unit": "percent",
       "quote": "Placement rate: 80%",
-      "char_start": 102,
-      "char_end": 121,
-      "confidence": 0.9
+      "confidence": 0.9,
+      "reason_if_null": null
     },
     "median_salary": {
-      "value": 420000,
-      "unit": "INR",
       "quote": "Median salary: INR 420000 per annum",
-      "char_start": 122,
-      "char_end": 157,
-      "confidence": 0.93
+      "confidence": 0.93,
+      "reason_if_null": null
     },
     "highest_package": {
-      "value": null,
-      "unit": null,
       "quote": null,
-      "char_start": null,
-      "char_end": null,
-      "confidence": null
+      "confidence": null,
+      "reason_if_null": "the report prints a median only"
     },
     "internship_counted_as_employment": {
-      "value": true,
-      "unit": null,
       "quote": "Internships are included in the placement count.",
-      "char_start": 158,
-      "char_end": 206,
-      "confidence": 0.88
+      "confidence": 0.88,
+      "reason_if_null": null
     },
     "outcome_basis": {
-      "value": "included in the placement count",
-      "unit": null,
       "quote": "Internships are included in the placement count.",
-      "char_start": 158,
-      "char_end": 206,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "reason_if_null": null
     }
   },
   "tokens_in": 640,

@@ -72,7 +72,7 @@ class CollectingSink:
 
 
 class StubRouter:
-    """Returns a fixed guided-JSON payload; no provider, no network."""
+    """Returns a fixed quote-first guided-JSON payload; no provider, no network."""
 
     def __init__(self, models, payload: dict) -> None:
         self.models = models
@@ -127,11 +127,13 @@ def test_mock_pipeline_persists_validated_claims_from_recorded_fixture(
     extraction = extractions.rows[0]
     assert extraction.snapshot_id == 1
     assert extraction.tool == "fmd.extract"
-    assert extraction.prompt_version == "placement_report@v1"
-    assert extraction.model == "Qwen3-14B-AWQ"
+    assert extraction.prompt_version == "placement_report@v2"
+    assert extraction.model == registry.models.profiles["bulk_extract"].model
     assert extraction.structure["tier"] == "T0"
     assert extraction.structure["family"] == "placement_report"
     assert extraction.structure["prompt_sha256"] == load_prompt("placement_report").sha256
+    assert extraction.structure["outcome_counts"]["resolved"] == 7
+    assert extraction.structure["outcome_counts"]["abstained"] == 1
     assert len(sink.calls) == 1
     expected_prompt = prompt_hash(load_prompt("placement_report").text, user_message(text))
     assert sink.calls[0].prompt_sha256 == expected_prompt
@@ -182,10 +184,8 @@ def test_quote_not_in_source_drops_the_field_and_records_a_rejection(
     digest = store.put(text.encode("utf-8"))
     payload = {
         "cohort_year": _field(None),
-        "eligible_count": _field(
-            120, "count", "Eligible students: 120", text.index("Eligible students")
-        ),
-        "placed_count": _field(97, "count", "Students placed: 97", 25),
+        "eligible_count": _field("Eligible students: 120", 0.95),
+        "placed_count": _field("Students placed: 97", 0.9),
         "placement_rate": _field(None),
         "median_salary": _field(None),
         "highest_package": _field(None),
@@ -198,8 +198,42 @@ def test_quote_not_in_source_drops_the_field_and_records_a_rejection(
     result = pipeline.run(ExtractTarget(snapshot_id=1, entity_id=7, family="placement_report"))
 
     assert [claim.predicate for claim in claims.rows] == ["placement.eligible_count"]
-    assert result.rejections[0].reason == "span_mismatch"
+    assert result.rejections[0].reason == "unresolved_span"
     assert extractions.rows[0].structure["rejections"][0]["field"] == "placed_count"
+    outcomes = extractions.rows[0].structure["outcomes"]
+    failed = next(item for item in outcomes if item["field"] == "placed_count")
+    assert failed["outcome"] == "unresolved"
+    assert failed["char_start"] is None
+
+
+def test_pipeline_records_a_guard_rejection_for_the_review_console(
+    tmp_path: Path, registry
+) -> None:
+    text = "Eligible students: 120\nStudents placed: 130\n"
+    store = SnapshotStore(tmp_path)
+    digest = store.put(text.encode("utf-8"))
+    payload = {
+        "cohort_year": _field(None),
+        "eligible_count": _field("Eligible students: 120", 0.95),
+        "placed_count": _field("Students placed: 130", 0.95),
+        "placement_rate": _field(None),
+        "median_salary": _field(None),
+        "highest_package": _field(None),
+        "internship_counted_as_employment": _field(None),
+        "outcome_basis": _field(None),
+    }
+    pipeline, extractions, claims = _pipeline(
+        tmp_path, registry, StubRouter(registry.models, payload), digest
+    )
+
+    result = pipeline.run(ExtractTarget(snapshot_id=1, entity_id=8, family="placement_report"))
+
+    assert "placement.placed_count" not in {claim.predicate for claim in claims.rows}
+    assert result.rejections[-1].guard == "placed_exceeds_eligible"
+    outcomes = {
+        item["field"]: item["outcome"] for item in extractions.rows[0].structure["outcomes"]
+    }
+    assert outcomes["placed_count"] == "rejected_guard:placed_exceeds_eligible"
 
 
 def test_batch_is_deterministic_and_sorted(tmp_path: Path, registry) -> None:
@@ -262,7 +296,7 @@ def test_no_rejections_are_silently_dropped_from_the_extraction_record(
         "cohort_year": _field(None),
         "eligible_count": _field(None),
         "placed_count": _field(None),
-        "placement_rate": _field(80, "percent", "Placement rate: 80%", 26),
+        "placement_rate": _field("Placement rate: 80%", 0.9),
         "median_salary": _field(None),
         "highest_package": _field(None),
         "internship_counted_as_employment": _field(None),
@@ -287,17 +321,9 @@ def test_claim_rows_match_the_claims_repo_shape(tmp_path: Path, registry) -> Non
     assert PlacementReport.FAMILY == "placement_report"
 
 
-def _field(
-    value,
-    unit: str | None = None,
-    quote: str | None = None,
-    start: int | None = None,
-) -> dict:
+def _field(quote: str | None, confidence: float | None = 0.9) -> dict:
     return {
-        "value": value,
-        "unit": unit,
         "quote": quote,
-        "char_start": start,
-        "char_end": (start + len(quote)) if start is not None and quote else None,
-        "confidence": 0.9 if value is not None else None,
+        "confidence": confidence if quote is not None else None,
+        "reason_if_null": None if quote is not None else "not stated in the document",
     }

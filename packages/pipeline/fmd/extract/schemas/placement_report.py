@@ -21,13 +21,27 @@ class PlacementReport(FamilyDocument):
             denominator_field="eligible_count",
         ),
         "median_salary": FieldSpec(
-            "salary.median", unit_required=True, unit_kind="money", period="per_year"
+            "salary.median",
+            unit_required=True,
+            unit_kind="money",
+            period="per_year",
+            period_required=True,
         ),
         "highest_package": FieldSpec(
-            "salary.highest_package", unit_required=True, unit_kind="money", period="per_year"
+            "salary.highest_package",
+            unit_required=True,
+            unit_kind="money",
+            period="per_year",
+            period_required=True,
         ),
-        "internship_counted_as_employment": FieldSpec("placement.internship_counted_as_employment"),
-        "outcome_basis": FieldSpec("placement.basis", unit_kind="text"),
+        "internship_counted_as_employment": FieldSpec(
+            "placement.internship_counted_as_employment", unit_kind="boolean"
+        ),
+        "outcome_basis": FieldSpec(
+            "placement.basis",
+            unit_kind="text",
+            value_pattern=r"(?:\bare\b|\bis\b|\bwere\b|\bwas\b)\s+(.+?)\.?$",
+        ),
     }
 
     cohort_year: ExtractedField | None = None

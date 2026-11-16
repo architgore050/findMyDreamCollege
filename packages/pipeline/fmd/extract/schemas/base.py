@@ -1,8 +1,15 @@
 """Shared guided-JSON field shape and family registry (brief §9).
 
-Every extracted field is nullable and carries a verbatim quote plus a span into
-the extraction text. Predicate names live here (not in prompt strings) so the
-review console, scoring and the web app can agree on a vocabulary.
+Extraction is **quote-first**. The model emits only what it can copy: a verbatim
+``quote``, a ``confidence`` and (when the field is null) a short
+``reason_if_null``. It never emits numbers, units or character offsets: models
+reliably identify the relevant text but reliably fail to reproduce exact span
+boundaries, so offsets and values are computed deterministically in
+:mod:`fmd.extract.validate` from the resolved span. A published number therefore
+always has a source span, and the span is never a model guess.
+
+Predicate names live here (not in prompt strings) so the review console, scoring
+and the web app can agree on a vocabulary.
 """
 
 from __future__ import annotations
@@ -15,30 +22,48 @@ from pydantic import BaseModel, ConfigDict, Field
 
 JsonScalar = str | int | float | bool
 
-UnitKind = Literal["money", "count", "hours", "months", "years", "percent", "date", "text"]
+UnitKind = Literal[
+    "money",
+    "count",
+    "hours",
+    "months",
+    "years",
+    "percent",
+    "date",
+    "text",
+    "grade",
+    "boolean",
+]
 Period = Literal["one_time", "per_year", "per_month", "per_semester"]
 
 
 class ExtractedField(BaseModel):
-    """One guided-JSON field. ``null`` means "the document did not say"."""
+    """One guided-JSON field. ``null`` means "the document did not say".
+
+    ``quote`` is the evidence and the *only* place a value may come from;
+    ``char_start``/``char_end`` are deliberately absent so the model cannot
+    fabricate a boundary. ``reason_if_null`` is review-console metadata and is
+    never treated as evidence.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    value: JsonScalar | None = None
-    unit: str | None = None
     quote: str | None = None
-    char_start: int | None = Field(default=None, ge=0)
-    char_end: int | None = Field(default=None, ge=0)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    reason_if_null: str | None = None
 
 
 @dataclass(frozen=True)
 class FieldSpec:
     """Structural facts about a field that validation needs.
 
-    ``unit_required`` / ``unit_kind`` decide whether a missing unit is a
-    rejection. ``is_rate`` requires a denominator in the claim qualifier.
-    ``denominator_field`` names the sibling field that supplies it.
+    ``unit_kind`` selects the deterministic parser that derives the value and
+    unit from the resolved span. ``is_rate`` requires a denominator in the claim
+    qualifier; ``denominator_field`` names the sibling field that supplies it.
+    ``period_required`` marks a field whose printed period must come from the
+    span itself (a salary without "per month"/"per annum" is UNKNOWN).
+    ``value_pattern`` optionally narrows a free-text span to the meaningful
+    phrase (still a verbatim substring of the resolved span).
     """
 
     predicate: str
@@ -47,6 +72,8 @@ class FieldSpec:
     is_rate: bool = False
     denominator_field: str | None = None
     period: Period | None = None
+    period_required: bool = False
+    value_pattern: str | None = None
     context: bool = False
 
 
@@ -85,11 +112,3 @@ class FamilyDocument(BaseModel):
     def fields(self) -> Iterator[tuple[str, FieldSpec, ExtractedField | None]]:
         for name, spec in self.SPECS.items():
             yield name, spec, getattr(self, name)
-
-    def context_values(self) -> dict[str, JsonScalar]:
-        values: dict[str, JsonScalar] = {}
-        for name in self.CONTEXT_FIELDS:
-            field = getattr(self, name)
-            if field is not None and field.value is not None:
-                values[name] = field.value
-        return values

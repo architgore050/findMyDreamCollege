@@ -71,15 +71,16 @@ def system_prompt(name: str, version: str | None = None) -> str:
 
 
 def user_message(text: str, *, max_chars: int | None = None) -> str:
-    """The user turn: verbatim text, delimited so offsets are unambiguous.
+    """The user turn: verbatim text, delimited so the quote is unambiguous.
 
-    ``char_start``/``char_end`` always refer to the un-delimited extraction text,
-    so the delimiter must not be counted by the model; it is told this.
+    The model returns quotes, not offsets: offsets are computed against the
+    un-delimited extraction text by :mod:`fmd.extract.validate`, so the
+    delimiter is never part of a span.
     """
     body = text if max_chars is None else text[:max_chars]
     return (
-        "DOCUMENT TEXT (verbatim; char offsets count from the first character "
-        "after this line, not from the delimiters):\n"
+        "DOCUMENT TEXT (verbatim; quote from this block exactly, without the "
+        "delimiters):\n"
         "<<<\n"
         f"{body}\n"
         ">>>"

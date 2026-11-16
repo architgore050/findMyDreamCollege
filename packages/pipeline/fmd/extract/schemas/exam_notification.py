@@ -13,7 +13,7 @@ class ExamNotification(FamilyDocument):
         "registration_opens": FieldSpec("exam.registration_opens", unit_kind="date"),
         "registration_closes": FieldSpec("exam.registration_closes", unit_kind="date"),
         "exam_date": FieldSpec("exam.date", unit_kind="date"),
-        "requires_travel": FieldSpec("exam.requires_travel"),
+        "requires_travel": FieldSpec("exam.requires_travel", unit_kind="boolean"),
         "fee_amount": FieldSpec(
             "exam.fee", unit_required=True, unit_kind="money", period="one_time"
         ),
