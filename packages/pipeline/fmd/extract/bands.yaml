@@ -1,0 +1,42 @@
+# Plausibility bands and unit vocabulary for extracted claims.
+# Bands are sanity limits, not expected ranges: a value outside them is rejected
+# for review, never clamped. Predicates absent here are band-free (text/date).
+# Money values carry their printed currency in the claim `unit`.
+
+currencies: [INR, USD, GBP, EUR, AUD, CAD, AED, SGD, JPY, CHF]
+
+units:
+  - count
+  - students
+  - seats
+  - hours
+  - months
+  - years
+  - percent
+  - ratio
+  - date
+  - grade
+  - text
+
+bands:
+  placement.eligible_count: {min: 1, max: 5000}
+  placement.placed_count: {min: 0, max: 5000}
+  placement.rate: {min: 0, max: 1}
+  salary.median: {min: 1000, max: 100000000}
+  salary.highest_package: {min: 1000, max: 500000000}
+  fee.tuition: {min: 0, max: 100000000}
+  fee.hostel: {min: 0, max: 10000000}
+  fee.mandatory: {min: 0, max: 10000000}
+  fee.total_first_year: {min: 0, max: 200000000}
+  seats.total: {min: 1, max: 5000}
+  seats.government_quota: {min: 0, max: 5000}
+  seats.management_quota: {min: 0, max: 5000}
+  curriculum.duration_months: {min: 6, max: 96}
+  curriculum.semesters: {min: 1, max: 16}
+  curriculum.internship_hours: {min: 0, max: 10000}
+  curriculum.internship_months: {min: 0, max: 48}
+  exam.fee: {min: 0, max: 1000000}
+  cost.rent_monthly: {min: 0, max: 1000000}
+  cost.food_monthly: {min: 0, max: 500000}
+  cost.transport_monthly: {min: 0, max: 500000}
+  cost.utilities_monthly: {min: 0, max: 500000}
