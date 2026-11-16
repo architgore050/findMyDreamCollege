@@ -42,15 +42,15 @@ dev: ## local dev (uvicorn + next dev, no docker for the apps)
 	cd apps/web && pnpm dev
 
 test: ## unit + integration, mock provider, no network
-	cd packages/pipeline && uv run pytest -q
+	cd packages/pipeline && uv sync --all-extras --quiet && uv run pytest -q
 	cd apps/web && pnpm test
 
 lint: ## ruff + eslint
-	cd packages/pipeline && uv run ruff check . && uv run ruff format --check .
+	cd packages/pipeline && uv sync --all-extras --quiet && uv run ruff check . && uv run ruff format --check .
 	cd apps/web && pnpm lint
 
 fmt: ## auto-format
-	cd packages/pipeline && uv run ruff format . && uv run ruff check --fix .
+	cd packages/pipeline && uv sync --all-extras --quiet && uv run ruff format . && uv run ruff check --fix .
 	cd apps/web && pnpm format
 
 .PHONY: help up down reset discovery migrate seed crawl extract score eval dev test lint fmt
