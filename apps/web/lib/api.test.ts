@@ -372,7 +372,7 @@ describe("profile-bearing POST endpoints", () => {
 });
 
 describe("GET endpoints", () => {
-  it("requests the cost scenario with living in the query and parses assumed flags", async () => {
+  it("POSTs the profile and living scenario as JSON and parses assumed flags", async () => {
     const fetchImpl = fetchReturning(
       envelope({
         programme_id: 7,
@@ -441,15 +441,16 @@ describe("GET endpoints", () => {
       }),
     );
 
-    const result = await apiProgrammeCost(7, "hostel", { fetchImpl });
+    const result = await apiProgrammeCost(7, profile, "hostel", { fetchImpl });
 
     expect(result.state).toBe("ok");
     if (result.state !== "ok") throw new Error("expected ok");
     expect(Object.keys(result.data.scenarios)).toEqual(["hostel", "independent"]);
     expect(result.data.dsr25?.value).toBeNull();
-    expect(fetchImpl.mock.calls[0]?.[0]).toBe(
-      "http://api.test/api/programmes/7/cost?living=hostel",
-    );
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://api.test/api/programmes/7/cost");
+    const init = fetchImpl.mock.calls[0]?.[1];
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({ profile, living: "hostel" });
   });
 
   it("parses the compare Pareto matrix and its not_comparable pairs", async () => {
