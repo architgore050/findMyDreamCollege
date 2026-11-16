@@ -28,7 +28,15 @@ from fmd.acquire.canonical import (
     build_canonical,
 )
 from fmd.acquire.errors import TierUnavailable
-from fmd.acquire.guards import AnomalyReport, BlockAnomaly, detect_anomalies
+from fmd.acquire.guards import (
+    AnomalyReport,
+    BlockAnomaly,
+    GuardTrip,
+    born_digital_length_warnings,
+    detect_anomalies,
+    guard_trip_summary,
+    repeated_substring_ratio,
+)
 from fmd.acquire.tables import CellHeaderLink, TableCellAssociation, associate_headers
 from fmd.acquire.tiers import (
     AcquirePolicy,
@@ -55,6 +63,7 @@ __all__ = [
     "CellHeaderLink",
     "CharAnchor",
     "ExtractedDoc",
+    "GuardTrip",
     "PageGeometry",
     "PageSpan",
     "ScanProfile",
@@ -66,11 +75,14 @@ __all__ = [
     "TierUnavailable",
     "apply_anomaly_guard",
     "associate_headers",
+    "born_digital_length_warnings",
     "build_canonical",
     "detect_anomalies",
+    "guard_trip_summary",
     "indic_self_check",
     "plan_tiers",
     "probe",
+    "repeated_substring_ratio",
     "run_tiers",
     "select_tier",
     "t0_extract",

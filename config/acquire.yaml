@@ -4,12 +4,19 @@
 # Tiers
 #   T0  pdftext           born-digital text layer, per-glyph boxes
 #   T1  Docling           layout + tables on clean scans, item/table-cell boxes
-#   T2  PaddleOCR-VL      OCR, block-level boxes only
-#   T2b Qwen3-VL          Devanagari fallback when T2's Indic self-check fails
+#   T2  Qwen3-VL          OCR, block-level boxes only (served through vLLM)
+#   T2b PaddleOCR-VL      alternate OCR engine; CPU-only on this sm_120 host
 #   T3  human queue       anomalies, low confidence; never an automated model
 #
+# T2 runs Qwen3-VL-8B because it is the only local option with a published
+# real-scan Devanagari number (chrF++ 75.2, arXiv:2606.29213) and because vLLM
+# ships sm_120 (Blackwell) kernels, which PaddlePaddle's GPU wheels do not.
+# PaddleOCR-VL is kept as the T2b engine: not deleted, but GPU-less on this host
+# (its wheels stop at sm_90), so it is offered on CPU only.
+#
 # Rejected and not to be reintroduced: PyMuPDF (AGPL), Surya/Marker weights
-# (OpenRAIL-M), MiniCPM-OCR/GLM-OCR for Hindi (no `hi` in the language list).
+# (OpenRAIL-M, $5M revenue cap), MiniCPM-OCR/GLM-OCR for Hindi (no `hi` in the
+# language list).
 
 version: "1"
 
@@ -28,16 +35,41 @@ tiers:
   # Deterministic 1% field audit (sha256-keyed, never random).
   adjudication_sample_rate: 0.01
 
+# Repetition / entropy guard. Scoped to OCR output (T2, T2b) only: a decoder
+# loop is a model failure. T0 (pdftext) and T1 (Docling) read a real text layer,
+# so a long block there is evidence, not an anomaly — those tiers are never
+# routed to T3 on length. The page-median rule below is a log diagnostic only.
 anomaly:
-  # A block longer than this multiple of the page median block length is suspect.
+  # T0/T1 diagnostic: a block longer than this multiple of the page median
+  # block length logs a warning and continues to extraction. Catches layout
+  # extractors that merge a whole table into one item; never refuses a document.
   block_length_multiplier: 3.0
-  # A block whose character entropy is below this share of the page reference
-  # has collapsed (decoder loop).
+  # OCR only: a block whose character entropy is below this share of the page
+  # reference has collapsed (decoder loop).
   entropy_ratio_floor: 0.45
+  # OCR only: blocks below this many characters are not inspected.
   min_block_chars: 120
+  # OCR only: entropy is only judged on pages longer than this.
   min_page_chars: 80
-  # A block that is one unit repeated at least this many times is a loop.
+  # A repeated unit must repeat at least this many times to be a loop. A 71×
+  # decoder repeat trips; a table header repeated twice does not.
   repeated_block_min_occurrences: 20
+  # OCR only: absolute ceiling for one block. A scanned A4 page holds roughly
+  # 4k characters; a single block above this is a runaway decode, not a table.
+  ocr_block_chars_cap: 6000
+  # OCR only: absolute ceiling for one page's total text. This is the baseline a
+  # loop inflates (the block is part of the page, so a page-median comparison
+  # cannot see it); a page above this cannot be a real scan.
+  ocr_page_chars_cap: 12000
+  # OCR only: share of a block covered by its most repeated unit. An exact
+  # periodic block (or one repeated line) scores ~1.0; a dense fee table with
+  # varied numbers scores low and is not refused.
+  ocr_repeated_substring_ratio: 0.5
+  # OCR only: an interior page (not first/last) with fewer than this many
+  # characters between substantial pages is a truncated decode.
+  ocr_truncated_page_min_chars: 80
+  # OCR only: truncation needs at least this many pages to judge neighbours.
+  ocr_truncated_page_min_pages: 3
 
 backends:
   T0:
@@ -49,22 +81,54 @@ backends:
     model: docling
     granularity: span
   T2:
-    tool: paddleocr-vl
-    model: PaddleOCR-VL-1.6
+    tool: qwen3-vl
+    model: Qwen3-VL-8B-Instruct
     granularity: block
     # The pipeline reads the URL from this env var only (no YAML default is
     # consumed by fmd.acquire.tiers): FMD_T2_URL=http://localhost:8110 on the
-    # host, http://paddleocr:8110 inside compose (infra/docker-compose.yml,
-    # profile "ocr"). Unset => TierUnavailable on the T2 tier in config/models.yaml.
+    # host, http://ocr:8110 inside compose (infra/docker-compose.yml, profile
+    # "ocr"). Unset => TierUnavailable and the page goes to the human queue.
     endpoint_env: FMD_T2_URL
+    # Defaults for the `service:` block below are read by infra/ocr/server.py
+    # (FMD_OCR_CONFIG, /config/acquire.yaml inside the container). Every value
+    # here is env-overridable; nothing model-specific is hardcoded in Python.
+    service:
+      backend: qwen3vl
+      # vLLM on the host, OpenAI-compatible. `scripts/serve_ocr.sh vision-start`
+      # serves exactly this pair. Served name must match --served-model-name.
+      hub_id: Qwen/Qwen3-VL-8B-Instruct-FP8
+      served_name: Qwen3-VL-8B-Instruct
+      vllm_url: http://host.docker.internal:8001/v1
+      # 10.6 GB of FP8 weights; fits 16 GB with an 8k context. The int4
+      # alternative (unsloth/Qwen3-VL-8B-Instruct-bnb-4bit, 7.2 GB) and its
+      # trade-offs are documented in docs/.../11-inference-runbook.md.
+      json_mode: true
+      # Block boxes are requested on a 0..1000 grid and scaled to the analysed
+      # raster, so a box always resolves inside its page box.
+      bbox_space: normalized_1000
+      dpi: 200
+      max_pages: 40
+      # Long side of the analysed raster; larger pages are downscaled first and
+      # pages[].width/height report the analysed size (never the raw render).
+      max_side_px: 2400
+      timeout_s: 120
   T2b:
-    tool: qwen3-vl
-    model: Qwen3-VL-8B
+    tool: paddleocr-vl
+    model: PaddleOCR-VL-1.6
     granularity: block
-    # Devanagari fallback; same /extract contract, different engine.
-    # FMD_T2B_URL=http://localhost:8111 (host) — no service is shipped by
-    # default: Qwen3-VL does not co-reside with the 9B text model in 16 GB.
+    # Same /extract contract, different engine. PaddlePaddle's GPU wheels stop at
+    # sm_90, so on this sm_120 host this service is CPU-only: correct but slow.
+    # FMD_T2B_URL=http://localhost:8111 (host) — no service starts by default;
+    # enable it with `docker compose --profile ocr-paddle up -d ocr-paddle`.
     endpoint_env: FMD_T2B_URL
+    service:
+      backend: paddleocr
+      served_name: PaddleOCR-VL-1.6
+      device: cpu
+      dpi: 200
+      max_pages: 40
+      max_side_px: 2400
+      timeout_s: 300
   T3:
     tool: human_queue
     model: human

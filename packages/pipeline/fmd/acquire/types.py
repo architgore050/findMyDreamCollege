@@ -17,6 +17,7 @@ from fmd.acquire.canonical import (
     PageGeometry,
     TextBlock,
 )
+from fmd.acquire.guards import GuardTrip
 from fmd.acquire.tables import TableCellAssociation
 
 Granularity = Literal["glyph", "span", "block"]
@@ -83,6 +84,7 @@ class ExtractedDoc:
     ocr_anomaly: bool = False
     anomaly_reasons: tuple[str, ...] = ()
     anomalous_pages: tuple[int, ...] = ()
+    guard_trips: tuple[GuardTrip, ...] = ()
     needs_review: bool = False
     two_column: bool = False
     table_confidence: float | None = None
@@ -90,6 +92,13 @@ class ExtractedDoc:
     @property
     def is_empty(self) -> bool:
         return not self.text.strip()
+
+    def guard_trips_by_name(self) -> dict[str, int]:
+        """Guard refusals counted by name for the run summary."""
+        counts: dict[str, int] = {}
+        for trip in self.guard_trips:
+            counts[trip.guard] = counts.get(trip.guard, 0) + 1
+        return dict(sorted(counts.items()))
 
     def page_box(self, page_no: int) -> tuple[float, float, float, float] | None:
         for page in self.pages:
@@ -122,6 +131,8 @@ class ExtractedDoc:
             "ocr_anomaly": self.ocr_anomaly,
             "anomaly_reasons": list(self.anomaly_reasons),
             "anomalous_pages": list(self.anomalous_pages),
+            "guard_trips": [trip.as_dict() for trip in self.guard_trips],
+            "guard_trips_by_name": self.guard_trips_by_name(),
             "needs_review": self.needs_review,
             "two_column": self.two_column,
             "table_confidence": self.table_confidence,
@@ -134,6 +145,8 @@ class ExtractedDoc:
             "tier": "T3",
             "tool": "human_queue",
             "reasons": list(self.anomaly_reasons) or ["tier_escalation"],
+            "guard_trips": [trip.as_dict() for trip in self.guard_trips],
+            "guard_trips_by_name": self.guard_trips_by_name(),
             "anomalous_pages": list(self.anomalous_pages),
             "page_count": len(self.pages or self.page_map),
             "table_confidence": self.table_confidence,

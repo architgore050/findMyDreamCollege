@@ -169,7 +169,7 @@ def test_t2b_unavailable_routes_to_human_review() -> None:
     assert "T2b unavailable" in result.notes[0]
 
 
-def test_repetition_loop_routes_to_t3_before_any_higher_tier() -> None:
+def test_ocr_repetition_loop_routes_to_t3_before_claims() -> None:
     blocks = [
         TextBlock(page_no=1, text=LONG_TEXT, bbox=(10, 10, 500, 20)),
         TextBlock(page_no=1, text="Fee 50000 " * 71, bbox=(10, 30, 500, 40)),
@@ -178,14 +178,41 @@ def test_repetition_loop_routes_to_t3_before_any_higher_tier() -> None:
     result = run_tiers(
         b"ignored",
         policy=_policy(),
-        t0=lambda _: _doc("", blocks=blocks),
+        t0=lambda _: _doc(""),
         t1=lambda _: calls.append("T1") or _doc("x", tier="T1"),
+        t2=lambda _: calls.append("T2") or _doc("", tier="T2", blocks=blocks),
     )
 
     assert result.tier == "T3"
     assert result.ocr_anomaly is True
     assert result.needs_review is True
-    assert calls == []
+    assert result.guard_trips_by_name() == {"repetition_loop": 1}
+    assert calls == ["T2"]
+
+
+def test_t1_long_table_is_not_refused() -> None:
+    table = "\n".join(
+        f"BSc MLT year {row % 4 + 1} tuition {45000 + row * 315} lab {2500 + row * 17}"
+        for row in range(20)
+    )
+    t1_blocks = [
+        TextBlock(page_no=1, text="Fees payable at admission", bbox=(10, 10, 500, 20)),
+        TextBlock(page_no=1, text="See table below", bbox=(10, 30, 500, 40)),
+        TextBlock(page_no=1, text=table, bbox=(10, 50, 500, 700)),
+    ]
+    calls: list[str] = []
+
+    result = run_tiers(
+        b"ignored",
+        policy=_policy(),
+        t0=lambda _: _doc(LONG_TEXT + "\n50000 60 4\n45000 60 4\n40000 60 4"),
+        t1=lambda _: calls.append("T1") or _doc("", tier="T1", blocks=t1_blocks),
+        t2=lambda _: calls.append("T2") or _doc("x", tier="T2"),
+    )
+
+    assert result.tier == "T1"
+    assert result.ocr_anomaly is False
+    assert calls == ["T1"]
 
 
 # --------------------------------------------------------------------------- lazy imports
@@ -221,7 +248,7 @@ def test_t2b_without_endpoint_is_an_explicit_tier_unavailable(
     with pytest.raises(TierUnavailable) as excinfo:
         t2b_extract(b"%PDF-1.4")
     assert "FMD_T2B_URL" in str(excinfo.value)
-    assert "Qwen3-VL-8B" in str(excinfo.value)
+    assert _policy().backend("T2b").model in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- OCR contract

@@ -8,7 +8,9 @@ Order (all thresholds in ``config/acquire.yaml``):
 3. Image-only pages, a T1 table-confidence below the configured floor, or
    Devanagari text → T2 PaddleOCR-VL.
 4. T2's Indic self-check fails → T2b Qwen3-VL (vLLM).
-5. Repetition-loop / entropy anomaly → T3 human queue, never claims.
+5. Repetition-loop / entropy / length anomaly **in OCR output** → T3 human
+   queue, never claims. T0/T1 output is never refused on length: a born-digital
+   table is evidence, and the page-median rule is a log diagnostic there.
 
 Heavy dependencies are imported inside the tier functions. A base install
 imports this module and runs T0; T1/T2/T2b raise :class:`TierUnavailable` with
@@ -20,6 +22,7 @@ from __future__ import annotations
 import base64
 import importlib
 import importlib.metadata
+import logging
 import os
 import tempfile
 from dataclasses import dataclass, replace
@@ -31,7 +34,11 @@ import yaml
 
 from fmd.acquire.canonical import PageGeometry, TextBlock, build_canonical
 from fmd.acquire.errors import TierUnavailable
-from fmd.acquire.guards import detect_anomalies
+from fmd.acquire.guards import (
+    OCR_TIERS,
+    born_digital_length_warnings,
+    detect_anomalies,
+)
 from fmd.acquire.tables import associate_headers, table_confidence
 from fmd.acquire.types import (
     ExtractedDoc,
@@ -43,6 +50,8 @@ from fmd.acquire.types import (
 TIERS_YAML = Path(__file__).resolve().parents[1] / "extract" / "tiers.yaml"
 TIER_ORDER = ("T0", "T1", "T2", "T2b", "T3")
 _DEVANAGARI = range(0x0900, 0x0980)
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- policy
@@ -769,26 +778,47 @@ def indic_self_check(text: str) -> float:
 
 
 def apply_anomaly_guard(doc: ExtractedDoc, policy: AcquirePolicy) -> ExtractedDoc:
-    """Mark anomalous blocks/pages and route the document to T3."""
-    if not doc.ocr_anomaly:
-        thresholds = policy.anomaly
-        report = detect_anomalies(
+    """Guard OCR/VLM output; born-digital T0/T1 output is never refused.
+
+    Only T2/T2b blocks are model-generated, so only they are checked for
+    decoder loops, length explosions and truncation. A T0/T1 document that
+    trips the length diagnostic logs a warning and continues to extraction:
+    a long born-digital fee table is evidence, not an anomaly.
+    """
+    if doc.ocr_anomaly:
+        return doc
+    thresholds = policy.anomaly
+    if doc.tier not in OCR_TIERS:
+        for message in born_digital_length_warnings(
             doc.blocks,
             block_length_multiplier=thresholds.block_length_multiplier,
-            entropy_ratio_floor=thresholds.entropy_ratio_floor,
             min_block_chars=thresholds.min_block_chars,
-            min_page_chars=thresholds.min_page_chars,
-            repeated_block_min_occurrences=thresholds.repeated_block_min_occurrences,
+        ):
+            logger.warning("born-digital length diagnostic (not a refusal): %s", message)
+        return doc
+    report = detect_anomalies(
+        doc.blocks,
+        tier=doc.tier,
+        entropy_ratio_floor=thresholds.entropy_ratio_floor,
+        min_block_chars=thresholds.min_block_chars,
+        min_page_chars=thresholds.min_page_chars,
+        repeated_block_min_occurrences=thresholds.repeated_block_min_occurrences,
+        block_chars_cap=thresholds.ocr_block_chars_cap,
+        page_chars_cap=thresholds.ocr_page_chars_cap,
+        repeated_substring_ratio_floor=thresholds.ocr_repeated_substring_ratio,
+        truncated_page_min_chars=thresholds.ocr_truncated_page_min_chars,
+        truncated_page_min_pages=thresholds.ocr_truncated_page_min_pages,
+    )
+    if report.ocr_anomaly:
+        return replace(
+            doc,
+            ocr_anomaly=True,
+            anomaly_reasons=report.reasons,
+            anomalous_pages=report.pages,
+            guard_trips=report.trips,
+            needs_review=True,
+            tier="T3",
         )
-        if report.ocr_anomaly:
-            return replace(
-                doc,
-                ocr_anomaly=True,
-                anomaly_reasons=report.reasons,
-                anomalous_pages=report.pages,
-                needs_review=True,
-                tier="T3",
-            )
     return doc
 
 
