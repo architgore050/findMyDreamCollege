@@ -7,7 +7,7 @@ connection context.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -337,6 +337,15 @@ class FrontierRecord(FrontierUpsert):
     ban_score: float | None = None
     yield_score: float | None = None
     updated_at: datetime | None = None
+
+
+class DomainPolitenessRecord(RowModel):
+    domain: str
+    rps: float | None = None
+    crawl_delay: float | None = None
+    robots: dict[str, Any] | None = None
+    robots_fetched_at: datetime | None = None
+    quarantined_until: datetime | None = None
 
 
 # --------------------------------------------------------------------------- repos
@@ -1252,6 +1261,9 @@ class CrawlFrontierRepo:
         self.db = database
 
     def enqueue(self, item: FrontierUpsert) -> FrontierRecord:
+        # Insert/dedupe only. ``LEAST`` keeps the earliest schedule for a URL
+        # discovered twice; a retry must use ``set_next_allowed_at`` instead so
+        # backoff can move the URL later.
         with self.db.connection() as conn:
             row = conn.execute(
                 """
@@ -1271,6 +1283,31 @@ class CrawlFrontierRepo:
             ).fetchone()
         assert row is not None
         return FrontierRecord.model_validate(row)
+
+    def set_next_allowed_at(self, url: str, when: datetime) -> FrontierRecord | None:
+        """Unconditional schedule; the only way to push a retry later."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE crawl_frontier SET next_allowed_at = %s, updated_at = now()
+                WHERE url = %s
+                RETURNING *
+                """,
+                (when, url),
+            ).fetchone()
+        return FrontierRecord.model_validate(row) if row else None
+
+    def bump_attempts(self, url: str, by: int = 1) -> FrontierRecord | None:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE crawl_frontier SET attempts = attempts + %s, updated_at = now()
+                WHERE url = %s
+                RETURNING *
+                """,
+                (by, url),
+            ).fetchone()
+        return FrontierRecord.model_validate(row) if row else None
 
     def get(self, url: str) -> FrontierRecord | None:
         with self.db.connection() as conn:
@@ -1318,6 +1355,144 @@ class CrawlFrontierRepo:
             ).fetchall()
         return {row["state"]: int(row["n"]) for row in rows}
 
+    def count_for_domain_since(self, domain: str, since: datetime) -> int:
+        """Pages completed for a domain since ``since`` (daily budget denominator)."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT count(*) AS n FROM crawl_frontier
+                WHERE domain = %s AND state = 'done' AND updated_at >= %s
+                """,
+                (domain, since),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def update_yield(self, domain: str, pages: int, yield_score: float) -> None:
+        """Record the yield of the page just fetched for ``domain``.
+
+        The schema keeps yield per frontier row; the most recently touched row
+        is the page that produced it. ``pages`` is the denominator the ratio was
+        computed from and is ignored when it is zero.
+        """
+        if pages <= 0:
+            return
+        with self.db.connection() as conn:
+            conn.execute(
+                """
+                UPDATE crawl_frontier SET yield_score = %s
+                WHERE url = (
+                    SELECT url FROM crawl_frontier WHERE domain = %s
+                    ORDER BY updated_at DESC, url DESC LIMIT 1
+                )
+                """,
+                (max(0.0, min(1.0, yield_score)), domain),
+            )
+
+    def yield_for_domain(self, domain: str) -> tuple[int, float]:
+        """``(pages_fetched, summed_yield)`` for the whole crawl of a domain."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT count(*) AS n, COALESCE(sum(yield_score), 0.0) AS valuable
+                FROM crawl_frontier
+                WHERE domain = %s AND state = 'done'
+                """,
+                (domain,),
+            ).fetchone()
+        if not row:
+            return 0, 0.0
+        return int(row["n"]), float(row["valuable"])
+
+    def record_tier(self, domain: str, tier: str) -> None:
+        """Attribute the tier that answered to the domain's latest frontier row."""
+        with self.db.connection() as conn:
+            conn.execute(
+                """
+                UPDATE crawl_frontier SET tier_used = %s
+                WHERE url = (
+                    SELECT url FROM crawl_frontier WHERE domain = %s
+                    ORDER BY updated_at DESC, url DESC LIMIT 1
+                )
+                """,
+                (tier, domain),
+            )
+
+    def tier_stats(self, domain: str) -> dict[str, int]:
+        """How often each fetch tier answered for a domain (ban-risk metric)."""
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT COALESCE(tier_used, 'none') AS tier, count(*) AS n
+                FROM crawl_frontier
+                WHERE domain = %s
+                GROUP BY COALESCE(tier_used, 'none')
+                ORDER BY tier
+                """,
+                (domain,),
+            ).fetchall()
+        return {row["tier"]: int(row["n"]) for row in rows}
+
+    def quarantine(self, domain: str, until: datetime) -> None:
+        """Set/extend a domain quarantine; an existing later deadline wins."""
+        with self.db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO domain_politeness (domain, quarantined_until)
+                VALUES (%s, %s)
+                ON CONFLICT (domain) DO UPDATE SET
+                    quarantined_until = GREATEST(domain_politeness.quarantined_until,
+                                                 EXCLUDED.quarantined_until)
+                """,
+                (domain, until),
+            )
+
+    def is_quarantined(self, domain: str, at: datetime | None = None) -> bool:
+        at = at or datetime.now(UTC)
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT quarantined_until > %s AS active
+                FROM domain_politeness WHERE domain = %s
+                """,
+                (at, domain),
+            ).fetchone()
+        return bool(row["active"]) if row else False
+
+    def get_politeness(self, domain: str) -> DomainPolitenessRecord | None:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM domain_politeness WHERE domain = %s", (domain,)
+            ).fetchone()
+        return _politeness(row) if row else None
+
+    def upsert_politeness(self, state: DomainPolitenessRecord) -> DomainPolitenessRecord:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO domain_politeness
+                    (domain, rps, crawl_delay, robots_json, robots_fetched_at,
+                     quarantined_until)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (domain) DO UPDATE SET
+                    rps = EXCLUDED.rps,
+                    crawl_delay = EXCLUDED.crawl_delay,
+                    robots_json = EXCLUDED.robots_json,
+                    robots_fetched_at = EXCLUDED.robots_fetched_at,
+                    quarantined_until = EXCLUDED.quarantined_until
+                RETURNING *
+                """,
+                (
+                    state.domain,
+                    state.rps,
+                    state.crawl_delay,
+                    _json(state.robots),
+                    state.robots_fetched_at,
+                    state.quarantined_until,
+                ),
+            ).fetchone()
+        assert row is not None
+        return _politeness(row)
+
 
 # --------------------------------------------------------------------------- mappers
 
@@ -1360,6 +1535,17 @@ def _entity(row: dict[str, Any]) -> EntityRecord:
 
 def _document(row: dict[str, Any]) -> DocumentRecord:
     return DocumentRecord.model_validate(row)
+
+
+def _politeness(row: dict[str, Any]) -> DomainPolitenessRecord:
+    return DomainPolitenessRecord(
+        domain=row["domain"],
+        rps=row["rps"],
+        crawl_delay=row["crawl_delay"],
+        robots=row["robots_json"],
+        robots_fetched_at=row["robots_fetched_at"],
+        quarantined_until=row["quarantined_until"],
+    )
 
 
 def _snapshot(row: dict[str, Any]) -> SnapshotRecord:

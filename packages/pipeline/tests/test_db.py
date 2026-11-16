@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -43,6 +43,8 @@ from fmd.db import (
     applied_migrations,
     run_migrations,
 )
+from fmd.db.repositories import DomainPolitenessRecord
+from fmd.fetch.types import FetchRequest, http_date
 
 pytestmark = pytest.mark.usefixtures("pg_database")
 
@@ -305,6 +307,86 @@ def test_source_registry_and_llm_audit_and_frontier(pg_database) -> None:
     updated = frontier.set_state(url, "done", tier_used="httpx", attempts=1)
     assert updated is not None and updated.state == "done"
     assert frontier.count_by_state().get("done", 0) >= 1
+
+
+def test_frontier_repo_backoff_and_domain_accounting(pg_database) -> None:
+    domain = f"page-{_suffix()}.ac.in"
+    url = f"https://{domain}/report.pdf"
+    repo = CrawlFrontierRepo(pg_database)
+    start = datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
+
+    repo.enqueue(FrontierUpsert(url=url, domain=domain, next_allowed_at=start))
+    retry_at = start + timedelta(minutes=5)
+    moved = repo.set_next_allowed_at(url, retry_at)
+    assert moved is not None and moved.next_allowed_at == retry_at
+
+    # Dedupe picks the earlier of the two times; it never pushes a URL later.
+    duplicate = repo.enqueue(FrontierUpsert(url=url, domain=domain, next_allowed_at=start))
+    assert duplicate.next_allowed_at == start
+
+    bumped = repo.bump_attempts(url)
+    assert bumped is not None and bumped.attempts == 1
+
+    repo.set_state(url, "done", tier_used="curl_cffi")
+    assert repo.count_for_domain_since(domain, start) == 1
+    repo.update_yield(domain, pages=4, yield_score=0.25)
+    assert repo.yield_for_domain(domain) == (1, 0.25)
+    repo.record_tier(domain, "patchright")
+    assert repo.tier_stats(domain) == {"patchright": 1}
+
+    until = datetime.now(UTC) + timedelta(hours=6)
+    assert repo.is_quarantined(domain) is False
+    repo.quarantine(domain, until)
+    assert repo.is_quarantined(domain) is True
+    record = repo.get_politeness(domain)
+    assert record is not None and record.quarantined_until == until
+    repo.upsert_politeness(
+        DomainPolitenessRecord(
+            domain=domain,
+            rps=2.0,
+            crawl_delay=1.5,
+            robots={"text": "User-agent: *", "status": 200},
+            robots_fetched_at=start,
+            quarantined_until=None,
+        )
+    )
+    saved = repo.get_politeness(domain)
+    assert saved is not None
+    assert (saved.rps, saved.crawl_delay) == (2.0, 1.5)
+    assert saved.robots is not None and saved.robots["status"] == 200
+
+
+def test_conditional_get_roundtrip_preserves_validators_and_bumps_last_seen(pg_database) -> None:
+    documents = DocumentsRepo(pg_database)
+    snapshots = SnapshotsRepo(pg_database)
+    url = f"https://example.ac.in/conditional/{_suffix()}.pdf"
+    first_seen = datetime(2020, 1, 1, tzinfo=UTC)
+
+    stored = documents.upsert(
+        DocumentUpsert(
+            url=url,
+            domain="example.ac.in",
+            etag='"v1"',
+            last_modified=first_seen,
+            last_seen=first_seen,
+        )
+    )
+    assert stored.etag == '"v1"'
+
+    request = FetchRequest.revalidate(
+        stored.url, etag=stored.etag, last_modified=stored.last_modified
+    )
+    assert request.etag == '"v1"'
+    assert request.last_modified == http_date(first_seen)
+
+    # A 304 writes no snapshot; the caller records the revalidation instead.
+    revalidated = documents.upsert(DocumentUpsert(url=url, domain="example.ac.in", http_status=304))
+    assert revalidated.id == stored.id
+    assert revalidated.etag == '"v1"'
+    assert revalidated.http_status == 304
+    assert revalidated.last_seen is not None
+    assert revalidated.last_seen > first_seen
+    assert snapshots.list_for_document(revalidated.id) == []
 
 
 def test_seed_projects_registry(pg_database, registry) -> None:

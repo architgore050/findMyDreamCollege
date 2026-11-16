@@ -7,6 +7,9 @@ Other workstreams implement against these names/types. Schema changes need a new
 class DocumentRef(Protocol):  # fetch layer only
     url: str
     source_id: str | None
+    etag: str | None            # optional; previous response validator
+    last_modified: str | None   # optional; HTTP-date string (If-Modified-Since)
+    priority: int               # optional frontier hint, default 0
 
 
 class SourceAdapter(Protocol):  # fmd/adapters/<family>.py
@@ -14,7 +17,13 @@ class SourceAdapter(Protocol):  # fmd/adapters/<family>.py
 
     def fetch(self) -> Iterable[DocumentRef]: ...
 ```
+`fmd/discover/base.py:DocumentRef` is the concrete dataclass; every new field is
+optional with a default, so existing constructors keep working. `etag` /
+`last_modified` let WS-C issue a conditional GET without re-reading
+`DocumentsRepo`; `FetchRequest.revalidate(url, etag=..., last_modified=...)`
+accepts the stored `datetime` and renders the header value (`http_date`).
 `config/sources.yaml:adapter` must be in `KNOWN_ADAPTERS`; unknown names fail registry load.
+
 ## Evidence store — `fmd/store/snapshot_store.py`
 `SnapshotStore(root)` → `put(bytes)->sha256`, `get(sha256)->bytes`, `verify(sha256)->bool`,
 `exists(sha256)->bool`, `path_for(sha256)->Path`; atomic, content-addressed
@@ -59,4 +68,10 @@ list_for_institution,list,count,facets` · Scores `create,latest_for_entity,
 list_for_entity` · Exams `upsert,get,list,upsert_window,list_windows` · CostItems
 `create,list_for_programme` · FinancingOptions `create,list` · LLMCalls `record,
 list_for_purpose,spend_since` · CrawlFrontier `enqueue,get,list_due,set_state,
-count_by_state`.
+count_by_state,set_next_allowed_at,bump_attempts,count_for_domain_since,
+update_yield,yield_for_domain,record_tier,tier_stats,quarantine,is_quarantined,
+get_politeness,upsert_politeness`.
+
+`enqueue` is insert/dedupe only (keeps the earlier `next_allowed_at`); retry
+backoff must call `set_next_allowed_at`, which sets the time unconditionally.
+`fmd/frontier/**` holds no SQL: it calls these methods only.

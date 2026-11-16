@@ -1,10 +1,29 @@
 """Discovery: SearXNG, Common Crawl, sitemaps — workstream B (brief §7, §8).
 
-TODO(WS-B): query-template discovery only; results are leads, never evidence.
+Every backend emits :class:`~fmd.discover.base.DocumentRef` leads only. No
+parsing, no claims, no scoring. Query templates are registry data.
 """
 
 from __future__ import annotations
 
+from fmd.discover.base import (
+    DiscoveryUnavailable,
+    DocumentRef,
+    dedupe_refs,
+    params_from_source,
+)
+from fmd.discover.common_crawl import CommonCrawlIndex
+from fmd.discover.searxng import SearxngClient, SearxngUnavailable, templates_from_source
+from fmd.discover.sitemaps import SitemapDiscovery
 
-def discover(*args: object, **kwargs: object) -> None:
-    raise NotImplementedError("discovery is workstream B (see brief §7)")
+__all__ = [
+    "CommonCrawlIndex",
+    "DiscoveryUnavailable",
+    "DocumentRef",
+    "SearxngClient",
+    "SearxngUnavailable",
+    "SitemapDiscovery",
+    "dedupe_refs",
+    "params_from_source",
+    "templates_from_source",
+]

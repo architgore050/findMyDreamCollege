@@ -53,6 +53,49 @@ class CountriesConfig(ConfigModel):
 Trust = Literal["high", "medium", "low"]
 
 
+class DiscoveryParams(ConfigModel):
+    """Structured discovery parameters (registry data, never Python constants).
+
+    ``domain_suffixes`` and ``pdf_url_patterns`` drive the Common Crawl URL-index
+    sweep; ``query_templates`` drive SearXNG. Suffixes are bare eTLDs without a
+    leading dot; PDF patterns are SQL ``LIKE`` patterns.
+    """
+
+    index_glob: str | None = None
+    domain_suffixes: list[str] = Field(default_factory=list)
+    pdf_url_patterns: list[str] = Field(default_factory=list)
+    query_templates: list[str] = Field(default_factory=list)
+
+    @field_validator("domain_suffixes")
+    @classmethod
+    def _normalise_suffixes(cls, values: list[str]) -> list[str]:
+        normalised: list[str] = []
+        for value in values:
+            suffix = value.strip().lower().lstrip(".")
+            if not suffix:
+                raise ValueError("domain suffix must not be blank")
+            if "/" in suffix or ":" in suffix:
+                raise ValueError(f"domain suffix {value!r} must be a bare eTLD, not a host")
+            normalised.append(suffix)
+        return normalised
+
+    @field_validator("pdf_url_patterns", "query_templates")
+    @classmethod
+    def _non_blank(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if not value.strip():
+                raise ValueError("must not contain a blank entry")
+        return values
+
+
+# Params each discovery adapter needs before it can run. A discovery source
+# missing them is a config error, not a silent empty crawl.
+DISCOVERY_PARAMS_REQUIRED: dict[str, tuple[str, ...]] = {
+    "common_crawl": ("index_glob", "domain_suffixes", "pdf_url_patterns"),
+    "searxng": ("query_templates",),
+}
+
+
 class Source(ConfigModel):
     id: str
     name: str
@@ -66,6 +109,7 @@ class Source(ConfigModel):
     notes: str | None = None
     requires_manual_review: bool = False
     seeds: list[str] = Field(default_factory=list)
+    params: DiscoveryParams | None = None
 
     @field_validator("id", "name", "kind", "format", "adapter")
     @classmethod

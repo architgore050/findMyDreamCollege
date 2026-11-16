@@ -1,0 +1,32 @@
+# Self-hosted SearXNG for discovery only (brief §7/§8).
+# Results are leads, never evidence. JSON is enabled for the pipeline client.
+use_default_settings: true
+
+general:
+  instance_name: "findMyDreamCollege discovery"
+  enable_metrics: false
+
+server:
+  # Override in deployment; compose reads this file read-only-ish (rw mount).
+  secret_key: "change-me-fmd-searxng"
+  limiter: false
+  public_instance: false
+  image_proxy: true
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true
+
+# Keep outbound requests polite for a self-hosted crawler sidecar.
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 15.0
+  pool_connections: 20
+  pool_maxsize: 20

@@ -18,10 +18,18 @@ from typing import Protocol, runtime_checkable
 
 @runtime_checkable
 class DocumentRef(Protocol):
-    """Minimal fetch-layer contract (implemented by WS-B/WS-C, brief §7)."""
+    """Minimal fetch-layer contract (implemented by WS-B/WS-C, brief §7).
+
+    ``etag`` / ``last_modified`` carry a previous response's validators so a
+    caller can issue a conditional GET without re-reading ``DocumentsRepo``.
+    ``last_modified`` is an HTTP-date string. ``priority`` is the frontier hint.
+    """
 
     url: str
     source_id: str | None
+    etag: str | None
+    last_modified: str | None
+    priority: int
 
 
 @runtime_checkable

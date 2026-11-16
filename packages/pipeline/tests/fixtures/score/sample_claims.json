@@ -1,0 +1,553 @@
+{
+  "programme": {
+    "id": 101,
+    "name": "BSc Medical Laboratory Technology",
+    "credential_level": "degree",
+    "recognition_status": "recognised",
+    "duration_months": 48,
+    "medium": "English"
+  },
+  "profile": {
+    "nationality": "IN",
+    "target_intake_year": 2027,
+    "credential_levels": [
+      "degree"
+    ],
+    "marks": {
+      "class12_aggregate_pct": 78,
+      "pcb_pct": 76
+    },
+    "budget": {
+      "currency": "INR",
+      "total_ceiling": 900000
+    },
+    "travel_for_exams": "no",
+    "medium_of_instruction": [
+      "English"
+    ],
+    "english_test": {
+      "type": "IELTS",
+      "score": 6.5,
+      "status": "taken"
+    }
+  },
+  "claims": [
+    {
+      "id": 1,
+      "predicate": "recognition_status",
+      "value": "recognised",
+      "unit": null,
+      "quote": "recognised by the state council",
+      "char_start": 0,
+      "char_end": 10,
+      "extraction_id": 11,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-11-01T00:00:00+00:00",
+      "qualifier": {
+        "chain_resolved": true
+      }
+    },
+    {
+      "id": 2,
+      "predicate": "credential_level",
+      "value": "degree",
+      "unit": null,
+      "quote": "Bachelor of Science",
+      "char_start": 0,
+      "char_end": 10,
+      "extraction_id": 11,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-11-01T00:00:00+00:00"
+    },
+    {
+      "id": 3,
+      "predicate": "naac_grade",
+      "value": "A+",
+      "unit": null,
+      "quote": "NAAC A+",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 12,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-09-01T00:00:00+00:00"
+    },
+    {
+      "id": 4,
+      "predicate": "autonomous_status",
+      "value": true,
+      "unit": null,
+      "quote": "autonomous",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 12,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-09-01T00:00:00+00:00"
+    },
+    {
+      "id": 5,
+      "predicate": "faculty_count",
+      "value": 45,
+      "unit": "count",
+      "quote": "45 faculty",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 12,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-09-01T00:00:00+00:00"
+    },
+    {
+      "id": 6,
+      "predicate": "internship_hours",
+      "value": 1800,
+      "unit": "hours",
+      "quote": "1800 hours",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 11,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-11-01T00:00:00+00:00"
+    },
+    {
+      "id": 7,
+      "predicate": "nabl_accredited_lab",
+      "value": true,
+      "unit": null,
+      "quote": "NABL accredited",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 13,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-08-01T00:00:00+00:00"
+    },
+    {
+      "id": 8,
+      "predicate": "nabh_hospital",
+      "value": true,
+      "unit": null,
+      "quote": "NABH hospital",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 13,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-08-01T00:00:00+00:00"
+    },
+    {
+      "id": 9,
+      "predicate": "departments_rotated",
+      "value": 8,
+      "unit": "count",
+      "quote": "8 departments",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 13,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-08-01T00:00:00+00:00"
+    },
+    {
+      "id": 10,
+      "predicate": "internship_to_offer_conversion_12m",
+      "value": 0.72,
+      "unit": "rate",
+      "quote": "72% of interns received offers",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 14,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-10-01T00:00:00+00:00",
+      "qualifier": {
+        "denominator": 120,
+        "cohort_year": 2025,
+        "credential_level": "degree",
+        "outcome_type": "employment"
+      }
+    },
+    {
+      "id": 11,
+      "predicate": "registration_conversion_12m",
+      "value": 0.65,
+      "unit": "rate",
+      "quote": "65% registered",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 14,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-10-01T00:00:00+00:00",
+      "qualifier": {
+        "denominator": 120,
+        "cohort_year": 2025,
+        "credential_level": "degree",
+        "outcome_type": "employment"
+      }
+    },
+    {
+      "id": 12,
+      "predicate": "salary_growth_3y",
+      "value": 18,
+      "unit": "percent",
+      "quote": "18% growth",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 14,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-10-01T00:00:00+00:00",
+      "qualifier": {
+        "denominator": 120,
+        "cohort_year": 2025,
+        "credential_level": "degree"
+      }
+    },
+    {
+      "id": 13,
+      "predicate": "p25_salary_to_col_ratio",
+      "value": 2.4,
+      "unit": "ratio",
+      "quote": "2.4x city basket",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 14,
+      "entity_id": 101,
+      "method": "modelled",
+      "confidence": 0.8,
+      "observed_at": "2026-10-01T00:00:00+00:00",
+      "qualifier": {
+        "cohort_year": 2025,
+        "credential_level": "degree"
+      }
+    },
+    {
+      "id": 14,
+      "predicate": "city_safety_index",
+      "value": 70,
+      "unit": "percent",
+      "quote": "safety index 70",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 15,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-07-01T00:00:00+00:00"
+    },
+    {
+      "id": 15,
+      "predicate": "hostel_available",
+      "value": true,
+      "unit": null,
+      "quote": "hostel available",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 13,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-08-01T00:00:00+00:00"
+    },
+    {
+      "id": 16,
+      "predicate": "gender_safety_measures",
+      "value": true,
+      "unit": null,
+      "quote": "24x7 security",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 15,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-07-01T00:00:00+00:00"
+    },
+    {
+      "id": 17,
+      "predicate": "support_services_count",
+      "value": 4,
+      "unit": "count",
+      "quote": "four support services",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 15,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-07-01T00:00:00+00:00"
+    },
+    {
+      "id": 18,
+      "predicate": "review_aspect_safety",
+      "value": 65,
+      "unit": "percent",
+      "quote": "safety 65/100",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 15,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-07-01T00:00:00+00:00"
+    },
+    {
+      "id": 19,
+      "predicate": "cutoff_pct",
+      "value": 70,
+      "unit": "percent",
+      "quote": "cutoff 70",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 16,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-06-01T00:00:00+00:00",
+      "qualifier": {
+        "sd": 5
+      }
+    },
+    {
+      "id": 20,
+      "predicate": "eligibility_min_aggregate_pct",
+      "value": 55,
+      "unit": "percent",
+      "quote": "minimum 55%",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 11,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-11-01T00:00:00+00:00"
+    },
+    {
+      "id": 21,
+      "predicate": "seats",
+      "value": 100,
+      "unit": "count",
+      "quote": "100 seats",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 16,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-06-01T00:00:00+00:00"
+    },
+    {
+      "id": 22,
+      "predicate": "loan_terms_published",
+      "value": true,
+      "unit": null,
+      "quote": "loan terms published",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 17,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-05-01T00:00:00+00:00"
+    },
+    {
+      "id": 23,
+      "predicate": "subsidy_eligible",
+      "value": true,
+      "unit": null,
+      "quote": "CSIS eligible",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 17,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-05-01T00:00:00+00:00"
+    },
+    {
+      "id": 24,
+      "predicate": "collateral_free_available",
+      "value": true,
+      "unit": null,
+      "quote": "collateral free",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 17,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-05-01T00:00:00+00:00"
+    },
+    {
+      "id": 25,
+      "predicate": "student_work_legal_hours",
+      "value": 0,
+      "unit": "hours",
+      "quote": "no part-time entitlement",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 17,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-05-01T00:00:00+00:00"
+    },
+    {
+      "id": 26,
+      "predicate": "exam_required",
+      "value": "mht_cet_pcb",
+      "unit": null,
+      "quote": "MHT CET required",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 16,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-06-01T00:00:00+00:00",
+      "qualifier": {
+        "exam_id": "mht_cet_pcb"
+      }
+    },
+    {
+      "id": 27,
+      "predicate": "exam_registration_closes",
+      "value": "2026-12-15T23:59:00",
+      "unit": null,
+      "quote": "closes 15 December",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 16,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-11-15T00:00:00+00:00",
+      "qualifier": {
+        "exam_id": "mht_cet_pcb"
+      }
+    },
+    {
+      "id": 28,
+      "predicate": "exam_registration_opens",
+      "value": "2026-10-01T00:00:00",
+      "unit": null,
+      "quote": "opens 1 October",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 16,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-11-15T00:00:00+00:00",
+      "qualifier": {
+        "exam_id": "mht_cet_pcb"
+      }
+    },
+    {
+      "id": 29,
+      "predicate": "intake_cycles",
+      "value": [
+        2026,
+        2027
+      ],
+      "unit": null,
+      "quote": "2026 and 2027 intakes",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 16,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-06-01T00:00:00+00:00"
+    },
+    {
+      "id": 30,
+      "predicate": "language_test_required",
+      "value": "none",
+      "unit": null,
+      "quote": "no language test",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 11,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-11-01T00:00:00+00:00"
+    },
+    {
+      "id": 31,
+      "predicate": "tcoa_lo",
+      "value": 500000,
+      "unit": "INR",
+      "quote": "total cost from 5 lakh",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 16,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-06-01T00:00:00+00:00"
+    },
+    {
+      "id": 32,
+      "predicate": "dsr25",
+      "value": 0.22,
+      "unit": "ratio",
+      "quote": "DSR 22%",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 18,
+      "entity_id": 101,
+      "method": "modelled",
+      "confidence": 0.8,
+      "observed_at": "2026-06-01T00:00:00+00:00"
+    },
+    {
+      "id": 33,
+      "predicate": "affordability_gap",
+      "value": 1.03,
+      "unit": "ratio",
+      "quote": "about 1.03x annual income",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 18,
+      "entity_id": 101,
+      "method": "modelled",
+      "confidence": 0.8,
+      "observed_at": "2026-06-01T00:00:00+00:00"
+    },
+    {
+      "id": 34,
+      "predicate": "eligibility_requires_subjects",
+      "value": [
+        "PCB"
+      ],
+      "unit": null,
+      "quote": "10+2 with PCB",
+      "char_start": 0,
+      "char_end": 5,
+      "extraction_id": 11,
+      "entity_id": 101,
+      "method": "extracted",
+      "confidence": 1.0,
+      "observed_at": "2026-11-01T00:00:00+00:00"
+    }
+  ]
+}

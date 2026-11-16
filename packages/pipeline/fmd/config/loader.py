@@ -20,6 +20,7 @@ from pydantic import ValidationError
 import fmd.filters as filters_module
 from fmd.adapters import KNOWN_ADAPTERS
 from fmd.config.models import (
+    DISCOVERY_PARAMS_REQUIRED,
     CostRulesConfig,
     CountriesConfig,
     ExamsConfig,
@@ -190,6 +191,20 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
             )
         if source.enabled and source.adapter is None:
             errors.append(f"{where}: enabled sources need an adapter implementation")
+        if source.kind == "discovery":
+            if source.params is None:
+                errors.append(
+                    f"{where}: discovery sources need a `params` block. Query templates, "
+                    "domain suffixes and PDF patterns are registry data (invariant 7), "
+                    "never Python constants."
+                )
+            else:
+                for field_name in DISCOVERY_PARAMS_REQUIRED.get(source.adapter or "", ()):
+                    if not getattr(source.params, field_name):
+                        errors.append(
+                            f"{where}: adapter {source.adapter!r} needs "
+                            f"`params.{field_name}` to be a non-empty list/string."
+                        )
 
     for exclusion in sources.exclusions:
         if not exclusion.reason.strip():

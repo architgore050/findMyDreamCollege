@@ -23,6 +23,7 @@ crawl = [
     "patchright>=1.40,<2",
     "tldextract>=5,<6",
     "protego>=0.3,<1",
+    "duckdb>=1.0,<2",
 ]
 extract = [
     "pypdfium2>=4.30,<5",

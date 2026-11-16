@@ -65,6 +65,45 @@ def test_null_adapter_is_rejected(config_dir: Path) -> None:
     assert "`adapter` is null" in str(excinfo.value)
 
 
+def _discovery_source(payload: dict, source_id: str) -> dict:
+    return next(source for source in payload["sources"] if source["id"] == source_id)
+
+
+def test_discovery_source_without_params_is_rejected(config_dir: Path) -> None:
+    path = config_dir / "sources.yaml"
+    payload = _read(path)
+    _discovery_source(payload, "searxng").pop("params", None)
+    _write(path, payload)
+    with pytest.raises(ConfigError) as excinfo:
+        load_registry(config_dir, env={})
+    message = str(excinfo.value)
+    assert "discovery sources need a `params` block" in message
+    assert "searxng" in message
+
+
+def test_discovery_source_missing_required_param_is_rejected(config_dir: Path) -> None:
+    path = config_dir / "sources.yaml"
+    payload = _read(path)
+    _discovery_source(payload, "common_crawl_index")["params"]["pdf_url_patterns"] = []
+    _write(path, payload)
+    with pytest.raises(ConfigError) as excinfo:
+        load_registry(config_dir, env={})
+    message = str(excinfo.value)
+    assert "params.pdf_url_patterns" in message
+    assert "common_crawl" in message
+
+
+def test_discovery_params_are_registry_data(registry) -> None:
+    searxng = registry.sources.by_id("searxng")
+    crawl = registry.sources.by_id("common_crawl_index")
+    assert searxng is not None and searxng.params is not None
+    assert crawl is not None and crawl.params is not None
+    assert searxng.params.query_templates
+    assert crawl.params.domain_suffixes
+    assert crawl.params.pdf_url_patterns
+    assert crawl.params.index_glob
+
+
 def test_enabled_country_requires_capabilities(config_dir: Path) -> None:
     path = config_dir / "countries.yaml"
     payload = _read(path)

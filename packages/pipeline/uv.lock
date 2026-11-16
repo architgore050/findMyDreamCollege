@@ -1159,6 +1159,7 @@ dependencies = [
 [package.optional-dependencies]
 crawl = [
     { name = "curl-cffi" },
+    { name = "duckdb" },
     { name = "patchright" },
     { name = "protego" },
     { name = "scrapy" },
@@ -1186,6 +1187,7 @@ dev = [
 requires-dist = [
     { name = "curl-cffi", marker = "extra == 'crawl'", specifier = ">=0.7,<1" },
     { name = "docling", marker = "extra == 'extract'", specifier = ">=2.0,<3" },
+    { name = "duckdb", marker = "extra == 'crawl'", specifier = ">=1.0,<2" },
     { name = "duckdb", marker = "extra == 'er'", specifier = ">=1.0,<2" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.27,<1" },
