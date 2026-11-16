@@ -153,9 +153,7 @@ def _parse_json_object(raw: str, provider: str) -> dict[str, Any]:
             f"{provider}: response was not JSON ({exc}); first 300 chars: {raw[:300]!r}",
         ) from exc
     if not isinstance(parsed, dict):
-        raise ProviderError(
-            "json_schema_violation", f"{provider}: response JSON must be an object"
-        )
+        raise ProviderError("json_schema_violation", f"{provider}: response JSON must be an object")
     return parsed
 
 

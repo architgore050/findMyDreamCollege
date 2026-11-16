@@ -85,9 +85,7 @@ def test_mock_router_replays_fixture_and_audits(tmp_path: Path) -> None:
     system, user = "extract claims", "document text"
     _write_fixture(fixtures, system, user, {"value": 1800, "quote": "1,800 hours"})
 
-    result = router.call(
-        "bulk_extract", Answer, system, user, "sha256:document"
-    )
+    result = router.call("bulk_extract", Answer, system, user, "sha256:document")
 
     assert isinstance(result, Answer)
     assert result.value == 1800

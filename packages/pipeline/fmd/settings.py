@@ -33,9 +33,7 @@ class Settings(BaseSettings):
     max_pages_per_domain_per_day: int = Field(
         default=200, validation_alias="FMD_MAX_PAGES_PER_DOMAIN_PER_DAY"
     )
-    cors_origins: str = Field(
-        default="http://localhost:3000", validation_alias="FMD_CORS_ORIGINS"
-    )
+    cors_origins: str = Field(default="http://localhost:3000", validation_alias="FMD_CORS_ORIGINS")
 
 
 def get_settings() -> Settings:

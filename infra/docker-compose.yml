@@ -24,42 +24,46 @@ services:
     environment:
       SEARXNG_BASE_URL: http://localhost:${SEARXNG_PORT:-8888}/
     volumes:
-      - ./infra/searxng:/etc/searxng:rw
+      - ../infra/searxng:/etc/searxng:rw
 
   api:
     build:
-      context: .
+      context: ..
       dockerfile: infra/Dockerfile.pipeline
     command: ["uvicorn", "fmd.api:app", "--host", "0.0.0.0", "--port", "8000"]
-    env_file: [.env]
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-fmd}:${POSTGRES_PASSWORD:-fmd}@db:5432/${POSTGRES_DB:-fmd}
     ports: ["${API_PORT:-8000}:8000"]
     volumes:
-      - ./packages/pipeline:/app
-      - ./config:/config:ro
+      - ../packages/pipeline:/app
+      - ../config:/config:ro
       - snapshots:/data/snapshots
     depends_on:
       db: {condition: service_healthy}
 
   worker:
     build:
-      context: .
+      context: ..
       dockerfile: infra/Dockerfile.pipeline
     command: ["python", "-m", "fmd.cli", "worker"]
-    env_file: [.env]
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-fmd}:${POSTGRES_PASSWORD:-fmd}@db:5432/${POSTGRES_DB:-fmd}
     volumes:
-      - ./packages/pipeline:/app
-      - ./config:/config:ro
+      - ../packages/pipeline:/app
+      - ../config:/config:ro
       - snapshots:/data/snapshots
     depends_on:
       db: {condition: service_healthy}
 
   web:
     build:
-      context: ./apps/web
+      context: ../apps/web
       dockerfile: Dockerfile
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}

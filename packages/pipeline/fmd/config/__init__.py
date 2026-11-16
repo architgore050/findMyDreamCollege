@@ -10,8 +10,8 @@ from fmd.config.loader import (
     reset_registry_cache,
 )
 from fmd.config.models import (
-    CountriesConfig,
     CostRulesConfig,
+    CountriesConfig,
     ExamsConfig,
     ModelsConfig,
     SourcesConfig,

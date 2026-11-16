@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -26,7 +26,6 @@ from fmd.db.connection import Database, DatabaseError, get_database
 from fmd.db.repositories import (
     ClaimsRepo,
     CostItemsRepo,
-    DocumentsRepo,
     EntitiesRepo,
     ExamsRepo,
     ProgrammeFilter,
@@ -112,6 +111,9 @@ def _database_or_503() -> Database:
         ) from exc
 
 
+DatabaseDep = Annotated[Database, Depends(_database_or_503)]
+
+
 def _programme_json(programme: Any) -> dict[str, Any]:
     return programme.model_dump(mode="json")
 
@@ -147,9 +149,7 @@ async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONR
 
 
 @app.exception_handler(RequestValidationError)
-async def _validation_handler(
-    request: Request, exc: RequestValidationError
-) -> JSONResponse:
+async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     return _error(422, "validation_error", str(exc.errors()))
 
 
@@ -260,6 +260,7 @@ def list_sources() -> dict[str, Any]:
 
 @app.get("/api/programmes")
 def list_programmes(
+    database: DatabaseDep,
     credential_level: str | None = Query(default=None),
     recognition_status: str | None = Query(default=None),
     state: str | None = Query(default=None),
@@ -267,7 +268,6 @@ def list_programmes(
     q: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    database: Database = Depends(_database_or_503),
 ) -> dict[str, Any]:
     filters = ProgrammeFilter(
         credential_level=credential_level,
@@ -297,7 +297,7 @@ def list_programmes(
 @app.get("/api/programmes/{programme_id}")
 def get_programme(
     programme_id: int,
-    database: Database = Depends(_database_or_503),
+    database: DatabaseDep,
 ) -> dict[str, Any]:
     programme = ProgrammesRepo(database).get(programme_id)
     if programme is None:
@@ -331,10 +331,10 @@ def get_programme(
 @app.get("/api/programmes/{programme_id}/evidence")
 def programme_evidence(
     programme_id: int,
+    database: DatabaseDep,
     predicate: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    database: Database = Depends(_database_or_503),
 ) -> dict[str, Any]:
     programme = ProgrammesRepo(database).get(programme_id)
     if programme is None:

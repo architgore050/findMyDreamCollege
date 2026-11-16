@@ -35,11 +35,7 @@ def _capabilities(country: Any) -> dict[str, Any] | None:
 
 def _source_extras(source: Any) -> dict[str, Any]:
     known = set(SourceSeed.model_fields)
-    return {
-        key: value
-        for key, value in source.model_dump(mode="json").items()
-        if key not in known
-    }
+    return {key: value for key, value in source.model_dump(mode="json").items() if key not in known}
 
 
 def seed_database(database: Database, registry: Registry) -> dict[str, int]:
@@ -89,9 +85,7 @@ def seed_database(database: Database, registry: Registry) -> dict[str, int]:
 
     for exclusion in registry.sources.exclusions:
         exclusions_repo.upsert(
-            SourceExclusionSeed(
-                id=exclusion.id, name=exclusion.name, reason=exclusion.reason
-            )
+            SourceExclusionSeed(id=exclusion.id, name=exclusion.name, reason=exclusion.reason)
         )
         counts["source_exclusions"] += 1
 

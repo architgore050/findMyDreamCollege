@@ -12,7 +12,8 @@ No adapters are implemented in WS-A. Each listed adapter lives in
 
 from __future__ import annotations
 
-from typing import Iterable, Protocol, runtime_checkable
+from collections.abc import Iterable
+from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable

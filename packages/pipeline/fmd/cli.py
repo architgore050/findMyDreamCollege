@@ -23,9 +23,7 @@ class NotImplementedYet(RuntimeError):
         self.command = command
         self.workstream = workstream
         self.section = section
-        super().__init__(
-            f"not implemented ({workstream}, see brief §{section})"
-        )
+        super().__init__(f"not implemented ({workstream}, see brief §{section})")
 
 
 # Commands owned by other workstreams (brief §21). Keeping this table explicit
@@ -96,10 +94,7 @@ def _cmd_seed(args: argparse.Namespace) -> int:
     registry = load_registry(args.config_dir)
     with _database(args) as database:
         counts = seed_database(database, registry)
-    print(
-        "seeded registry: "
-        + ", ".join(f"{key}={value}" for key, value in counts.items())
-    )
+    print("seeded registry: " + ", ".join(f"{key}={value}" for key, value in counts.items()))
     return 0
 
 

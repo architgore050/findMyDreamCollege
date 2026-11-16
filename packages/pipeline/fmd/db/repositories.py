@@ -85,9 +85,7 @@ class EntityRecord(EntityCreate):
 class AliasCreate(RowModel):
     entity_id: int
     alias: str
-    alias_type: Literal[
-        "acronym", "former_name", "transliteration", "misspelling", "local_name"
-    ]
+    alias_type: Literal["acronym", "former_name", "transliteration", "misspelling", "local_name"]
     source_id: str | None = None
     confidence: float | None = 1.0
 
@@ -185,9 +183,7 @@ class ProgrammeCreate(RowModel):
     duration_months: int | None = None
     internship_months: float | None = None
     affiliated_university_id: int | None = None
-    recognition_status: Literal[
-        "recognised", "conditional", "unrecognised", "unknown"
-    ] = "unknown"
+    recognition_status: Literal["recognised", "conditional", "unrecognised", "unknown"] = "unknown"
     seats: int | None = None
     medium: str | None = None
 
@@ -332,9 +328,7 @@ class FrontierUpsert(RowModel):
     domain: str
     priority: int = 0
     next_allowed_at: datetime | None = None
-    state: Literal[
-        "queued", "in_progress", "done", "failed", "quarantined"
-    ] = "queued"
+    state: Literal["queued", "in_progress", "done", "failed", "quarantined"] = "queued"
 
 
 class FrontierRecord(FrontierUpsert):
@@ -505,12 +499,15 @@ class EntitiesRepo:
     def find(self, kind: str, canonical_name: str) -> EntityRecord | None:
         with self.db.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM entities WHERE kind = %s AND canonical_name = %s ORDER BY id LIMIT 1",
+                "SELECT * FROM entities WHERE kind = %s AND canonical_name = %s "
+                "ORDER BY id LIMIT 1",
                 (kind, canonical_name),
             ).fetchone()
         return _entity(row) if row else None
 
-    def list(self, kind: str | None = None, limit: int = 100, offset: int = 0) -> list[EntityRecord]:
+    def list(
+        self, kind: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[EntityRecord]:
         if kind is None:
             sql = "SELECT * FROM entities ORDER BY id LIMIT %s OFFSET %s"
             params: tuple[Any, ...] = (limit, offset)
@@ -597,9 +594,7 @@ class DocumentsRepo:
 
     def get(self, document_id: int) -> DocumentRecord | None:
         with self.db.connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM documents WHERE id = %s", (document_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM documents WHERE id = %s", (document_id,)).fetchone()
         return _document(row) if row else None
 
     def get_by_url(self, url: str) -> DocumentRecord | None:
@@ -610,7 +605,8 @@ class DocumentsRepo:
     def list_by_domain(self, domain: str, limit: int = 100) -> list[DocumentRecord]:
         with self.db.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM documents WHERE domain = %s ORDER BY last_seen DESC NULLS LAST LIMIT %s",
+                "SELECT * FROM documents WHERE domain = %s "
+                "ORDER BY last_seen DESC NULLS LAST LIMIT %s",
                 (domain, limit),
             ).fetchall()
         return [_document(row) for row in rows]
@@ -647,9 +643,7 @@ class SnapshotsRepo:
 
     def get(self, snapshot_id: int) -> SnapshotRecord | None:
         with self.db.connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM snapshots WHERE id = %s", (snapshot_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM snapshots WHERE id = %s", (snapshot_id,)).fetchone()
         return _snapshot(row) if row else None
 
     def latest_for_document(self, document_id: int) -> SnapshotRecord | None:
@@ -801,9 +795,7 @@ class ClaimsRepo:
         )
         with self.db.connection() as conn:
             total_row = conn.execute(count_sql, tuple(params)).fetchone()
-            rows = conn.execute(
-                page_sql, tuple([*params, limit, offset])
-            ).fetchall()
+            rows = conn.execute(page_sql, (*params, limit, offset)).fetchall()
         items = [
             ClaimEvidence(
                 **_claim(row).model_dump(),
@@ -892,9 +884,7 @@ class ProgrammesRepo:
 
     def get(self, programme_id: int) -> ProgrammeRecord | None:
         with self.db.connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM programmes WHERE id = %s", (programme_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM programmes WHERE id = %s", (programme_id,)).fetchone()
         return _programme(row) if row else None
 
     def list_for_institution(self, institution_id: int) -> list[ProgrammeRecord]:
@@ -930,22 +920,20 @@ class ProgrammesRepo:
     def facets(self, filters: ProgrammeFilter) -> dict[str, dict[str, int]]:
         """Counts for filter chips; WS-F adds hard-filter exclusion histograms."""
         where, params = _programme_where(filters)
-        base = (
-            " FROM programmes p JOIN entities e ON e.id = p.institution_id"
-            + where
-        )
+        base = " FROM programmes p JOIN entities e ON e.id = p.institution_id" + where
         facet_sql = {
             "credential_level": (
-                "SELECT p.credential_level AS key, count(*) AS n" + base
+                "SELECT p.credential_level AS key, count(*) AS n"
+                + base
                 + " GROUP BY p.credential_level ORDER BY p.credential_level"
             ),
             "recognition_status": (
-                "SELECT p.recognition_status AS key, count(*) AS n" + base
+                "SELECT p.recognition_status AS key, count(*) AS n"
+                + base
                 + " GROUP BY p.recognition_status ORDER BY p.recognition_status"
             ),
             "state": (
-                "SELECT e.state AS key, count(*) AS n" + base
-                + " GROUP BY e.state ORDER BY e.state"
+                "SELECT e.state AS key, count(*) AS n" + base + " GROUP BY e.state ORDER BY e.state"
             ),
         }
         facets: dict[str, dict[str, int]] = {}
@@ -1013,7 +1001,8 @@ class ScoresRepo:
     def latest_for_entity(self, entity_id: int) -> ScoreRecord | None:
         with self.db.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM scores WHERE entity_id = %s ORDER BY computed_at DESC, id DESC LIMIT 1",
+                "SELECT * FROM scores WHERE entity_id = %s "
+                "ORDER BY computed_at DESC, id DESC LIMIT 1",
                 (entity_id,),
             ).fetchone()
         return _score(row) if row else None
@@ -1243,7 +1232,8 @@ class LLMCallsRepo:
     def list_for_purpose(self, purpose: str, limit: int = 100) -> list[LLMCallRecord]:
         with self.db.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM llm_calls WHERE purpose = %s ORDER BY created_at DESC, id DESC LIMIT %s",
+                "SELECT * FROM llm_calls WHERE purpose = %s "
+                "ORDER BY created_at DESC, id DESC LIMIT %s",
                 (purpose, limit),
             ).fetchall()
         return [LLMCallRecord.model_validate(row) for row in rows]
@@ -1284,9 +1274,7 @@ class CrawlFrontierRepo:
 
     def get(self, url: str) -> FrontierRecord | None:
         with self.db.connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM crawl_frontier WHERE url = %s", (url,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM crawl_frontier WHERE url = %s", (url,)).fetchone()
         return FrontierRecord.model_validate(row) if row else None
 
     def list_due(self, at: datetime, limit: int = 50) -> list[FrontierRecord]:

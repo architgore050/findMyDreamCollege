@@ -54,15 +54,12 @@ def input_hash(input_ref: str) -> str:
     return hashlib.sha256(input_ref.encode("utf-8")).hexdigest()
 
 
-def _pricing_cost(
-    pricing: Pricing | None, tokens_in: int | None, tokens_out: int | None
-) -> float:
+def _pricing_cost(pricing: Pricing | None, tokens_in: int | None, tokens_out: int | None) -> float:
     if pricing is None:
         return 0.0
-    cost = (
-        (tokens_in or 0) / 1_000_000 * pricing.input_per_mtok
-        + (tokens_out or 0) / 1_000_000 * pricing.output_per_mtok
-    )
+    cost = (tokens_in or 0) / 1_000_000 * pricing.input_per_mtok + (
+        tokens_out or 0
+    ) / 1_000_000 * pricing.output_per_mtok
     return round(cost, 6)
 
 
@@ -190,9 +187,7 @@ class ModelRouter:
                 or (kind == "openai_compatible" and base_url_present)
             )
             key_present = (
-                bool(provider and provider.api_key)
-                if kind == "openai_compatible"
-                else None
+                bool(provider and provider.api_key) if kind == "openai_compatible" else None
             )
             report.append(
                 {
@@ -268,8 +263,7 @@ class ModelRouter:
         except ValidationError as exc:
             raise ProviderError(
                 "json_schema_violation",
-                f"provider response for purpose {purpose!r} did not match "
-                f"{schema.__name__}: {exc}",
+                f"provider response for purpose {purpose!r} did not match {schema.__name__}: {exc}",
             ) from exc
 
     def _audit(

@@ -35,7 +35,7 @@ def test_health_envelope(monkeypatch) -> None:
     body = response.json()
     assert body["status"] == "ok"
     assert body["database"] == "up"
-    assert ENVELOPE_KEYS <= body.keys()
+    assert body.keys() >= ENVELOPE_KEYS
     assert len(body["claims_hash"]) == 64
 
 
@@ -43,7 +43,7 @@ def test_sources_lists_registry_with_trust() -> None:
     response = client.get("/api/sources")
     assert response.status_code == 200
     body = response.json()
-    assert ENVELOPE_KEYS <= body.keys()
+    assert body.keys() >= ENVELOPE_KEYS
     assert body["items"]
     sample = body["items"][0]
     assert {"id", "trust", "adapter", "enabled", "last_crawl"} <= sample.keys()
@@ -59,7 +59,7 @@ def test_database_unavailable_is_503(monkeypatch) -> None:
     assert response.status_code == 503
     body = response.json()
     assert body["error"]["code"] == "database_unavailable"
-    assert ENVELOPE_KEYS <= body.keys()
+    assert body.keys() >= ENVELOPE_KEYS
 
 
 @pytest.mark.parametrize(
@@ -78,7 +78,7 @@ def test_unimplemented_endpoints_are_501(method: str, path: str, workstream: str
     body = response.json()
     assert body["error"]["workstream"] == workstream
     assert "not implemented" in body["error"]["message"]
-    assert ENVELOPE_KEYS <= body.keys()
+    assert body.keys() >= ENVELOPE_KEYS
 
 
 def test_admin_write_endpoints_are_gated(monkeypatch) -> None:
@@ -87,10 +87,7 @@ def test_admin_write_endpoints_are_gated(monkeypatch) -> None:
 
     monkeypatch.setenv("FMD_ADMIN_TOKEN", "test-token")
     assert client.post("/api/scoring/rerun").status_code == 401
-    assert (
-        client.post("/api/scoring/rerun", headers={"X-Admin-Token": "wrong"}).status_code
-        == 401
-    )
+    assert client.post("/api/scoring/rerun", headers={"X-Admin-Token": "wrong"}).status_code == 401
     allowed = client.post("/api/scoring/rerun", headers={"X-Admin-Token": "test-token"})
     assert allowed.status_code == 501
     assert allowed.json()["error"]["workstream"] == "WS-F"
@@ -120,7 +117,7 @@ def test_db_backed_programme_reads(pg_database) -> None:
         listed = client.get("/api/programmes", params={"state": "MH", "q": "BSc MLT"})
         assert listed.status_code == 200
         body = listed.json()
-        assert ENVELOPE_KEYS <= body.keys()
+        assert body.keys() >= ENVELOPE_KEYS
         assert any(item["id"] == programme.id for item in body["items"])
         assert body["total"] >= 1
         assert body["facets"]["credential_level"]["degree"] >= 1

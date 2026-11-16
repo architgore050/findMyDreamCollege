@@ -17,10 +17,11 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+import fmd.filters as filters_module
 from fmd.adapters import KNOWN_ADAPTERS
 from fmd.config.models import (
-    CountriesConfig,
     CostRulesConfig,
+    CountriesConfig,
     ExamsConfig,
     ModelsConfig,
     SourcesConfig,
@@ -28,8 +29,6 @@ from fmd.config.models import (
 )
 from fmd.filters import IMPLEMENTATIONS as FILTER_IMPLEMENTATIONS
 from fmd.paths import resolve_config_dir
-
-import fmd.filters as filters_module
 
 CONFIG_FILES: dict[str, str] = {
     "countries": "countries.yaml",
@@ -49,9 +48,7 @@ class ConfigError(RuntimeError):
     def __init__(self, errors: list[str]) -> None:
         self.errors = errors
         joined = "\n".join(f"  - {error}" for error in errors)
-        super().__init__(
-            "config registry is invalid. Fix the following and re-run:\n" + joined
-        )
+        super().__init__("config registry is invalid. Fix the following and re-run:\n" + joined)
 
 
 @dataclass(frozen=True)
@@ -126,9 +123,7 @@ def interpolate_env(value: Any, env: Mapping[str, str]) -> Any:
         ) from exc
 
 
-def _read_yaml(
-    config_dir: Path, filename: str, errors: list[str]
-) -> dict[str, Any] | None:
+def _read_yaml(config_dir: Path, filename: str, errors: list[str]) -> dict[str, Any] | None:
     path = config_dir / filename
     if not path.is_file():
         errors.append(f"{filename}: file not found in {config_dir}")
@@ -198,9 +193,7 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
 
     for exclusion in sources.exclusions:
         if not exclusion.reason.strip():
-            errors.append(
-                f"sources.yaml: exclusion {exclusion.id!r} needs a non-empty reason"
-            )
+            errors.append(f"sources.yaml: exclusion {exclusion.id!r} needs a non-empty reason")
 
     total = sum(weights.weights.values())
     if any(weight < 0 for weight in weights.weights.values()):
@@ -239,8 +232,7 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
         if profile.provider not in models.providers:
             errors.append(
                 f"models.yaml: profile {profile_name!r} references unknown provider "
-                f"{profile.provider!r}. Known providers: "
-                + ", ".join(sorted(models.providers))
+                f"{profile.provider!r}. Known providers: " + ", ".join(sorted(models.providers))
             )
     for index, fallback in enumerate(models.fallbacks):
         if fallback.from_provider not in models.providers:
@@ -255,9 +247,7 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
             )
     for provider_name, provider in models.providers.items():
         if provider.kind == "replay" and not provider.fixtures_dir:
-            errors.append(
-                f"models.yaml: replay provider {provider_name!r} needs `fixtures_dir`"
-            )
+            errors.append(f"models.yaml: replay provider {provider_name!r} needs `fixtures_dir`")
         if provider.kind == "openai_compatible" and not provider.base_url:
             # base_url may be unresolved because an env var is unset; ping reports it.
             continue
@@ -269,13 +259,9 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
             errors.append(f"{where}: duplicate exam id")
         seen_exam_ids.add(exam.id)
         if exam.country not in countries.countries:
-            errors.append(
-                f"{where}: country {exam.country!r} is not declared in countries.yaml"
-            )
+            errors.append(f"{where}: country {exam.country!r} is not declared in countries.yaml")
         if exam.scope not in {"national", "state", "institution"}:
-            errors.append(
-                f"{where}: scope must be national|state|institution, got {exam.scope!r}"
-            )
+            errors.append(f"{where}: scope must be national|state|institution, got {exam.scope!r}")
 
     seen_categories: set[str] = set()
     for category in cost_rules.cost_categories:
@@ -284,9 +270,7 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
         seen_categories.add(category)
     for scenario_name, scenario in cost_rules.living_scenarios.items():
         if not scenario.components:
-            errors.append(
-                f"cost_rules.yaml: living scenario {scenario_name!r} has no components"
-            )
+            errors.append(f"cost_rules.yaml: living scenario {scenario_name!r} has no components")
     for band_name, band in cost_rules.dsr25.bands.items():
         if not band:
             errors.append(f"cost_rules.yaml: DSR25 band {band_name!r} is empty")

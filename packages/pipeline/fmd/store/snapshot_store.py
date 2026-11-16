@@ -61,9 +61,7 @@ class SnapshotStore:
                 f"existing object {digest} is corrupt; refusing to overwrite evidence"
             )
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(
-            dir=target.parent, prefix=f".{digest}.", suffix=".tmp"
-        )
+        fd, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{digest}.", suffix=".tmp")
         temp_path = Path(temp_name)
         try:
             with os.fdopen(fd, "wb") as handle:
@@ -86,9 +84,7 @@ class SnapshotStore:
             raise SnapshotNotFound(f"snapshot {digest} is not in the store at {path}") from exc
         actual = hashlib.sha256(data).hexdigest()
         if actual != digest:
-            raise SnapshotCorrupt(
-                f"snapshot {digest} failed integrity check (actual {actual})"
-            )
+            raise SnapshotCorrupt(f"snapshot {digest} failed integrity check (actual {actual})")
         return data
 
     def verify(self, sha256: str) -> bool:

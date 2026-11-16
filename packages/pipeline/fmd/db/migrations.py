@@ -30,9 +30,7 @@ class Migration:
 
 
 def discover_migrations(migrations_dir: str | Path | None = None) -> list[Migration]:
-    directory = (
-        Path(migrations_dir) if migrations_dir is not None else resolve_migrations_dir()
-    )
+    directory = Path(migrations_dir) if migrations_dir is not None else resolve_migrations_dir()
     if not directory.is_dir():
         raise MigrationError(f"migrations directory does not exist: {directory}")
     files = sorted(
@@ -63,9 +61,7 @@ def discover_migrations(migrations_dir: str | Path | None = None) -> list[Migrat
 
 def applied_migrations(database: Database) -> dict[str, str]:
     with database.connection() as conn:
-        exists = conn.execute(
-            "SELECT to_regclass('schema_migrations') AS table_name"
-        ).fetchone()
+        exists = conn.execute("SELECT to_regclass('schema_migrations') AS table_name").fetchone()
         if not exists or exists["table_name"] is None:
             return {}
         rows = conn.execute(
@@ -74,9 +70,7 @@ def applied_migrations(database: Database) -> dict[str, str]:
     return {row["version"]: row["checksum"] for row in rows}
 
 
-def run_migrations(
-    database: Database, migrations_dir: str | Path | None = None
-) -> list[str]:
+def run_migrations(database: Database, migrations_dir: str | Path | None = None) -> list[str]:
     """Apply pending migrations atomically; return the versions applied now."""
     migrations = discover_migrations(migrations_dir)
     applied_now: list[str] = []
@@ -92,9 +86,7 @@ def run_migrations(
             )
             """
         )
-        rows = conn.execute(
-            "SELECT version, checksum FROM schema_migrations"
-        ).fetchall()
+        rows = conn.execute("SELECT version, checksum FROM schema_migrations").fetchall()
         applied = {row["version"]: row["checksum"] for row in rows}
 
         for migration in migrations:
