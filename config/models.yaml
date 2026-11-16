@@ -24,6 +24,13 @@ providers:
     requires_api_key: true
     supports_guided_json: true
     base_url_example: https://api.openai.com/v1
+    # Shared fallback model for profiles whose provider resolves to `api`.
+    # `hard_pdf` (the only profile that defaults to this provider) reads it
+    # directly: set FMD_API_MODEL once instead of a per-profile model var.
+    # Profiles switched to `api` by env still carry their own model var
+    # (FMD_ADJUDICATE_MODEL, FMD_NLP_MODEL); set those or point them here.
+    model: ${FMD_API_MODEL:-}
+    model_env: FMD_API_MODEL
   anthropic:
     base_url: ${FMD_ANTHROPIC_URL:-https://api.anthropic.com/v1}
     api_key: ${FMD_ANTHROPIC_KEY}
@@ -53,6 +60,12 @@ profiles:
     # (docs/.../10-inference-and-model-selection.md). Thinking must be off for
     # deterministic extraction; providers.py does not forward this yet, so serve
     # with the chat template that disables it (e.g. --chat-template-kwargs).
+    #
+    # Served name, not a hub id: `scripts/serve_local.sh` starts vLLM with
+    #   --served-model-name Qwen3.5-9B-AWQ --max-model-len 32768
+    # over a community int4 AWQ conversion (no upstream `Qwen/Qwen3.5-9B-AWQ`
+    # repo existed on 2026-11-16). Change this string only together with the
+    # script's --served-model-name, or every call 404s with "model not found".
     provider: ${FMD_EXTRACT_PROVIDER:-local}
     model: ${FMD_EXTRACT_MODEL:-Qwen3.5-9B-AWQ}
     provider_env: FMD_EXTRACT_PROVIDER
@@ -67,10 +80,15 @@ profiles:
     required: true             # text PDFs cannot be extracted without this
   hard_pdf:
     # evidence: hosted escalation on local failure
+    # `hard_pdf` is the only profile that defaults to the `api` provider, so it
+    # reads the shared FMD_API_MODEL directly. One variable sets the hosted
+    # fallback for every api-provider profile; FMD_HARD_PDF_MODEL is gone.
+    # Unset => model is None => this optional profile degrades per document with
+    # `vision_unavailable`; text PDFs still extract.
     provider: ${FMD_HARD_PDF_PROVIDER:-api}
-    model: ${FMD_HARD_PDF_MODEL}
+    model: ${FMD_API_MODEL:-}
     provider_env: FMD_HARD_PDF_PROVIDER
-    model_env: FMD_HARD_PDF_MODEL
+    model_env: FMD_API_MODEL
     model_example: gemini-2.5-flash
     temperature: 0
     guided_json: true
@@ -143,18 +161,10 @@ profiles:
     repair_attempts_per_claim: 1
     pricing: {input_per_mtok: 0.0, output_per_mtok: 0.0}
     cost_model: {input_tokens_per_call: 900, output_tokens_per_call: 120}
-  ocr_vlm:
-    # evidence: best open Indic OCR <16GB
-    provider: ${FMD_OCR_PROVIDER:-local}
-    model: ${FMD_OCR_MODEL:-Qwen3-VL-8B-Instruct}
-    provider_env: FMD_OCR_PROVIDER
-    model_env: FMD_OCR_MODEL
-    model_example: Qwen3-VL-8B-Instruct
-    temperature: 0
-    guided_json: true         # xgrammar/tools/responseSchema; JSON-instruct if unsupported
-    quantization: fp8
-    required: false            # T3 adjudication degrades, text extraction continues
-    degrade_reason: vision_unavailable
+  # NOTE: there is no `ocr_vlm` profile. OCR is an acquisition *stage* (T2/T2b
+  # in config/acquire.yaml), served as a block-extraction HTTP service, not an
+  # OpenAI-compatible chat endpoint. Retiring the profile keeps `fmd llm doctor`
+  # honest: a vision model is not a router target and must never be scored as one.
   embed:
     # evidence: multilingual 1024-dim baseline
     provider: ${FMD_EMBED_PROVIDER:-local}

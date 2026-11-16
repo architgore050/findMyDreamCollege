@@ -1,0 +1,32 @@
+# PaddleOCR-VL OCR service (T2). Contract: POST /extract -> {blocks:[...]}.
+#
+# Base image note: PaddlePaddle's GPU wheels are built for CUDA 11.8/12.6 and
+# top out at sm_90. An RTX 5080 is sm_120 (Blackwell); if the container reports
+# "no kernel image is available for execution on the device", that is this
+# limitation and not a bug in the service. See docs/.../11-inference-runbook.md
+# ("OCR service" section) for the measured failure and the CPU fallback.
+FROM nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    FMD_OCR_MODEL=PaddleOCR-VL-1.6 \
+    FMD_OCR_DPI=200
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-venv python3-pip libgl1 libglib2.0-0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# PaddleOCR 3.x requires Python >= 3.8; the distro 3.12 is enough for the server.
+RUN python3 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+WORKDIR /app
+# Build context is the repo root (infra/docker-compose.yml sets `context: ..`).
+COPY infra/ocr/requirements.txt /app/requirements.txt
+RUN pip install --upgrade pip && pip install -r /app/requirements.txt
+
+COPY infra/ocr/server.py /app/server.py
+
+EXPOSE 8110
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8110"]

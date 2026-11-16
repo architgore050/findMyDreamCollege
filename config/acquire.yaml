@@ -52,11 +52,18 @@ backends:
     tool: paddleocr-vl
     model: PaddleOCR-VL-1.6
     granularity: block
+    # The pipeline reads the URL from this env var only (no YAML default is
+    # consumed by fmd.acquire.tiers): FMD_T2_URL=http://localhost:8110 on the
+    # host, http://paddleocr:8110 inside compose (infra/docker-compose.yml,
+    # profile "ocr"). Unset => TierUnavailable on the T2 tier in config/models.yaml.
     endpoint_env: FMD_T2_URL
   T2b:
     tool: qwen3-vl
     model: Qwen3-VL-8B
     granularity: block
+    # Devanagari fallback; same /extract contract, different engine.
+    # FMD_T2B_URL=http://localhost:8111 (host) — no service is shipped by
+    # default: Qwen3-VL does not co-reside with the 9B text model in 16 GB.
     endpoint_env: FMD_T2B_URL
   T3:
     tool: human_queue

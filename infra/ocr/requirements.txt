@@ -1,0 +1,12 @@
+# OCR service dependencies.
+#
+# paddlepaddle-gpu from PyPI is the CUDA 12.6 build (sm_90 and below). Pinning it
+# makes the sm_120 failure reproducible instead of mysterious; moving to a newer
+# index is the documented Blackwell attempt in the runbook.
+paddlepaddle-gpu==2.6.2
+paddleocr==3.7.0
+# pdfium (BSD-3) renders PDF pages to images in-process; no AGPL PyMuPDF here.
+pypdfium2==5.15.2
+pillow==13.0.0
+fastapi==0.163.1
+uvicorn[standard]==0.54.0
