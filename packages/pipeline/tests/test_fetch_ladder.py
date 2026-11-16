@@ -237,7 +237,7 @@ def test_missing_robots_is_allowed_conservatively_and_cached() -> None:
     first = robots.decision("https://college.ac.in/a")
     second = robots.decision("https://college.ac.in/b")
 
-    assert first.allowed and first.reason == "no_robots_txt"
+    assert first.allowed and first.reason == "unavailable_allow"
     assert first.crawl_delay == 1.0
     assert second.allowed
     assert len(calls) == 1

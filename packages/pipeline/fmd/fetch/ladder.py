@@ -203,7 +203,10 @@ class FetchLadder:
         self.fetchers = list(fetchers) if fetchers is not None else default_fetchers()
         self.clock = clock or SystemClock()
         self.politeness = politeness or PolitenessManager(clock=self.clock)
-        self.robots = robots or RobotsCache(clock=self.clock)
+        # robots.txt uses the same truthful UA and the same tier ladder, so a
+        # 403 (UA/appearance block) escalates instead of being read as a
+        # `Disallow: /` policy. Sharing the instances keeps one client pool.
+        self.robots = robots or RobotsCache(clock=self.clock, fetchers=self.fetchers)
         self.sleeper = sleeper or time.sleep
 
     # ------------------------------------------------------------------- helpers
