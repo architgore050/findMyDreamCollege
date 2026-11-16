@@ -326,9 +326,21 @@ sources:
       state_param: selectState
       page_param: page
       max_pages: 50
+      # Verified 2026-11-16: `selectState` is accepted and ignored -- a
+      # state-filtered POST returns the same 21,637 global results. Do not
+      # sweep states until the server honours the filter. Registry-supplied
+      # `states` are used only when this flag is true; no state list lives in code.
+      state_filter_supported: false
+      states: []
     notes: >-
       Directory is a WordPress admin-ajax POST (`action=get_hospitals`) returning
-      JSON with html/pagination/mapData; no nonce or CAPTCHA on this path.
+      JSON with html/pagination/mapData; no nonce, cookie or CAPTCHA on this path
+      (robots.txt explicitly allows /wp-admin/admin-ajax.php). Verified 2026-11-16:
+      body `action=get_hospitals&page=1` -> 200, 107,350 B, 25 rows, 866 pages,
+      21,637 results. `page` is read only from the POST body -- a GET/query
+      `page=2` is silently served as page 1 -- so refs stay POST with the body in
+      metadata. A bare GET with no `action` is HTTP 400 with body `0`; the
+      adapter now raises http_400 with that body instead of an empty success.
       Paginate conservatively (one page per 2 s when >100 KB).
 
 
