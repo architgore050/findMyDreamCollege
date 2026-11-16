@@ -4,22 +4,30 @@
 # `local` assumes vLLM/SGLang exposing an OpenAI-compatible endpoint.
 # Hardware budget: 16 GB VRAM => <=14B at int4. Do not plan on a 70B local model.
 # Run `fmd llm doctor` to see what resolved and which env var is missing.
+#
+# Offline mode (docs/.../11-inference-runbook.md §7): set FMD_OFFLINE=1 (and
+# HF_HUB_OFFLINE=1, HF_HUB_DISABLE_TELEMETRY=1) to forbid artifact downloads.
+# This file is unchanged by offline mode: `local` still points at a vLLM server
+# that must already be running, `api`/`anthropic`/`gemini` are simply
+# unreachable, and `mock` is the only profile that answers without a server.
+# Docling's cache path is acquisition config, not a model profile:
+# config/acquire.yaml:backends.T1.artifacts_path (FMD_DOCLING_ARTIFACTS).
 
 providers:
   local:
     # Single knob for the host vLLM. On the host the default is localhost; inside
     # compose, infra/docker-compose.yml sets the same variable to
-    # http://host.docker.internal:8000/v1 and defines that alias via
+    # http://host.docker.internal:8010/v1 and defines that alias via
     # `extra_hosts: ["host.docker.internal:host-gateway"]` (Linux has no such
     # name out of the box). Never put a container-only hostname here as default.
-    base_url: ${FMD_LOCAL_LLM_URL:-http://localhost:8000/v1}
+    base_url: ${FMD_LOCAL_LLM_URL:-http://localhost:8010/v1}
     api_key: ${FMD_LOCAL_LLM_KEY:-not-needed}
     kind: openai_compatible
     base_url_env: FMD_LOCAL_LLM_URL
     api_key_env: FMD_LOCAL_LLM_KEY
     requires_api_key: false
     supports_guided_json: true
-    base_url_example: http://localhost:8000/v1
+    base_url_example: http://localhost:8010/v1
   api:
     base_url: ${FMD_API_LLM_URL}
     api_key: ${FMD_API_LLM_KEY}

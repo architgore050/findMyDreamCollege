@@ -80,6 +80,13 @@ backends:
     tool: docling
     model: docling
     granularity: span
+    # Local artifact cache for the layout and table-structure models. Docling
+    # downloads these from Hugging Face on first use; that fetch is exactly what
+    # stalls an extraction when the host has no network. Point this at a
+    # directory populated once, online, with `docling-tools models download`.
+    # Empty + FMD_OFFLINE=1 => `artifacts_unavailable_offline` in <1 s, routed
+    # to T3 with that stable reason instead of a timeout.
+    artifacts_path: ${FMD_DOCLING_ARTIFACTS:-}
   T2:
     tool: qwen3-vl
     model: Qwen3-VL-8B-Instruct

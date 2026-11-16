@@ -232,6 +232,68 @@ def test_t1_missing_docling_names_the_fix(monkeypatch: pytest.MonkeyPatch) -> No
     assert "uv sync --all-extras" in str(excinfo.value)
 
 
+def test_offline_t1_without_artifacts_fails_fast_with_named_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Offline must never reach the Hub: no path => immediate TierUnavailable."""
+    import time
+
+    from fmd.acquire.errors import ArtifactsUnavailable
+
+    monkeypatch.setenv("FMD_OFFLINE", "1")
+    # Pinned so _enforce_offline_env()'s setdefault cannot leak Hub flags into
+    # later tests through the real process environment.
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "0")
+    monkeypatch.delenv("FMD_DOCLING_ARTIFACTS", raising=False)
+    start = time.monotonic()
+    with pytest.raises(ArtifactsUnavailable) as excinfo:
+        t1_extract(b"%PDF-1.4")
+    elapsed = time.monotonic() - start
+    assert "artifacts_unavailable_offline" in str(excinfo.value)
+    assert "FMD_DOCLING_ARTIFACTS" in str(excinfo.value)
+    assert elapsed < 5.0
+
+
+def test_offline_t1_with_empty_artifact_dir_fails_fast(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from fmd.acquire.errors import ArtifactsUnavailable
+
+    monkeypatch.setenv("FMD_OFFLINE", "1")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "0")
+    monkeypatch.setenv("FMD_DOCLING_ARTIFACTS", str(tmp_path))
+    with pytest.raises(ArtifactsUnavailable) as excinfo:
+        t1_extract(b"%PDF-1.4")
+    assert "artifacts_unavailable_offline" in str(excinfo.value)
+    assert str(tmp_path) in str(excinfo.value)
+
+
+def test_offline_t1_artifact_gap_routes_to_t3_not_flat_t0(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A table question is not answered by T0 text just because the cache is gone."""
+    from fmd.acquire.errors import ArtifactsUnavailable
+
+    def unavailable(_: bytes) -> ExtractedDoc:
+        raise ArtifactsUnavailable("artifacts_unavailable_offline: no cache")
+
+    result = run_tiers(
+        b"ignored",
+        policy=_policy(),
+        t0=lambda _: _doc(LONG_TEXT + "\n50000 60 4\n45000 60 4\n40000 60 4"),
+        t1=unavailable,
+    )
+
+    assert result.tier == "T3"
+    assert result.needs_review is True
+    assert result.review_reason == "artifacts_unavailable_offline"
+    assert result.fallback_from == "T1"
+    assert result.as_review_item()["reasons"] == ["artifacts_unavailable_offline"]
+    assert "T1 unavailable offline" in result.notes[0]
+
+
 def test_t2_without_endpoint_is_an_explicit_tier_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -27,7 +27,7 @@ from fmd.acquire.canonical import (
     TextBlock,
     build_canonical,
 )
-from fmd.acquire.errors import TierUnavailable
+from fmd.acquire.errors import ArtifactsUnavailable, TierUnavailable
 from fmd.acquire.guards import (
     AnomalyReport,
     BlockAnomaly,
@@ -42,7 +42,9 @@ from fmd.acquire.tiers import (
     AcquirePolicy,
     TierDecision,
     apply_anomaly_guard,
+    docling_artifacts_path,
     indic_self_check,
+    offline_enabled,
     plan_tiers,
     probe,
     run_tiers,
@@ -57,6 +59,7 @@ from fmd.acquire.types import ExtractedDoc, PageSpan, ScanProfile, Table
 __all__ = [
     "AcquirePolicy",
     "AnomalyReport",
+    "ArtifactsUnavailable",
     "BBox",
     "BlockAnomaly",
     "CanonicalText",
@@ -78,8 +81,10 @@ __all__ = [
     "born_digital_length_warnings",
     "build_canonical",
     "detect_anomalies",
+    "docling_artifacts_path",
     "guard_trip_summary",
     "indic_self_check",
+    "offline_enabled",
     "plan_tiers",
     "probe",
     "repeated_substring_ratio",

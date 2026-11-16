@@ -7,12 +7,20 @@ are flagged where unverified. **Owner:** WS-SERVE.
 `config/models.yaml` (what the router calls), `config/acquire.yaml` (the OCR
 stage), `09-local-runbook.md` (the rest of the stack).
 
+**Temporary API extractor (2026-11-16):** while the local 9B shards are
+truncated, `.env` sets `FMD_EXTRACT_PROVIDER=api` and
+`FMD_EXTRACT_MODEL=deepseek-v4.1-flash-free`; the local pair stays commented.
+The API key's free quota is account-wide, so a `429 FreeUsageLimitError` (with
+`retry-after` in seconds) means every `-free` model is exhausted until reset —
+it is not an extraction-quality failure. Revert to the local pair once the
+weights pass the integrity check in §2.2.
+
 Three processes, deliberately separate — and never two GPU-resident models at
 once (§1 budget rule):
 
 | Process | What it is | Port | Who calls it |
 |---|---|---|---|
-| `scripts/serve_local.sh` | vLLM, OpenAI-compatible `/v1`, text model | 8000 | `fmd.llm.router` (`bulk_extract`, `verify`, `entity_adjudication`) |
+| `scripts/serve_local.sh` | vLLM, OpenAI-compatible `/v1`, text model | 8010 | `fmd.llm.router` (`bulk_extract`, `verify`, `entity_adjudication`) |
 | `scripts/serve_ocr.sh vision-start` | vLLM, OpenAI-compatible `/v1`, **Qwen3-VL-8B** | 8001 | `infra/ocr/server.py` (the `qwen3vl` backend) |
 | `scripts/serve_ocr.sh start` | OCR adapter behind `POST /extract` | 8110 | `fmd.acquire.tiers` tier T2 |
 
@@ -48,7 +56,7 @@ enough KV that an 8B vision model will not co-reside in 16 GB, so T2b
 
 | Thing | Runs | Host disk | In a container? |
 |---|---|---|---|
-| vLLM text (:8000) | host process | `$MODEL_DIR/Qwen3.5-9B-AWQ` | no |
+| vLLM text (:8010) | host process | `$MODEL_DIR/Qwen3.5-9B-AWQ` | no |
 | vLLM vision (:8001) | host process | `$MODEL_DIR/Qwen3-VL-8B-Instruct-FP8` | no |
 | OCR adapter (:8110) | container | mounts `$MODEL_DIR` **read-only** at `/models` | client only |
 | `api` / `worker` | container | no weights needed | client only |
@@ -78,13 +86,17 @@ Rules that make this safe:
 every client service declares
 `extra_hosts: ["host.docker.internal:host-gateway"]` (`api`, `worker`, `ocr`,
 `ocr-paddle`). The URL has one name per consumer: `FMD_LOCAL_LLM_URL` for the
-router (compose default `http://host.docker.internal:8000/v1`, host default
-`http://localhost:8000/v1`) and `FMD_OCR_VLLM_URL` for the adapter. Verify from
-inside the container, not from the host shell:
+router (compose default `http://host.docker.internal:8010/v1`, host default
+`http://localhost:8010/v1`) and `FMD_OCR_VLLM_URL` for the adapter. Port scheme:
+**app API 8000** (published by `api`), **text vLLM 8010**, **vision vLLM 8001**,
+**OCR adapter 8110**. A text model on :8000 would collide with the published API
+port and is unreachable from any container; that collision was hit on
+2026-11-16 and is why the default moved. Verify from inside the container, not
+from the host shell:
 
 ```bash
 docker compose -f infra/docker-compose.yml exec api \
-  python -c "import urllib.request;print(urllib.request.urlopen('http://host.docker.internal:8000/v1/models',timeout=5).status)"
+  python -c "import urllib.request;print(urllib.request.urlopen('http://host.docker.internal:8010/v1/models',timeout=5).status)"
 # expect: 200
 ```
 
@@ -199,7 +211,7 @@ Exact command the script runs:
 ```bash
 ~/.venvs/fmd-vllm/bin/vllm serve "${FMD_VLLM_MODEL:-QuantTrio/Qwen3.5-9B-AWQ}" \
   --served-model-name "${FMD_SERVED_NAME:-Qwen3.5-9B-AWQ}" \
-  --host 0.0.0.0 --port "${FMD_VLLM_PORT:-8000}" \
+  --host 0.0.0.0 --port "${FMD_VLLM_PORT:-8010}" \
   --max-model-len "${FMD_MAX_MODEL_LEN:-32768}" \
   --gpu-memory-utilization "${FMD_VLLM_GPU_MEM_UTIL:-0.90}" \
   --default-chat-template-kwargs '{"enable_thinking": false}' \
@@ -215,10 +227,10 @@ Flags that do **not** exist in 0.33 and abort startup if passed:
 ### 2.4 Health checks
 
 ```bash
-curl -s localhost:8000/v1/models | python3 -m json.tool | head
+curl -s localhost:8010/v1/models | python3 -m json.tool | head
 # expect: {"object":"list","data":[{"id":"Qwen3.5-9B-AWQ", ...}]}
 
-curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json' \
+curl -s localhost:8010/v1/chat/completions -H 'content-type: application/json' \
   -d '{"model":"Qwen3.5-9B-AWQ","messages":[{"role":"user","content":"Say OK."}],"max_tokens":32}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
 # expect: "OK"
@@ -230,7 +242,7 @@ Then the router-level check inside the pipeline:
 
 ```bash
 cd packages/pipeline
-FMD_EXTRACT_PROVIDER=local FMD_LOCAL_LLM_URL=http://localhost:8000/v1 \
+FMD_EXTRACT_PROVIDER=local FMD_LOCAL_LLM_URL=http://localhost:8010/v1 \
   .venv/bin/python -m fmd.cli llm doctor --live
 # expect: bulk_extract usable=true (live), no blockers; keys are never printed
 ```
@@ -238,7 +250,7 @@ FMD_EXTRACT_PROVIDER=local FMD_LOCAL_LLM_URL=http://localhost:8000/v1 \
 Guided-JSON check (this is unverified claim #3 in doc 10):
 
 ```bash
-curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '{
+curl -s localhost:8010/v1/chat/completions -H 'content-type: application/json' -d '{
  "model":"Qwen3.5-9B-AWQ","temperature":0,"max_tokens":128,
  "messages":[{"role":"user","content":"Return the JSON object {\"ok\": true}."}],
  "response_format":{"type":"json_schema","json_schema":{"name":"Probe","strict":true,
@@ -265,7 +277,7 @@ No YAML edit; the router reads env at load.
 ```bash
 # local (default)
 FMD_EXTRACT_PROVIDER=local
-FMD_LOCAL_LLM_URL=http://host.docker.internal:8000/v1
+FMD_LOCAL_LLM_URL=http://host.docker.internal:8010/v1
 FMD_EXTRACT_MODEL=Qwen3.5-9B-AWQ
 
 # hosted OpenAI-compatible
@@ -438,9 +450,11 @@ fails the Indic self-check, not the bulk path. Selecting it for T2 instead is
 | `xgrammar` grammar/architecture error | constrained decoding does not cover the Qwen3.5 hybrid architecture | set `providers.local.supports_guided_json: false`; the router then degrades to JSON-instruct + schema validation. Report the degraded schema-valid rate separately — it is a different candidate |
 | repetition loop in raw `curl` output | decoding, not acquisition | confirm `enable_thinking: false` in `--default-chat-template-kwargs`, temperature 0, no repetition penalty. The pipeline's own guard (`fmd/acquire/guards.py`) routes loops to T3 |
 | `404 model not found` | `FMD_EXTRACT_MODEL` ≠ `--served-model-name` | align both |
-| `/health` says `model_not_served` | the vision port serves something else (usually the 9B text model) | start `scripts/serve_ocr.sh vision-start`; the vLLM on 8000 must not be reused for OCR |
+| `/health` says `model_not_served` | the vision port serves something else (usually the 9B text model) | start `scripts/serve_ocr.sh vision-start`; the vLLM on 8010 must not be reused for OCR |
 | `T2 was selected but is unavailable` | OCR service down, `FMD_T2_URL` unset, or weights absent | expected degradation: `/health` names the reason (`vision_unavailable`, `model_not_served`, …); do not fabricate OCR text |
 | `/extract` → 503 `empty_result` | a non-blank page produced zero blocks | the page is unreadable at these settings; route it to the human queue, do not lower the bar to "empty string is fine" |
+| container gets `404` from `FMD_LOCAL_LLM_URL` or `Connection refused` on :8000 | the host :8000 is the published `api` port, not vLLM | serve the text model on :8010 (`FMD_VLLM_PORT=8010`) and point `FMD_LOCAL_LLM_URL` there |
+| `SafetensorError: incomplete metadata` at model load | a shard is a truncated download | `scripts/fetch_model.sh <repo>` resumes it by size; never `-o` without `-C -` |
 
 **Known guard false positive (found 2026-11-16).** Docling (T1) emits
 section-level blocks; `acquire.yaml:anomaly.block_length_multiplier = 3.0`
@@ -477,7 +491,7 @@ OCR rows have their own dependency: the 10.6 GB Qwen3-VL download.
 ```bash
 # 0) once per boot: host text model (weights already on host; no download)
 scripts/serve_local.sh start
-curl -s localhost:8000/v1/models                      # expect id Qwen3.5-9B-AWQ
+curl -s localhost:8010/v1/models                      # expect id Qwen3.5-9B-AWQ
 
 # 1) stack (api waits for db); rebuilds never touch weights
 docker compose -f infra/docker-compose.yml up -d db api worker
@@ -506,3 +520,77 @@ run: hand them the command, do not add a wait loop. `scripts/serve_ocr.sh
 vision-start` is only needed for scanned pages and needs the optional 10.6 GB
 vision fetch first (§3.2); without it T2 degrades to the human queue and that is
 the honest state.
+
+## 7. Offline mode (no outbound network)
+
+Set three variables in the shell (or `.env`); `.env.example` carries the same
+block:
+
+```bash
+export FMD_OFFLINE=1
+export HF_HUB_OFFLINE=1
+export HF_HUB_DISABLE_TELEMETRY=1
+# Optional but required for full T1 (Docling layout + tables):
+export FMD_DOCLING_ARTIFACTS="$HOME/.cache/docling-models"
+```
+
+`FMD_OFFLINE=1` is the project switch. `HF_HUB_OFFLINE=1` alone also triggers
+the acquisition guard, so a container that only sets the Hugging Face flag still
+fails fast rather than stalling. `fmd.acquire.tiers` pins
+`HF_HUB_OFFLINE`/`HF_HUB_DISABLE_TELEMETRY` before importing Docling.
+
+### 7.1 What works, what blocks
+
+| Works offline | Why |
+|---|---|
+| `uv run pytest -q`, `uv run ruff check .` | no network by design; model provider is `mock` |
+| psql / DB inspection, planner on stored text, scoring over stored evidence | local Postgres only |
+| T0 (pdftext) on born-digital PDFs | pdfium ships in the wheel |
+| T1 Docling **text** path (native parser) | no model weights; text + spans + bboxes |
+| T1 Docling **layout + tables** | only if `FMD_DOCLING_ARTIFACTS` is populated |
+| T2/T2b OCR | only if the vLLM/OCR service is already up locally |
+
+| Blocks offline | Failure / reason |
+|---|---|
+| T1 Docling with no artifact cache | `artifacts_unavailable_offline` in **<1 s**, routed to T3 (human queue), never a timeout and never a silent T0 substitute |
+| Docling artifact prefetch | `docling-tools models download` needs the network |
+| Model downloads (`scripts/fetch_model.sh`, vLLM from a Hub id) | must be done online, once; serving is then local |
+| Hosted router profiles (`api`, `anthropic`, `gemini`) | HTTP failure; use `FMD_EXTRACT_PROVIDER=mock` or a local vLLM |
+| A first crawl / new snapshots | crawling is outbound; acquisition on **cached** snapshots is fine |
+
+### 7.2 Exact commands
+
+```bash
+cd packages/pipeline
+export FMD_OFFLINE=1 HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
+
+# 1) Offline-safe checks (must both pass with no network)
+uv run ruff check .
+uv run pytest -q
+
+# 2) Full T1, only if artifacts were prefetched while online:
+#    docling-tools models download -o "$FMD_DOCLING_ARTIFACTS" layout tableformer
+uv run python -m fmd.cli extract --limit 1
+
+# 3) Offline T1 text-only proof (no layout/table weights required):
+uv run python - <<'PY'
+from pathlib import Path
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.base_models import InputFormat
+from docling.pipeline.native_pdf_pipeline import NativePdfPipeline
+from fmd.acquire.tiers import t1_extract
+conv = DocumentConverter(format_options={
+    InputFormat.PDF: PdfFormatOption(pipeline_cls=NativePdfPipeline)})
+doc = t1_extract(Path("doc.pdf").read_bytes(), converter=conv)
+print(doc.tier, len(doc.pages), len(doc.text), len(doc.tables))
+PY
+
+# 4) Prove the live router is local, not hosted (`mock` is the no-server option)
+FMD_EXTRACT_PROVIDER=mock uv run python -m fmd.cli llm doctor
+```
+
+Measured 2026-11-17 on this host: `t1_extract` with `FMD_OFFLINE=1` and no
+cache raised `artifacts_unavailable_offline` in **0.11 s**; the same call with
+the default converter under `HF_HUB_OFFLINE=1` took **7.6 s** to surface the
+Hugging Face cache error. The guard exists so the first number is the normal
+offline behaviour.

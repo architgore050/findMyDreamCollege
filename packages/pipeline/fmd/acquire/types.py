@@ -86,6 +86,9 @@ class ExtractedDoc:
     anomalous_pages: tuple[int, ...] = ()
     guard_trips: tuple[GuardTrip, ...] = ()
     needs_review: bool = False
+    #: Stable code for a review routed to T3 for a non-model reason (e.g.
+    #: ``artifacts_unavailable_offline``). Anomaly reasons stay separate.
+    review_reason: str | None = None
     two_column: bool = False
     table_confidence: float | None = None
 
@@ -134,6 +137,7 @@ class ExtractedDoc:
             "guard_trips": [trip.as_dict() for trip in self.guard_trips],
             "guard_trips_by_name": self.guard_trips_by_name(),
             "needs_review": self.needs_review,
+            "review_reason": self.review_reason,
             "two_column": self.two_column,
             "table_confidence": self.table_confidence,
             "table_cells_uncertain": any(table.column_header_uncertain for table in self.tables),
@@ -144,7 +148,11 @@ class ExtractedDoc:
         return {
             "tier": "T3",
             "tool": "human_queue",
-            "reasons": list(self.anomaly_reasons) or ["tier_escalation"],
+            "reasons": (
+                [self.review_reason]
+                if self.review_reason
+                else (list(self.anomaly_reasons) or ["tier_escalation"])
+            ),
             "guard_trips": [trip.as_dict() for trip in self.guard_trips],
             "guard_trips_by_name": self.guard_trips_by_name(),
             "anomalous_pages": list(self.anomalous_pages),

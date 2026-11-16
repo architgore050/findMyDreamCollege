@@ -33,7 +33,7 @@ import httpx
 import yaml
 
 from fmd.acquire.canonical import PageGeometry, TextBlock, build_canonical
-from fmd.acquire.errors import TierUnavailable
+from fmd.acquire.errors import ArtifactsUnavailable, TierUnavailable
 from fmd.acquire.guards import (
     OCR_TIERS,
     born_digital_length_warnings,
@@ -50,8 +50,71 @@ from fmd.acquire.types import (
 TIERS_YAML = Path(__file__).resolve().parents[1] / "extract" / "tiers.yaml"
 TIER_ORDER = ("T0", "T1", "T2", "T2b", "T3")
 _DEVANAGARI = range(0x0900, 0x0980)
+#: Stable review reason (never prose): offline mode has no Docling artifacts.
+ARTIFACTS_UNAVAILABLE_OFFLINE = "artifacts_unavailable_offline"
+_TRUTHY = {"1", "true", "yes", "on"}
 
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- offline
+
+
+def _enabled(value: str | None) -> bool:
+    return (value or "").strip().lower() in _TRUTHY
+
+
+def offline_enabled() -> bool:
+    """Is the process banned from outbound network access?
+
+    ``FMD_OFFLINE`` is the project switch; honouring ``HF_HUB_OFFLINE`` as well
+    means a Hugging Face-only offline flag (set by a container or a shell) still
+    produces a fast, named failure instead of a stalled artifact fetch.
+    """
+    return _enabled(os.environ.get("FMD_OFFLINE")) or _enabled(os.environ.get("HF_HUB_OFFLINE"))
+
+
+def _enforce_offline_env() -> None:
+    """Pin Hub clients offline before a heavy import gets a chance to call out."""
+    if not offline_enabled():
+        return
+    os.environ["FMD_OFFLINE"] = "1"
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+
+def docling_artifacts_path(policy: AcquirePolicy) -> Path | None:
+    """The configured Docling artifact directory, or ``None``.
+
+    Registry first (``config/acquire.yaml:backends.T1.artifacts_path``, which
+    itself interpolates ``${FMD_DOCLING_ARTIFACTS:-}``), then the environment.
+    """
+    spec = policy.backend("T1")
+    configured = getattr(spec, "artifacts_path", None) or os.environ.get(
+        "FMD_DOCLING_ARTIFACTS"
+    )
+    value = str(configured or "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def _require_docling_artifacts(path: Path | None) -> Path:
+    """Fail *before* Docling constructs a model loader that would fetch."""
+    if path is None:
+        raise ArtifactsUnavailable(
+            f"{ARTIFACTS_UNAVAILABLE_OFFLINE}: T1 (Docling) needs a local artifact cache "
+            "and none is configured. Set FMD_DOCLING_ARTIFACTS (or "
+            "acquire.yaml:backends.T1.artifacts_path) to a directory populated once, "
+            "online, with `docling-tools models download`."
+        )
+    if not path.is_dir() or next(path.iterdir(), None) is None:
+        raise ArtifactsUnavailable(
+            f"{ARTIFACTS_UNAVAILABLE_OFFLINE}: T1 (Docling) artifact cache {str(path)!r} "
+            "is missing or empty. Run `docling-tools models download` once with the "
+            "network enabled (FMD_OFFLINE=0, HF_HUB_OFFLINE=0), then point "
+            "FMD_DOCLING_ARTIFACTS at that directory."
+        )
+    return path
 
 
 # --------------------------------------------------------------------------- policy
@@ -343,9 +406,19 @@ def t1_extract(
     converter: Any | None = None,
     policy: AcquirePolicy | None = None,
 ) -> ExtractedDoc:
-    """Docling layout + tables. Lazy import: the base image does not ship it."""
+    """Docling layout + tables. Lazy import: the base image does not ship it.
+
+    Offline mode (``FMD_OFFLINE=1``) never lets Docling reach Hugging Face: the
+    cache path must already exist, otherwise this raises
+    :class:`ArtifactsUnavailable` immediately. An injected ``converter`` is used
+    as-is (tests and the native text-only probe need no artifacts).
+    """
     policy = policy or AcquirePolicy.load()
+    _enforce_offline_env()
     if converter is None:
+        artifacts = docling_artifacts_path(policy)
+        if offline_enabled():
+            _require_docling_artifacts(artifacts)
         try:
             from docling.document_converter import DocumentConverter
         except ImportError as exc:
@@ -353,7 +426,7 @@ def t1_extract(
                 "T1 (Docling) is not installed. Install the extraction extra with "
                 "`uv sync --all-extras`, or the dispatcher will fall back to T0 text."
             ) from exc
-        converter = DocumentConverter()
+        converter = _docling_converter(DocumentConverter, artifacts)
 
     path = _write_temp(data)
     try:
@@ -365,6 +438,21 @@ def t1_extract(
         path.unlink(missing_ok=True)
     document = getattr(result, "document", result)
     return _docling_doc(document, policy)
+
+
+def _docling_converter(factory: Any, artifacts: Path | None) -> Any:
+    """Build a converter pinned to the configured local artifact directory."""
+    if artifacts is None:
+        return factory()
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.document_converter import PdfFormatOption
+
+    options = PdfPipelineOptions()
+    options.artifacts_path = str(artifacts)
+    return factory(
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
+    )
 
 
 def _docling_doc(document: Any, policy: AcquirePolicy) -> ExtractedDoc:
@@ -843,6 +931,18 @@ def run_tiers(
     if decision.tier == "T1":
         try:
             result = (t1 or t1_extract)(data)
+        except ArtifactsUnavailable as exc:
+            # Offline with no local layout/table artifacts: this is not a reason
+            # to pretend T0's flat text answered a table/layout question. Route
+            # to the human queue with a stable, named reason.
+            return replace(
+                base,
+                tier="T3",
+                fallback_from="T1",
+                needs_review=True,
+                review_reason=ARTIFACTS_UNAVAILABLE_OFFLINE,
+                notes=base.notes + (f"T1 unavailable offline: {exc}",),
+            )
         except TierUnavailable as exc:
             return _fallback(base, "T1", exc)
         result = apply_anomaly_guard(result, policy)
@@ -923,12 +1023,15 @@ def _version(distribution: str) -> str | None:
 
 
 __all__ = [
+    "ARTIFACTS_UNAVAILABLE_OFFLINE",
     "AcquirePolicy",
     "OCRBackend",
     "TierDecision",
     "TierPolicy",
     "apply_anomaly_guard",
+    "docling_artifacts_path",
     "indic_self_check",
+    "offline_enabled",
     "plan_tiers",
     "probe",
     "run_tiers",
