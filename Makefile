@@ -34,8 +34,8 @@ extract: ## snapshots -> extractions -> claims
 score: ## claims -> scores + insight sets
 	$(COMPOSE) run --rm api python -m fmd.cli score
 
-eval: ## golden set, provenance coverage, drift
-	$(COMPOSE) run --rm api python -m fmd.cli eval
+eval: ## golden set, provenance gate, drift (offline; no DB, no network)
+	cd packages/pipeline && uv run python -m fmd.cli eval --golden ../../data/golden --report-out ../../reports/eval.json
 
 dev: ## local dev (uvicorn + next dev, no docker for the apps)
 	cd packages/pipeline && uv run uvicorn fmd.api:app --reload --port 8000 & \

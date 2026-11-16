@@ -1,0 +1,31 @@
+# Verified solely against the committed UGC central-university JSON fixture.
+# PII fields were redacted upstream; these three fields were not. The fixture
+# README records the live capture and its sha256.
+schema_version: 1
+id: fixture-ugc-university-of-delhi
+institution: "University of Delhi"
+programme: "not applicable (institution inventory row)"
+state: "Delhi"
+source_url: null
+retrieved_at: "2026-11-16"
+fixture: "packages/pipeline/tests/fixtures/adapters/ugc_university_central.json"
+notes: >-
+  Inventory-level ground truth: an extraction run that emits a different state or
+  UGC status for this institution is wrong. This row is not measured by the
+  offline extraction replay because no guided-JSON recording exists for it.
+expected:
+  institution.name:
+    value: "University of Delhi"
+    unit: null
+    quote: '"uni_name": "University of Delhi"'
+    status: verified
+  institution.state:
+    value: "Delhi"
+    unit: null
+    quote: '"state": "Delhi"'
+    status: verified
+  accreditation.ugc_status:
+    value: "2(f) & 12B"
+    unit: null
+    quote: '"status": "2(f) & 12B"'
+    status: verified

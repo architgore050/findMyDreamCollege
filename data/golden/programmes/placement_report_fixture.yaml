@@ -1,0 +1,69 @@
+# Ground truth from the committed, synthetic placement-report fixture.
+# The fixture is not a real institution; it is the document the extraction tests
+# use.  Institution is therefore named honestly as unnamed.
+schema_version: 1
+id: fixture-placement-report-2024-25
+institution: "Unnamed (committed synthetic fixture)"
+programme: "BSc Medical Laboratory Technology"
+state: null
+source_url: null
+retrieved_at: null
+fixture: "packages/pipeline/tests/fixtures/extract/placement_report.txt"
+llm_fixture: "packages/pipeline/tests/fixtures/extract/llm/da183634a5c13b058b3334db926693fce12ad9138deae194a5bacf24c6daafe8.json"
+family: placement_report
+notes: >-
+  Synthetic fixture used by test_extract_pipeline. Values are verified against the
+  committed text, not against a real college. The recorded guided JSON is the
+  input replayed by the offline harness.
+expected:
+  placement.cohort_year:
+    value: "2024-25"
+    unit: null
+    quote: "2024-25"
+    status: verified
+  placement.eligible_count:
+    value: 120
+    unit: count
+    quote: "Eligible students: 120"
+    status: verified
+  placement.placed_count:
+    value: 96
+    unit: count
+    quote: "Students placed: 96"
+    status: verified
+  placement.rate:
+    value: 0.8
+    unit: ratio
+    quote: "Placement rate: 80%"
+    printed_value: "80%"
+    printed_unit: percent
+    status: verified
+  salary.median:
+    value: 420000
+    unit: INR
+    quote: "Median salary: INR 420000 per annum"
+    status: verified
+  placement.internship_counted_as_employment:
+    value: true
+    unit: null
+    quote: "Internships are included in the placement count."
+    status: verified
+  placement.basis:
+    value: "included in the placement count"
+    unit: null
+    quote: "Internships are included in the placement count."
+    status: verified
+  salary.highest_package:
+    value: null
+    unit: null
+    quote: null
+    status: verified
+    expectation: abstain
+    absent_terms: ["highest package", "Highest package", "highest salary"]
+    note: "The fixture reports a median only. Abstaining here is correct."
+  fee.tuition:
+    value: null
+    unit: INR
+    quote: null
+    status: unverified
+    note: "The fixture contains no fee. A human must find a dated fee source before this becomes verified."

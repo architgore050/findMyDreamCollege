@@ -1,0 +1,19 @@
+# Verified against the committed RUHS affiliated-colleges fixture. The list is a
+# <select>, not a table; this row asserts only that the option is present.
+schema_version: 1
+id: fixture-ruhs-sms-medical-college
+institution: "SMS Medical College, Jaipur"
+programme: "not applicable (affiliated-college listing row)"
+state: "Rajasthan"
+source_url: null
+retrieved_at: "2026-11-16"
+fixture: "packages/pipeline/tests/fixtures/adapters/health_university_ruhs_listing_snippet.html"
+notes: >-
+  Tests inventory parsing, not MLT programme outcomes. It is deliberately
+  programme-neutral: the listing does not establish that this college offers MLT.
+expected:
+  institution.listed_name:
+    value: "SMS MEDICAL COLLEGE, JAIPUR"
+    unit: null
+    quote: "SMS MEDICAL COLLEGE, JAIPUR"
+    status: verified

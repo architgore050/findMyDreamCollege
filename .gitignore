@@ -21,7 +21,9 @@ out/
 pnpm-debug.log*
 
 # data + artifacts (never commit raw crawls or snapshots)
-data/
+data/*
+!data/golden/
+!data/golden/**
 snapshots/
 *.parquet
 *.warc

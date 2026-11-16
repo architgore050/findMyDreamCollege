@@ -1,0 +1,28 @@
+# Verified against the committed NIRF 2025 Medical fixture. NIRF is an
+# institution-level proxy, never MLT programme evidence (brief §4). The score is
+# associated with the institution by position in the same <tr>; the quote check
+# can prove the number exists, not the association, so that limitation is stated
+# here rather than hidden.
+schema_version: 1
+id: fixture-nirf-aiims-delhi
+institution: "All India Institute of Medical Sciences, Delhi"
+programme: "not applicable (institution-level ranking)"
+state: "Delhi"
+source_url: null
+retrieved_at: "2026-11-16"
+fixture: "packages/pipeline/tests/fixtures/adapters/nirf_2025_medical_snippet.html"
+notes: >-
+  Institution-level proxy only. The fixture is a snippet of 3 of 151 rows; it does
+  not establish programme quality or MLT availability.
+expected:
+  institution.name:
+    value: "All India Institute of Medical Sciences, Delhi"
+    unit: null
+    quote: "All India Institute of Medical Sciences, Delhi"
+    status: verified
+  nirf.tlr_score:
+    value: 93.51
+    unit: null
+    quote: "<td>93.51</td>"
+    status: verified
+    note: "Row association is positional within the same <tr>; quote resolves the number only."

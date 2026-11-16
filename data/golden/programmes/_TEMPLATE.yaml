@@ -1,0 +1,37 @@
+# TEMPLATE — copy this file to `programmes/<id>.yaml` and fill it in.
+#
+# This file is documentation. The loader ignores files whose name starts with
+# "_", so the placeholders below never enter the metrics.
+#
+# Every entry:
+#   id, institution, programme, state, source_url, retrieved_at
+#   expected.<field>: {value, unit, quote, status, expectation}
+#
+# A verified row needs EITHER `fixture:` on the entry (repo-relative path to a
+# committed fixture containing the quote verbatim) OR `source_url` + a real
+# `retrieved_at`. Otherwise it must be `status: unverified` with `value: null`.
+
+- schema_version: 1
+  id: template-replace-me
+  institution: "Replace with the institution named in the source, or 'Unnamed fixture'"
+  programme: "BSc Medical Laboratory Technology"
+  state: null
+  source_url: null          # required for citation-verified rows
+  retrieved_at: null        # YYYY-MM-DD; required for citation-verified rows
+  fixture: null             # repo-relative committed fixture, if any
+  llm_fixture: null         # recorded guided-JSON response, if extraction is measured
+  family: null              # placement_report | fee_structure | seat_matrix | accreditation | ...
+  notes: "Human curation template — not ground truth."
+  expected:
+    placement.eligible_count:
+      value: null
+      unit: count
+      quote: null
+      status: unverified
+      note: "A human must open the source PDF/HTML and copy the exact quote."
+    salary.median:
+      value: null
+      unit: INR
+      quote: null
+      status: unverified
+      note: "Do not guess. If the source reports only a highest package, this row stays unverified."
