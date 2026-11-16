@@ -123,13 +123,66 @@ closest genuine AWQ conversion is `QuantTrio/Qwen3.5-9B-AWQ` (quant_method awq,
 ```bash
 # one command, resumable, into the host weight root (never into an image):
 scripts/fetch_model.sh QuantTrio/Qwen3.5-9B-AWQ
-ls -l "$FMD_MODEL_DIR/Qwen3.5-9B-AWQ"   # expect 5 safetensors + configs
+ls -l "$MODEL_DIR/Qwen3.5-9B-AWQ"       # expect 5 safetensors + configs
 ```
 
-`fetch_model.sh` compares each file against the Hub-reported size and resumes
-short ones with `curl -C -`; a complete directory is left alone. Do **not** point
-vLLM at the Hub id for day-to-day serving: a Hub id can silently fetch, a local
-directory cannot.
+**Fresh fetch.** `fetch_model.sh` reads `model.safetensors.index.json` and
+fetches every shard independently into `<shard>.part`; the part file is renamed
+only after the size matches `.fmd-manifest.json`, the safetensors header parses
+(8-byte JSON length + tensor count + declared payload end), and, when the Hub
+exposes LFS metadata, the sha256 matches. Completion is never inferred from
+`Content-Length`. Disk space is checked against the remaining bytes first
+(exit 3 rather than a full disk); `FMD_DISK_RESERVE_BYTES` keeps headroom.
+
+**After a disconnect, run the same command again.** Bytes already in the
+`.part` file are preserved and `curl -C -` resumes at that offset — nothing
+restarts from zero. Each line is one attempt: attempt n/N, bytes this session,
+total on disk, speed, HTTP status. A transfer below 10 KiB/s for 60 s is killed
+and retried with exponential backoff (5 s → 300 s); `FMD_FETCH_ATTEMPTS`
+(default 10) caps attempts per file. If a server ignores `Range`, the resulting
+full-body restart is detected by size and the file is restarted cleanly instead
+of being appended twice.
+
+**Verify an existing directory** (offline; no Hub needed):
+
+```bash
+scripts/fetch_model.sh verify "$MODEL_DIR/Qwen3.5-9B-AWQ"
+# PASS model-00001-of-00005.safetensors (… bytes, header=… tensors=…)
+```
+
+Exit codes: `0` all files pass, `2` some failed (names printed), `3` disk
+space, `4` metadata/index unavailable.
+
+**Repair the corrupted 9B directory.** `repair` re-checks every file, deletes
+only the invalid ones, and re-fetches exactly those; valid shards are never
+re-downloaded:
+
+```bash
+# directories fetched by the old script have no manifest; name the repo:
+FMD_MODEL_REPO=QuantTrio/Qwen3.5-9B-AWQ \
+  scripts/fetch_model.sh repair "$MODEL_DIR/Qwen3.5-9B-AWQ"
+scripts/fetch_model.sh verify "$MODEL_DIR/Qwen3.5-9B-AWQ"
+```
+
+It prints `FAIL <shard>: expected N bytes, found M` (or a sha256 mismatch), so
+the bad shard is never ambiguous. When `.fmd-manifest.json` is absent, repair
+rebuilds it from the Hub using `.source` or `FMD_MODEL_REPO`.
+
+**Expected sizes.** `.fmd-manifest.json` records the exact byte size of every
+file on first contact; `verify` is the authority. Reference points:
+Qwen3.5-2B-AWQ ≈3.2 GB, Qwen3-VL-8B-Instruct-FP8 ≈10.6 GB (two shards). The 9B
+AWQ set is 5 safetensors shards plus configs. A shard shorter than the manifest
+says is truncated — repair it; do not serve it.
+
+**When the host throttles.** `fetch_model.sh` honours `HF_ENDPOINT`, so switch
+mirror (e.g. `HF_ENDPOINT=https://hf-mirror.com`) or route through the host
+proxy (`HTTPS_PROXY=…`) without changing flags. Leave the connect timeout and
+retry defaults alone; raise `FMD_SPEED_TIME` / lower `FMD_SPEED_LIMIT` only when
+the link is genuinely slow but alive. Gated repos need `HF_TOKEN` (read from a
+0600 file by curl; never printed or placed on the command line).
+
+Do **not** point vLLM at the Hub id for day-to-day serving: a Hub id can
+silently fetch, a local directory cannot.
 
 A 3.2 GB genuine-AWQ alternative for smoke tests is `QuantTrio/Qwen3.5-2B-AWQ`
 (same architecture, same vendor) — useful while the 9B is still downloading.
