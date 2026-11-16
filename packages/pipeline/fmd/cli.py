@@ -28,13 +28,9 @@ class NotImplementedYet(RuntimeError):
 
 
 # Commands owned by other workstreams (brief §21). Keeping this table explicit
-# means `make crawl` cannot silently succeed before WS-B lands.
-UNIMPLEMENTED: dict[str, tuple[str, str]] = {
-    "crawl": ("WS-B", "7"),
-    "extract": ("WS-D", "9"),
-    "eval": ("WS-F", "19"),
-    "worker": ("WS-B", "7"),
-}
+# means a stub cannot silently succeed before its workstream lands. `eval` is
+# handled in main(): no-argument eval remains a stub, --golden is implemented.
+UNIMPLEMENTED: dict[str, tuple[str, str]] = {}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -58,13 +54,78 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("migrate", help="apply pending SQL migrations")
     subparsers.add_parser("seed", help="load countries/sources/exams config into the database")
 
-    for name, help_text in (
-        ("crawl", "run the crawl frontier (WS-B)"),
-        ("extract", "snapshots -> extractions -> claims (WS-D)"),
-        ("eval", "golden set, provenance coverage, drift (WS-F)"),
-        ("worker", "run the background worker (WS-B)"),
-    ):
-        subparsers.add_parser(name, help=help_text)
+    crawl_parser = subparsers.add_parser("crawl", help="run the crawl frontier (WS-O glue)")
+    crawl_parser.add_argument(
+        "--limit", type=int, default=None, help="maximum documents to plan and fetch"
+    )
+    crawl_parser.add_argument(
+        "--source",
+        action="append",
+        default=None,
+        metavar="ID",
+        help="only this registry source id (repeatable)",
+    )
+    crawl_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the planned URLs and write nothing",
+    )
+
+    extract_parser = subparsers.add_parser(
+        "extract", help="snapshots -> extractions -> claims (WS-O glue)"
+    )
+    extract_parser.add_argument(
+        "--limit", type=int, default=None, help="maximum snapshots to process"
+    )
+    extract_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="re-extract snapshots already processed at this tool version",
+    )
+
+    worker_parser = subparsers.add_parser(
+        "worker", help="long-running crawl -> extract -> score loop (WS-O glue)"
+    )
+    worker_parser.add_argument(
+        "--limit", type=int, default=None, help="maximum items per stage per tick"
+    )
+    worker_parser.add_argument(
+        "--idle-seconds",
+        type=float,
+        default=5.0,
+        help="sleep between ticks (default 5)",
+    )
+    worker_parser.add_argument(
+        "--max-ticks",
+        type=int,
+        default=None,
+        help="stop after N ticks (default: run until SIGTERM/SIGINT)",
+    )
+
+    eval_parser = subparsers.add_parser(
+        "eval", help="golden set, provenance coverage, drift (offline, WS-F)"
+    )
+    eval_parser.add_argument(
+        "--golden",
+        default=None,
+        help="directory of golden YAML files (required; e.g. data/golden)",
+    )
+    eval_parser.add_argument(
+        "--report-out",
+        default=None,
+        help="write the JSON report here (created if missing)",
+    )
+    eval_parser.add_argument(
+        "--baseline",
+        default=None,
+        help="previous JSON report to diff against (drift); omitted means no drift",
+    )
+    eval_parser.add_argument(
+        "--fail-under",
+        type=float,
+        default=1.0,
+        help="hard gate: minimum provenance coverage (default 1.0)",
+    )
 
     score_parser = subparsers.add_parser(
         "score", help="claims -> scores + insight sets (WS-F, idempotent)"
@@ -72,9 +133,7 @@ def _build_parser() -> argparse.ArgumentParser:
     score_parser.add_argument(
         "--profile",
         default=None,
-        help=(
-            "profile JSON as a path or inline object (runtime input only; never persisted)"
-        ),
+        help=("profile JSON as a path or inline object (runtime input only; never persisted)"),
     )
     score_parser.add_argument(
         "--dry-run", action="store_true", help="score and print a summary without writing"
@@ -129,76 +188,114 @@ def _load_profile(value: str | None) -> dict[str, Any]:
 
 
 def _cmd_score(args: argparse.Namespace) -> int:
-    from fmd.db.repositories import (
-        ClaimsRepo,
-        ProgrammeFilter,
-        ProgrammesRepo,
-        ScoresRepo,
-    )
-    from fmd.filters import evaluate_all
-    from fmd.score import score_programme
-    from fmd.score.config import ScoringConfig
-    from fmd.score.persist import persist_score
+    from fmd.orchestrate.score import ScoreError
 
     registry = load_registry(args.config_dir)
     profile = _load_profile(args.profile)
-    config = ScoringConfig.from_config(registry.weights)
-    problems = config.validate()
-    if problems:
-        print("fmd score: invalid scoring config: " + "; ".join(problems), file=sys.stderr)
-        return 1
+    database = _database(args)
+    try:
+        from fmd.orchestrate import Orchestrator
 
-    written = skipped = unknown = 0
-    programmes_scored = 0
-    with _database(args) as database:
-        programmes = ProgrammesRepo(database).list(
-            ProgrammeFilter(limit=max(1, args.limit), offset=0)
+        orchestrator = Orchestrator(registry=registry, database=database)
+        summary = orchestrator.score(
+            profile=profile,
+            dry_run=args.dry_run,
+            limit=args.limit,
+            force=args.force,
         )
-        for programme in programmes:
-            claims = ClaimsRepo(database).list_for_entity(programme.institution_id)
-            view = programme.model_dump(mode="json")
-            view["claims"] = claims
-            summary = evaluate_all(view, profile)
-            result = score_programme(
-                programme.id,
-                view,
-                profile,
-                claims,
-                config=config,
-                cost_rules=registry.cost_rules,
-                filter_decisions=list(summary.decisions.values()),
-            )
-            programmes_scored += 1
-            if result.composite.point is None:
-                unknown += 1
-            if args.dry_run:
-                point = result.composite.point
-                rendered = "UNKNOWN" if point is None else f"{point:.2f}"
-                print(
-                    f"[dry-run] programme={programme.id} composite={rendered} "
-                    f"tier={result.evidence_tier} claims={len(claims)}"
-                )
-                continue
-            latest = ScoresRepo(database).latest_for_entity(programme.institution_id)
-            if (
-                not args.force
-                and latest is not None
-                and latest.claims_hash == result.claims_hash
-                and latest.scorer_version == result.scorer_version
-                and latest.weights_version == result.weights_version
-            ):
-                skipped += 1
-                continue
-            persist_score(database, result)
-            written += 1
+    except ScoreError as exc:
+        print(f"fmd score: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        database.close()
 
+    for entry in summary.outcomes:
+        if "line" in entry:
+            print(entry["line"])
     verb = "would write" if args.dry_run else "wrote"
     print(
-        f"fmd score: {verb} {written}, skipped {skipped}, unknown {unknown}, "
-        f"programmes {programmes_scored} "
-        f"(scorer={config.scorer_version}, weights={config.weights_version})"
+        f"fmd score: {verb} {summary.counts.get('written', 0)}, "
+        f"skipped {summary.counts.get('skipped', 0)}, "
+        f"unknown {summary.counts.get('unknown', 0)}, "
+        f"programmes {summary.counts.get('programmes', 0)} "
+        f"(scorer={registry.scorer_version}, weights={registry.weights_version})"
     )
-    return 0
+    print(summary.as_json())
+    return 1 if summary.failed else 0
+
+
+def _orchestrator(args: argparse.Namespace):
+    from fmd.orchestrate import Orchestrator
+
+    registry = load_registry(args.config_dir)
+    database = _database(args)
+    return Orchestrator(registry=registry, database=database), database
+
+
+def _cmd_crawl(args: argparse.Namespace) -> int:
+    orchestrator, database = _orchestrator(args)
+    try:
+        summary = orchestrator.crawl(
+            sources=args.source,
+            limit=args.limit,
+            dry_run=args.dry_run,
+        )
+    finally:
+        database.close()
+    print(summary.as_json())
+    return 1 if summary.failed else 0
+
+
+def _cmd_extract(args: argparse.Namespace) -> int:
+    orchestrator, database = _orchestrator(args)
+    try:
+        summary = orchestrator.extract(limit=args.limit, force=args.force)
+    finally:
+        database.close()
+    print(summary.as_json())
+    return 1 if summary.failed else 0
+
+
+def _cmd_worker(args: argparse.Namespace) -> int:
+    orchestrator, database = _orchestrator(args)
+    summaries: list[Any] = []
+    try:
+        summaries = orchestrator.worker(
+            limit=args.limit,
+            idle_seconds=args.idle_seconds,
+            max_ticks=args.max_ticks,
+            on_summary=lambda summary: print(summary.as_json(), flush=True),
+        )
+    finally:
+        database.close()
+    return 1 if any(summary.failed for summary in summaries) else 0
+
+
+def _cmd_eval(args: argparse.Namespace) -> int:
+    from fmd.eval import (
+        EvalError,
+        GoldenError,
+        apply_gate,
+        render_summary,
+        run_evaluation,
+        write_report,
+    )
+
+    try:
+        outcome = run_evaluation(args.golden, baseline_path=args.baseline)
+    except (EvalError, GoldenError) as exc:
+        print(f"fmd eval: {exc}", file=sys.stderr)
+        return 1
+    report = outcome.report
+    failures = apply_gate(report, args.fail_under)
+    report["ok"] = not failures
+    report_path = None
+    if args.report_out:
+        report_path = write_report(report, args.report_out)
+    print(render_summary(report, report_path=report_path))
+    for failure in failures:
+        print(f"fmd eval: FAIL {failure}", file=sys.stderr)
+    return 1 if failures else 0
 
 
 def _cmd_llm_ping(args: argparse.Namespace) -> int:
@@ -253,6 +350,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    if args.command == "eval" and args.golden is None:
+        # The legacy no-argument invocation is still a stub; a real run must name
+        # its golden set so it can never silently evaluate an empty directory.
+        print(
+            "eval: --golden is required; the no-argument form is still "
+            "not implemented (WS-F, see brief §19)",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
         if args.command == "migrate":
             return _cmd_migrate(args)
@@ -260,11 +367,26 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_seed(args)
         if args.command == "score":
             return _cmd_score(args)
+        if args.command == "crawl":
+            return _cmd_crawl(args)
+        if args.command == "extract":
+            return _cmd_extract(args)
+        if args.command == "worker":
+            return _cmd_worker(args)
+        if args.command == "eval":
+            return _cmd_eval(args)
         if args.command == "llm-ping":
             return _cmd_llm_ping(args)
     except (ConfigError, DatabaseError, MigrationError, SeedError) as exc:
         print(f"fmd {args.command}: {exc}", file=sys.stderr)
         return 1
+    except Exception as exc:
+        from fmd.orchestrate import OrchestrationError
+
+        if isinstance(exc, OrchestrationError):
+            print(f"fmd {args.command}: {exc}", file=sys.stderr)
+            return 1
+        raise
     except NotImplementedYet as exc:  # pragma: no cover - defensive
         print(f"fmd {args.command}: {exc}", file=sys.stderr)
         return 2

@@ -69,7 +69,9 @@ class FakeSource:
 
 
 class FakeAdapter:
-    def __init__(self, refs: Iterable[DocumentRef] | None = None, *, error: Exception | None = None):
+    def __init__(
+        self, refs: Iterable[DocumentRef] | None = None, *, error: Exception | None = None
+    ):
         self.refs = list(refs or [])
         self.error = error
         self.calls = 0
@@ -93,9 +95,7 @@ class FakeFetcher:
         self.requests.append(req)
         value = self.responses.get(req.url)
         if value is None:
-            return FetchResult(
-                url=req.url, final_url=req.url, status=0, error="no_fake_response"
-            )
+            return FetchResult(url=req.url, final_url=req.url, status=0, error="no_fake_response")
         if callable(value):
             value = value(req)
         if isinstance(value, bytes):
@@ -183,9 +183,7 @@ class MemorySnapshots:
         rows = self.rows
         if tool_version is not None and self.extractions is not None:
             done = {
-                row.snapshot_id
-                for row in self.extractions.rows
-                if row.tool_version == tool_version
+                row.snapshot_id for row in self.extractions.rows if row.tool_version == tool_version
             }
             rows = [row for row in rows if row.id not in done]
         return sorted(rows, key=lambda row: row.id)[:limit]
@@ -230,11 +228,7 @@ class MemoryEntities:
 
     def find(self, kind: str, canonical_name: str) -> EntityRecord | None:
         return next(
-            (
-                row
-                for row in self.rows
-                if row.kind == kind and row.canonical_name == canonical_name
-            ),
+            (row for row in self.rows if row.kind == kind and row.canonical_name == canonical_name),
             None,
         )
 

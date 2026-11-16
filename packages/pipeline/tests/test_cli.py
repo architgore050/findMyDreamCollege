@@ -32,10 +32,7 @@ def empty_database(pg_url: str):
 
 def test_unimplemented_commands_exit_non_zero(capsys) -> None:
     expected = {
-        "crawl": "WS-B",
-        "extract": "WS-D",
         "eval": "WS-F",
-        "worker": "WS-B",
     }
     for command, workstream in expected.items():
         assert main([command]) == 2
