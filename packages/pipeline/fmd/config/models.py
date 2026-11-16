@@ -337,6 +337,55 @@ class ModelsConfig(ConfigModel):
     fallbacks: list[FallbackRule] = Field(default_factory=list)
 
 
+# --------------------------------------------------------------------------- acquisition
+
+AcquireGranularity = Literal["glyph", "span", "block"]
+
+
+class AcquireTierThresholds(ConfigModel):
+    """Routing thresholds for the acquisition tiers. No Python defaults."""
+
+    text_min_chars_per_page: int
+    table_min_rows: int
+    table_min_numeric_columns: int
+    devanagari_forces_t2: bool
+    t1_table_confidence_min: float
+    t2_indic_self_check_min_ratio: float
+    adjudication_sample_rate: float
+
+
+class AcquireAnomalyThresholds(ConfigModel):
+    """Repetition-loop / entropy-collapse thresholds (never constants in code)."""
+
+    block_length_multiplier: float
+    entropy_ratio_floor: float
+    min_block_chars: int
+    min_page_chars: int
+    repeated_block_min_occurrences: int
+
+
+class AcquireBackend(ConfigModel):
+    tool: str
+    model: str
+    granularity: AcquireGranularity
+    endpoint_env: str | None = None
+
+
+class AcquireBBoxPolicy(ConfigModel):
+    page_epsilon: float
+    gate_tiers: list[str] = Field(default_factory=list)
+
+
+class AcquireConfig(ConfigModel):
+    """Typed view of ``config/acquire.yaml`` (brief §9 text layer)."""
+
+    version: str
+    tiers: AcquireTierThresholds
+    anomaly: AcquireAnomalyThresholds
+    backends: dict[str, AcquireBackend]
+    bbox: AcquireBBoxPolicy
+
+
 # --------------------------------------------------------------------------- exams
 
 

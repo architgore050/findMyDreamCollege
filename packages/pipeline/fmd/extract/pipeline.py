@@ -86,6 +86,8 @@ class ExtractResult:
     outcomes: list[FieldOutcome] = field(default_factory=list)
     adjudications: list[dict[str, Any]] = field(default_factory=list)
     skipped: bool = False
+    needs_review: bool = False
+    review: dict[str, Any] | None = None
 
 
 class ExtractPipeline:
@@ -143,6 +145,18 @@ class ExtractPipeline:
             raise TierUnavailable(
                 f"snapshot {snapshot.id}: every available tier produced empty text"
             )
+        if doc.ocr_anomaly or doc.needs_review:
+            # A decoder loop or a failed script self-check is not evidence. Route
+            # to the human queue and emit no claims from this document.
+            reasons = ", ".join(doc.anomaly_reasons) or "tier_escalation"
+            logger.warning("snapshot %s routed to T3 (%s); no claims emitted", snapshot.id, reasons)
+            return ExtractResult(
+                target=target,
+                doc=doc,
+                skipped=True,
+                needs_review=True,
+                review=doc.as_review_item(),
+            )
 
         schema = schema_for(target.family)
         purpose = self.policy.profile_for(doc.tier)
@@ -198,6 +212,7 @@ class ExtractPipeline:
         stored: list[Any] = []
         for claim in validation.claims:
             adjusted = _apply_adjudications(claim, adjudications)
+            adjusted = _attach_bbox_provenance(adjusted, doc)
             stored.append(
                 self.claims.create(adjusted.model_copy(update={"extraction_id": extraction.id}))
             )
@@ -247,6 +262,34 @@ class ExtractPipeline:
             {"field": item.get("field"), "verdict": verdict.model_dump()}
             for item, verdict in decisions
         ]
+
+
+def _attach_bbox_provenance(claim: ClaimCreate, doc: ExtractedDoc) -> ClaimCreate:
+    """Attach resolved page bboxes to the claim qualifier.
+
+    The quote already resolved against the canonical text in ``validate``; this
+    projects the same offsets onto the source geometry. A multi-span quote keeps
+    every box; it is never collapsed into one box that covers the gap.
+    """
+    if doc.canonical is None or claim.char_start is None or claim.char_end is None:
+        return claim
+    hits = doc.canonical.bboxes(claim.char_start, claim.char_end)
+    if not hits:
+        return claim
+    qualifier = dict(claim.qualifier or {})
+    qualifier["bboxes"] = [hit.as_dict() for hit in hits]
+    qualifier["bbox"] = list(hits[0].bbox)
+    qualifier["page_no"] = hits[0].page_no
+    granularities = {hit.granularity for hit in hits}
+    qualifier["bbox_granularity"] = (
+        hits[0].granularity if len(granularities) == 1 else doc.bbox_granularity
+    )
+    qualifier["bbox_multi_span"] = len(hits) > 1
+    if doc.tables:
+        qualifier["table_cells_uncertain"] = any(
+            table.column_header_uncertain for table in doc.tables
+        )
+    return claim.model_copy(update={"qualifier": qualifier})
 
 
 def _apply_adjudications(claim: ClaimCreate, adjudications: list[dict[str, Any]]) -> ClaimCreate:

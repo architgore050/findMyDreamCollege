@@ -1,0 +1,74 @@
+# Acquisition policy (brief §9). Every threshold and backend name lives here;
+# Python reads this file through the registry and hardcodes none of it.
+#
+# Tiers
+#   T0  pdftext           born-digital text layer, per-glyph boxes
+#   T1  Docling           layout + tables on clean scans, item/table-cell boxes
+#   T2  PaddleOCR-VL      OCR, block-level boxes only
+#   T2b Qwen3-VL          Devanagari fallback when T2's Indic self-check fails
+#   T3  human queue       anomalies, low confidence; never an automated model
+#
+# Rejected and not to be reintroduced: PyMuPDF (AGPL), Surya/Marker weights
+# (OpenRAIL-M), MiniCPM-OCR/GLM-OCR for Hindi (no `hi` in the language list).
+
+version: "1"
+
+tiers:
+  # Text layer with at least this many characters per page is readable as-is.
+  text_min_chars_per_page: 200
+  table_min_rows: 3
+  table_min_numeric_columns: 2
+  devanagari_forces_t2: true
+  # T1 table output below this share of unambiguous numeric cells escalates to T2.
+  t1_table_confidence_min: 0.6
+  # T2 output with Devanagari must pass this ratio or T2b runs. The ratio is
+  # Devanagari codepoints / (Devanagari + Latin letters) on Devanagari lines, so
+  # a mixed Hindi/English header still passes; Latin mojibake scores near 0.
+  t2_indic_self_check_min_ratio: 0.5
+  # Deterministic 1% field audit (sha256-keyed, never random).
+  adjudication_sample_rate: 0.01
+
+anomaly:
+  # A block longer than this multiple of the page median block length is suspect.
+  block_length_multiplier: 3.0
+  # A block whose character entropy is below this share of the page reference
+  # has collapsed (decoder loop).
+  entropy_ratio_floor: 0.45
+  min_block_chars: 120
+  min_page_chars: 80
+  # A block that is one unit repeated at least this many times is a loop.
+  repeated_block_min_occurrences: 20
+
+backends:
+  T0:
+    tool: pdftext
+    model: pdftext
+    granularity: glyph
+  T1:
+    tool: docling
+    model: docling
+    granularity: span
+  T2:
+    tool: paddleocr-vl
+    model: PaddleOCR-VL-1.6
+    granularity: block
+    endpoint_env: FMD_T2_URL
+  T2b:
+    tool: qwen3-vl
+    model: Qwen3-VL-8B
+    granularity: block
+    endpoint_env: FMD_T2B_URL
+  T3:
+    tool: human_queue
+    model: human
+    granularity: block
+
+bbox:
+  # Tolerance when checking a span box against its page box (PDF points).
+  page_epsilon: 1.0
+  # Documents acquired through these tiers must have bbox coverage 1.0.
+  # OCR pages (T2/T2b) are reportable but not gated: block boxes cannot be
+  # finer than a block, so a 1.0 gate there would be a false promise.
+  gate_tiers:
+    - T0
+    - T1

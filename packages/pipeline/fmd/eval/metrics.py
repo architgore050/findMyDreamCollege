@@ -252,39 +252,6 @@ class RejectionMetrics:
 
 
 @dataclass
-class ProvenanceReport:
-    total: int = 0
-    resolved: int = 0
-    modelled_excluded: int = 0
-    non_numeric_excluded: int = 0
-    unresolved: list[dict[str, Any]] = field(default_factory=list)
-    require_snapshot: bool = False
-
-    @property
-    def coverage(self) -> float:
-        return 1.0 if self.total == 0 else self.resolved / self.total
-
-    @property
-    def vacuous(self) -> bool:
-        return self.total == 0
-
-    def gate_failed(self, threshold: float = 1.0) -> bool:
-        return self.coverage < threshold
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "coverage": _round(self.coverage),
-            "total": self.total,
-            "resolved": self.resolved,
-            "modelled_excluded": self.modelled_excluded,
-            "non_numeric_excluded": self.non_numeric_excluded,
-            "vacuous": self.vacuous,
-            "require_snapshot": self.require_snapshot,
-            "unresolved": self.unresolved,
-        }
-
-
-@dataclass
 class IntervalReport:
     n: int = 0
     inside: int = 0
@@ -470,6 +437,12 @@ class PublishedNumber:
     url: str | None = None
     fetched_at: Any = None
     snapshot_sha256: str | None = None
+    bbox: tuple[float, float, float, float] | None = None
+    bboxes: tuple[tuple[float, float, float, float], ...] = ()
+    page_no: int | None = None
+    page_box: tuple[float, float, float, float] | None = None
+    bbox_granularity: str = "unknown"
+    document_tier: str | None = None
 
     @classmethod
     def from_claim(cls, claim: Any, *, text: str | None = None) -> PublishedNumber:
@@ -478,6 +451,27 @@ class PublishedNumber:
             if isinstance(claim, Mapping)
             else lambda key, default=None: getattr(claim, key, default)
         )
+        qualifier = get("qualifier") or {}
+        if not isinstance(qualifier, Mapping):
+            qualifier = {}
+        raw_boxes = qualifier.get("bboxes") or ()
+        boxes: list[tuple[float, float, float, float]] = []
+        for raw in raw_boxes:
+            box = raw.get("bbox") if isinstance(raw, Mapping) else None
+            if box is None and isinstance(raw, list | tuple) and len(raw) == 4:
+                box = raw
+            if box is not None and len(box) == 4:
+                boxes.append(tuple(float(value) for value in box))  # type: ignore[arg-type]
+        fallback_box = qualifier.get("bbox")
+        bbox: tuple[float, float, float, float] | None = None
+        if fallback_box is not None and len(fallback_box) == 4:
+            bbox = tuple(float(value) for value in fallback_box)  # type: ignore[arg-type]
+        elif boxes:
+            bbox = boxes[0]
+        raw_page_box = qualifier.get("page_box")
+        page_box: tuple[float, float, float, float] | None = None
+        if raw_page_box is not None and len(raw_page_box) == 4:
+            page_box = tuple(float(value) for value in raw_page_box)  # type: ignore[arg-type]
         return cls(
             predicate=str(get("predicate", "")),
             value=get("value"),
@@ -490,7 +484,220 @@ class PublishedNumber:
             url=get("url"),
             fetched_at=get("fetched_at"),
             snapshot_sha256=get("sha256", None) or get("snapshot_sha256", None),
+            bbox=bbox,
+            bboxes=tuple(boxes),
+            page_no=qualifier.get("page_no"),
+            page_box=page_box,
+            bbox_granularity=str(qualifier.get("bbox_granularity") or "unknown"),
+            document_tier=qualifier.get("document_tier"),
         )
+
+
+# --------------------------------------------------------------------------- bbox / offsets
+
+
+BBox = tuple[float, float, float, float]
+BBOX_GATE_TIERS: tuple[str, ...] = ("T0", "T1")
+BBOX_EPSILON = 1.0
+
+
+def _box_inside(inner: Sequence[float], outer: Sequence[float], *, epsilon: float) -> bool:
+    x0, y0, x1, y1 = (float(value) for value in inner)
+    ox0, oy0, ox1, oy1 = (float(value) for value in outer)
+    if x1 < x0 or y1 < y0:
+        return False
+    return (
+        x0 >= ox0 - epsilon and y0 >= oy0 - epsilon and x1 <= ox1 + epsilon and y1 <= oy1 + epsilon
+    )
+
+
+@dataclass
+class BBoxReport:
+    """Published numbers with a non-null bbox inside their page box."""
+
+    total: int = 0
+    covered: int = 0
+    gated_total: int = 0
+    gated_covered: int = 0
+    by_granularity: dict[str, int] = field(default_factory=dict)
+    failures: list[dict[str, Any]] = field(default_factory=list)
+    gate_tiers: tuple[str, ...] = BBOX_GATE_TIERS
+
+    @property
+    def coverage(self) -> float | None:
+        return None if self.total == 0 else self.covered / self.total
+
+    @property
+    def gated_coverage(self) -> float | None:
+        return None if self.gated_total == 0 else self.gated_covered / self.gated_total
+
+    @property
+    def gate_applicable(self) -> bool:
+        return self.gated_total > 0
+
+    def gate_failed(self, threshold: float = 1.0) -> bool:
+        """Gate only documents acquired through the configured tiers.
+
+        OCR pages report coverage but are not gated: a block box cannot be finer
+        than a block, so demanding 1.0 there would be a false promise.
+        """
+        if not self.gate_applicable:
+            return False
+        return (self.gated_coverage or 0.0) < threshold
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "coverage": _round(self.coverage),
+            "gated_coverage": _round(self.gated_coverage),
+            "total": self.total,
+            "covered": self.covered,
+            "gated_total": self.gated_total,
+            "gated_covered": self.gated_covered,
+            "by_granularity": dict(sorted(self.by_granularity.items())),
+            "gate_tiers": list(self.gate_tiers),
+            "gate_applicable": self.gate_applicable,
+            "gate_passed": not self.gate_failed(),
+            "failures": self.failures,
+        }
+
+
+@dataclass
+class GranularityOffsets:
+    total: int = 0
+    resolved: int = 0
+
+    @property
+    def resolvability(self) -> float | None:
+        return None if self.total == 0 else self.resolved / self.total
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "total": self.total,
+            "resolved": self.resolved,
+            "resolvability": _round(self.resolvability),
+        }
+
+
+@dataclass
+class OffsetReport:
+    """Quote-to-character-offset resolvability, split by bbox granularity."""
+
+    by_granularity: dict[str, GranularityOffsets] = field(default_factory=dict)
+
+    @property
+    def total(self) -> int:
+        return sum(item.total for item in self.by_granularity.values())
+
+    @property
+    def resolved(self) -> int:
+        return sum(item.resolved for item in self.by_granularity.values())
+
+    @property
+    def resolvability(self) -> float | None:
+        return None if self.total == 0 else self.resolved / self.total
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "resolvability": _round(self.resolvability),
+            "total": self.total,
+            "resolved": self.resolved,
+            "by_granularity": {
+                key: value.as_dict() for key, value in sorted(self.by_granularity.items())
+            },
+        }
+
+
+def bbox_coverage(
+    numbers: Iterable[PublishedNumber],
+    *,
+    epsilon: float = BBOX_EPSILON,
+    gate_tiers: Iterable[str] = BBOX_GATE_TIERS,
+) -> BBoxReport:
+    """Published numbers whose bboxes all lie inside their page box."""
+    report = BBoxReport(gate_tiers=tuple(gate_tiers))
+    for number in numbers:
+        if number.method not in PUBLISHED_METHODS or not is_number(number.value):
+            continue
+        report.total += 1
+        gated = number.document_tier in report.gate_tiers
+        if gated:
+            report.gated_total += 1
+        granularity = number.bbox_granularity or "unknown"
+        report.by_granularity[granularity] = report.by_granularity.get(granularity, 0) + 1
+        boxes = number.bboxes or ((number.bbox,) if number.bbox is not None else ())
+        reason: str | None = None
+        if not boxes:
+            reason = "missing_bbox"
+        elif number.page_box is None:
+            reason = "missing_page_box"
+        elif any(not _box_inside(box, number.page_box, epsilon=epsilon) for box in boxes):
+            reason = "bbox_outside_page"
+        if reason is None:
+            report.covered += 1
+            if gated:
+                report.gated_covered += 1
+        else:
+            report.failures.append(
+                {
+                    "predicate": number.predicate,
+                    "value": number.value,
+                    "granularity": granularity,
+                    "document_tier": number.document_tier,
+                    "reason": reason,
+                }
+            )
+    return report
+
+
+def offset_resolvability(numbers: Iterable[PublishedNumber]) -> OffsetReport:
+    """Do reported offsets still select the quoted text, per granularity?"""
+    report = OffsetReport()
+    for number in numbers:
+        if number.method not in PUBLISHED_METHODS or not is_number(number.value):
+            continue
+        key = number.bbox_granularity or "unknown"
+        bucket = report.by_granularity.setdefault(key, GranularityOffsets())
+        bucket.total += 1
+        if _resolve_quote(number.text, number.quote, number.char_start, number.char_end):
+            bucket.resolved += 1
+    return report
+
+
+@dataclass
+class ProvenanceReport:
+    total: int = 0
+    resolved: int = 0
+    modelled_excluded: int = 0
+    non_numeric_excluded: int = 0
+    unresolved: list[dict[str, Any]] = field(default_factory=list)
+    require_snapshot: bool = False
+    bbox: BBoxReport = field(default_factory=BBoxReport)
+    offsets: OffsetReport = field(default_factory=OffsetReport)
+
+    @property
+    def coverage(self) -> float:
+        return 1.0 if self.total == 0 else self.resolved / self.total
+
+    @property
+    def vacuous(self) -> bool:
+        return self.total == 0
+
+    def gate_failed(self, threshold: float = 1.0) -> bool:
+        return self.coverage < threshold
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "coverage": _round(self.coverage),
+            "total": self.total,
+            "resolved": self.resolved,
+            "modelled_excluded": self.modelled_excluded,
+            "non_numeric_excluded": self.non_numeric_excluded,
+            "vacuous": self.vacuous,
+            "require_snapshot": self.require_snapshot,
+            "unresolved": self.unresolved,
+            "bbox_coverage": self.bbox.as_dict(),
+            "offset_resolvability": self.offsets.as_dict(),
+        }
 
 
 def provenance_coverage(
@@ -507,7 +714,8 @@ def provenance_coverage(
     """
 
     report = ProvenanceReport(require_snapshot=require_snapshot)
-    for number in numbers:
+    materialised = list(numbers)
+    for number in materialised:
         if number.method == "modelled":
             report.modelled_excluded += 1
             continue
@@ -530,6 +738,8 @@ def provenance_coverage(
                     "reason": reason,
                 }
             )
+    report.bbox = bbox_coverage(materialised)
+    report.offsets = offset_resolvability(materialised)
     return report
 
 
@@ -567,7 +777,13 @@ def interval_coverage(
 
 
 __all__ = [
+    "BBOX_GATE_TIERS",
     "INTERVAL_NOMINAL",
+    "BBoxReport",
+    "GranularityOffsets",
+    "OffsetReport",
+    "bbox_coverage",
+    "offset_resolvability",
     "ExtractionMetrics",
     "FieldResult",
     "GoldenRow",

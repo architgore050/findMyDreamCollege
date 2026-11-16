@@ -1,17 +1,12 @@
-# PDF tier policy (brief §9). Thresholds are data so a corpus can be retuned
-# without touching Python.
+# Router profile for each acquisition tier. Thresholds, backend names and the
+# anomaly policy live in config/acquire.yaml (registry-driven, brief §9).
+#
+# T0/T1 are bulk extraction; T2/T2b need the harder-PDF profile; T3 is a human
+# queue and never calls a model, so its profile is only a stable placeholder.
 
-min_chars_per_page: 80
-table_min_rows: 3
-table_min_numeric_columns: 2
-devanagari_forces_t2: true
-
-# Which router profile extracts each tier's text.
 profiles:
   T0: bulk_extract
   T1: bulk_extract
   T2: hard_pdf
+  T2b: hard_pdf
   T3: hard_pdf
-
-# Deterministic audit sampling: 1% keyed by sha256, never random.
-adjudication_sample_rate: 0.01

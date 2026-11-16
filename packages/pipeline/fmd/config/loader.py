@@ -22,6 +22,7 @@ import fmd.filters as filters_module
 from fmd.adapters import KNOWN_ADAPTERS
 from fmd.config.models import (
     DISCOVERY_PARAMS_REQUIRED,
+    AcquireConfig,
     CostRulesConfig,
     CountriesConfig,
     ErConfig,
@@ -41,6 +42,7 @@ CONFIG_FILES: dict[str, str] = {
     "exams": "exams.yaml",
     "cost_rules": "cost_rules.yaml",
     "er": "er.yaml",
+    "acquire": "acquire.yaml",
 }
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -108,6 +110,7 @@ class Registry:
     exams: ExamsConfig
     cost_rules: CostRulesConfig
     er: ErConfig
+    acquire: AcquireConfig
     config_dir: Path
 
     @property
@@ -395,12 +398,61 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
         if not band:
             errors.append(f"cost_rules.yaml: DSR25 band {band_name!r} is empty")
 
+    # ---------------------------------------------------------------- acquisition
+    acquire = registry.acquire
+    if not acquire.version.strip():
+        errors.append("acquire.yaml: version must be non-empty")
+    for tier in ("T0", "T1", "T2", "T2b", "T3"):
+        backend = acquire.backends.get(tier)
+        if backend is None:
+            errors.append(
+                f"acquire.yaml: backends.{tier} is missing. Every tier needs an explicit "
+                "tool/model/granularity entry (no model names in Python)."
+            )
+            continue
+        if not backend.tool.strip() or not backend.model.strip():
+            errors.append(f"acquire.yaml: backends.{tier} needs non-empty tool and model")
+        granularity = backend.granularity
+        if tier == "T0" and granularity != "glyph":
+            errors.append(
+                "acquire.yaml: backends.T0.granularity must be 'glyph' — pdftext "
+                "per-character boxes are the only fine-grained T0 provenance."
+            )
+        if tier in {"T2", "T2b", "T3"} and granularity == "glyph":
+            errors.append(
+                f"acquire.yaml: backends.{tier}.granularity cannot be 'glyph'; OCR/human "
+                "tiers only provide span or block boxes."
+            )
+    tiers = acquire.tiers
+    if tiers.text_min_chars_per_page <= 0:
+        errors.append("acquire.yaml: tiers.text_min_chars_per_page must be > 0")
+    for name in ("t1_table_confidence_min", "t2_indic_self_check_min_ratio"):
+        ratio = getattr(tiers, name)
+        if not 0.0 <= ratio <= 1.0:
+            errors.append(f"acquire.yaml: tiers.{name} must be within [0, 1], got {ratio}")
+    if not 0.0 <= tiers.adjudication_sample_rate <= 1.0:
+        errors.append("acquire.yaml: tiers.adjudication_sample_rate must be within [0, 1]")
+    anomaly = acquire.anomaly
+    if anomaly.block_length_multiplier <= 1.0:
+        errors.append("acquire.yaml: anomaly.block_length_multiplier must be > 1")
+    for name in ("entropy_ratio_floor",):
+        ratio = getattr(anomaly, name)
+        if not 0.0 < ratio <= 1.0:
+            errors.append(f"acquire.yaml: anomaly.{name} must be within (0, 1]")
+    if anomaly.repeated_block_min_occurrences < 2:
+        errors.append("acquire.yaml: anomaly.repeated_block_min_occurrences must be >= 2")
+    for tier in acquire.bbox.gate_tiers:
+        if tier not in acquire.backends:
+            errors.append(f"acquire.yaml: bbox.gate_tiers names unknown tier {tier!r}")
+    if acquire.bbox.page_epsilon < 0:
+        errors.append("acquire.yaml: bbox.page_epsilon must be >= 0")
+
 
 def load_registry(
     config_dir: str | Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Registry:
-    """Read, interpolate, parse and cross-validate all seven config files."""
+    """Read, interpolate, parse and cross-validate every config file."""
     directory = Path(config_dir) if config_dir is not None else resolve_config_dir()
     environment: Mapping[str, str] = os.environ if env is None else env
 
@@ -427,6 +479,7 @@ def load_registry(
         "exams": ExamsConfig,
         "cost_rules": CostRulesConfig,
         "er": ErConfig,
+        "acquire": AcquireConfig,
     }
     for key, model in model_for.items():
         filename = CONFIG_FILES[key]
@@ -451,6 +504,7 @@ def load_registry(
         exams=parsed["exams"],
         cost_rules=parsed["cost_rules"],
         er=parsed["er"],
+        acquire=parsed["acquire"],
         config_dir=directory.resolve(),
     )
     _validate_cross_references(registry, errors)
