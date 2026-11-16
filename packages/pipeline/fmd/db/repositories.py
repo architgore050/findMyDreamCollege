@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Literal
@@ -128,6 +129,31 @@ class ERAuditCreate(RowModel):
 class ERAuditRecord(ERAuditCreate):
     id: int
     created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class UnmergeResult:
+    """Outcome of :meth:`EntitiesRepo.unmerge`.
+
+    A conflict is a *result*, not an exception: nothing is moved and ``drift``
+    lists every piece of evidence that no longer matches what the merge moved.
+    The pair is iterable as ``(entity, audit)`` so existing callers that unpack
+    two values keep working.
+    """
+
+    entity: EntityRecord
+    audit: ERAuditRecord | None = None
+    conflict: bool = False
+    drift: tuple[str, ...] = ()
+    moved_back: dict[str, list[int]] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return not self.conflict
+
+    def __iter__(self):
+        yield self.entity
+        yield self.audit
 
 
 
@@ -289,6 +315,9 @@ class ScoreCreate(RowModel):
 
 class ScoreRecord(ScoreCreate):
     id: int
+    # Derived, not a column: a merge records the score ids it invalidated in
+    # ``er_audit.features_json``; the row survives but must not be trusted.
+    stale: bool = False
 
 
 class ExamSeed(RowModel):
@@ -406,7 +435,15 @@ class FrontierUpsert(RowModel):
 
     @classmethod
     def from_document_ref(cls, ref: Any, **fields: Any) -> FrontierUpsert:
-        """Enqueue a ``DocumentRef`` without losing its POST request shape."""
+        """Enqueue a ``DocumentRef`` without losing its request shape.
+
+        ``http_method`` / ``http_body`` / ``request_headers`` persist in
+        ``crawl_frontier`` so a queued ``admin-ajax`` POST page is still
+        replayable after a restart. Conditional validators (``etag`` /
+        ``last_modified``) become ``If-None-Match`` / ``If-Modified-Since``
+        request headers: the frontier has no validator columns, and this is the
+        form the next fetch needs anyway.
+        """
         metadata = getattr(ref, "metadata", None) or {}
         method = str(
             metadata.get("request_method") or metadata.get("http_method") or "GET"
@@ -414,7 +451,15 @@ class FrontierUpsert(RowModel):
         if method not in {"GET", "POST"}:
             raise ValueError(f"unsupported request method {method!r} (GET or POST)")
         body = metadata.get("request_body", metadata.get("http_body"))
-        headers = metadata.get("request_headers") or metadata.get("headers")
+        raw_headers = metadata.get("request_headers") or metadata.get("headers")
+        headers = dict(raw_headers) if isinstance(raw_headers, dict) else {}
+        etag = getattr(ref, "etag", None) or metadata.get("etag")
+        last_modified = getattr(ref, "last_modified", None) or metadata.get("last_modified")
+        lowered = {key.lower() for key in headers}
+        if etag and "if-none-match" not in lowered:
+            headers["If-None-Match"] = str(etag)
+        if last_modified and "if-modified-since" not in lowered:
+            headers["If-Modified-Since"] = str(last_modified)
         from urllib.parse import urlsplit
 
         return cls(
@@ -424,7 +469,7 @@ class FrontierUpsert(RowModel):
             priority=fields.pop("priority", getattr(ref, "priority", 0) or 0),
             http_method=method,
             http_body=body if isinstance(body, dict) else None,
-            request_headers=headers if isinstance(headers, dict) else None,
+            request_headers=headers or None,
             **fields,
         )
 
@@ -701,13 +746,29 @@ class EntitiesRepo:
         decided_by: Literal["auto", "model", "human"] = "human",
         claims_hash: str | None = None,
     ) -> tuple[EntityRecord, ERAuditRecord]:
-        """Point ``entity_id`` at ``into_entity_id`` and append an audit row.
+        """Merge ``entity_id`` into ``into_entity_id`` and move its evidence.
 
-        Reversible: :meth:`unmerge` clears the link and appends a ``reject``
-        audit row, so the full history is preserved.
+        In one transaction this:
+
+        * reparents ``claims.entity_id``, ``entity_aliases.entity_id``,
+          ``programmes.institution_id`` and ``programmes.affiliated_university_id``;
+        * records the exact ids it moved (plus the dependent ``cost_items`` /
+          ``financing_options`` rows and the target's prior claim ids) in
+          ``er_audit.features_json.evidence`` so :meth:`unmerge` can move exactly
+          those rows back;
+        * records the ``scores`` rows the merge invalidated in
+          ``features_json.scores_invalidated`` — they are kept, never deleted.
+
+        Claim content (value/quote/span/confidence/...) is never touched: only
+        the owning entity changes.
+
+        Reversible: :meth:`unmerge` moves the recorded evidence back and appends
+        a ``reject`` audit row, so the full history is preserved.
         """
         if entity_id == into_entity_id:
             raise ValueError("cannot merge an entity into itself")
+        if not 0.0 <= score <= 1.0:
+            raise ValueError("merge score must be in [0, 1]")
         with self.db.connection() as conn:
             subject = conn.execute(
                 "SELECT * FROM entities WHERE id = %s", (entity_id,)
@@ -725,6 +786,8 @@ class EntitiesRepo:
                 raise ValueError(
                     f"target entity {into_entity_id} is itself merged; merge into the survivor"
                 )
+            evidence = self._reparent_evidence(conn, entity_id, into_entity_id)
+            invalidated = self._invalidate_scores(conn, entity_id, into_entity_id)
             row = conn.execute(
                 """
                 UPDATE entities
@@ -734,6 +797,14 @@ class EntitiesRepo:
                 """,
                 (into_entity_id, entity_id),
             ).fetchone()
+            payload = dict(features or {})
+            payload.update(
+                {
+                    "operation": "merge",
+                    "evidence": evidence,
+                    "scores_invalidated": invalidated,
+                }
+            )
             audit_row = conn.execute(
                 """
                 INSERT INTO er_audit
@@ -747,7 +818,7 @@ class EntitiesRepo:
                     entity_id,
                     into_entity_id,
                     score,
-                    _json(features or {"operation": "merge"}),
+                    _json(payload),
                     thresholds_version,
                     model,
                     model_verdict,
@@ -759,10 +830,232 @@ class EntitiesRepo:
         assert row is not None and audit_row is not None
         return _entity(row), _er_audit(audit_row)
 
-    def unmerge(self, entity_id: int, *, decided_by: Literal["auto", "human"] = "human") -> tuple[
-        EntityRecord, ERAuditRecord
-    ]:
-        """Reverse a merge, preserving the decision history as a ``reject`` row."""
+    # ------------------------------------------------------------------ merge internals
+    @staticmethod
+    def _ids(rows: list[Any]) -> list[int]:
+        return [int(row["id"]) for row in rows]
+
+    def _reparent_evidence(self, conn: Any, source: int, target: int) -> dict[str, Any]:
+        """Move every entity-owned row from ``source`` to ``target``.
+
+        Returns the exact id sets that moved. Dependent rows that follow by FK
+        (``cost_items`` via ``programme_id``, ``financing_options`` via
+        ``source_claim_id``) are recorded so :meth:`unmerge` can verify they did
+        not drift, but they need no UPDATE: their parent moved.
+        """
+        target_claims_before = self._ids(
+            conn.execute(
+                "SELECT id FROM claims WHERE entity_id = %s ORDER BY id", (target,)
+            ).fetchall()
+        )
+        claim_ids = self._ids(
+            conn.execute(
+                "SELECT id FROM claims WHERE entity_id = %s ORDER BY id", (source,)
+            ).fetchall()
+        )
+        if claim_ids:
+            conn.execute(
+                "UPDATE claims SET entity_id = %s WHERE entity_id = %s", (target, source)
+            )
+
+        # An alias already present on the target would violate the
+        # (entity_id, alias, alias_type) unique index. Those rows stay on the
+        # source (nothing is deleted) and are recorded explicitly.
+        alias_conflicts = self._ids(
+            conn.execute(
+                """
+                SELECT s.id
+                FROM entity_aliases s
+                JOIN entity_aliases t
+                  ON t.entity_id = %s AND t.alias = s.alias AND t.alias_type = s.alias_type
+                WHERE s.entity_id = %s
+                ORDER BY s.id
+                """,
+                (target, source),
+            ).fetchall()
+        )
+        all_aliases = self._ids(
+            conn.execute(
+                "SELECT id FROM entity_aliases WHERE entity_id = %s ORDER BY id", (source,)
+            ).fetchall()
+        )
+        conflict_set = set(alias_conflicts)
+        alias_ids = [alias_id for alias_id in all_aliases if alias_id not in conflict_set]
+        if alias_ids:
+            conn.execute(
+                "UPDATE entity_aliases SET entity_id = %s WHERE id = ANY(%s)",
+                (target, alias_ids),
+            )
+
+        programme_ids = self._ids(
+            conn.execute(
+                "SELECT id FROM programmes WHERE institution_id = %s ORDER BY id", (source,)
+            ).fetchall()
+        )
+        affiliated_ids = self._ids(
+            conn.execute(
+                "SELECT id FROM programmes WHERE affiliated_university_id = %s ORDER BY id",
+                (source,),
+            ).fetchall()
+        )
+        if programme_ids:
+            conn.execute(
+                "UPDATE programmes SET institution_id = %s WHERE institution_id = %s",
+                (target, source),
+            )
+        if affiliated_ids:
+            conn.execute(
+                "UPDATE programmes SET affiliated_university_id = %s "
+                "WHERE affiliated_university_id = %s",
+                (target, source),
+            )
+
+        cost_item_ids = (
+            self._ids(
+                conn.execute(
+                    "SELECT id FROM cost_items WHERE programme_id = ANY(%s) ORDER BY id",
+                    (programme_ids,),
+                ).fetchall()
+            )
+            if programme_ids
+            else []
+        )
+        financing_ids = (
+            self._ids(
+                conn.execute(
+                    "SELECT id FROM financing_options WHERE source_claim_id = ANY(%s) "
+                    "ORDER BY id",
+                    (claim_ids,),
+                ).fetchall()
+            )
+            if claim_ids
+            else []
+        )
+        return {
+            "claims": claim_ids,
+            "aliases": alias_ids,
+            "aliases_left_on_source": alias_conflicts,
+            "programmes": programme_ids,
+            "affiliated_programmes": affiliated_ids,
+            "cost_items": cost_item_ids,
+            "financing_options": financing_ids,
+            "target_claims_before": target_claims_before,
+        }
+
+    @staticmethod
+    def _invalidate_scores(conn: Any, source: int, target: int) -> dict[str, list[int]]:
+        """Record (never delete) the score rows a membership change invalidates."""
+        invalidated: dict[str, list[int]] = {}
+        for key, entity_id in (("source", source), ("target", target)):
+            invalidated[key] = [
+                int(row["id"])
+                for row in conn.execute(
+                    "SELECT id FROM scores WHERE entity_id = %s ORDER BY id", (entity_id,)
+                ).fetchall()
+            ]
+        return invalidated
+
+    def _unmerge_drift(
+        self, conn: Any, source: int, target: int, evidence: dict[str, Any]
+    ) -> list[str]:
+        """Every way the current evidence no longer matches what the merge moved."""
+        moved = evidence.get("evidence", evidence)
+        target_claims_before = evidence.get(
+            "target_claims_before", moved.get("target_claims_before") or []
+        )
+        drift: list[str] = []
+
+        claim_ids = [int(value) for value in moved.get("claims") or []]
+        expected = {*(int(value) for value in target_claims_before), *claim_ids}
+        current_target_claims = {
+            int(row["id"])
+            for row in conn.execute(
+                "SELECT id FROM claims WHERE entity_id = %s", (target,)
+            ).fetchall()
+        }
+        new_claims = sorted(current_target_claims - expected)
+        if new_claims:
+            drift.append(
+                f"claims attached to the survivor (entity {target}) after the merge: {new_claims}"
+            )
+        missing_claims = sorted(set(claim_ids) - current_target_claims)
+        if missing_claims:
+            drift.append(
+                f"claims moved by the merge are no longer owned by entity {target}: "
+                f"{missing_claims}"
+            )
+
+        alias_ids = [int(value) for value in moved.get("aliases") or []]
+        current_target_aliases = {
+            int(row["id"])
+            for row in conn.execute(
+                "SELECT id FROM entity_aliases WHERE entity_id = %s", (target,)
+            ).fetchall()
+        }
+        missing_aliases = sorted(set(alias_ids) - current_target_aliases)
+        if missing_aliases:
+            drift.append(
+                f"aliases moved by the merge are no longer owned by entity {target}: "
+                f"{missing_aliases}"
+            )
+
+        programme_ids = [int(value) for value in moved.get("programmes") or []]
+        affiliated_ids = [
+            int(value) for value in moved.get("affiliated_programmes") or []
+        ]
+        programme_ownership = {
+            int(row["id"]): (row["institution_id"], row["affiliated_university_id"])
+            for row in conn.execute(
+                "SELECT id, institution_id, affiliated_university_id FROM programmes "
+                "WHERE id = ANY(%s)",
+                (programme_ids + affiliated_ids,),
+            ).fetchall()
+        }
+        for programme_id in programme_ids:
+            ownership = programme_ownership.get(programme_id)
+            if ownership is None or ownership[0] != target:
+                drift.append(
+                    f"programme {programme_id} is no longer owned by entity {target}"
+                )
+        for programme_id in affiliated_ids:
+            ownership = programme_ownership.get(programme_id)
+            if ownership is None or ownership[1] != target:
+                drift.append(
+                    f"programme {programme_id} is no longer affiliated with entity {target}"
+                )
+
+        # cost_items / financing_options follow their parent; a changed parent
+        # means the evidence set is no longer the one the merge captured.
+        for row in conn.execute(
+            "SELECT id, programme_id FROM cost_items WHERE id = ANY(%s)",
+            ([int(value) for value in moved.get("cost_items") or []],),
+        ).fetchall():
+            if int(row["programme_id"]) not in {
+                int(value) for value in moved.get("programmes") or []
+            }:
+                drift.append(
+                    f"cost item {row['id']} no longer belongs to a moved programme"
+                )
+        for row in conn.execute(
+            "SELECT id, source_claim_id FROM financing_options WHERE id = ANY(%s)",
+            ([int(value) for value in moved.get("financing_options") or []],),
+        ).fetchall():
+            if row["source_claim_id"] not in set(claim_ids):
+                drift.append(
+                    f"financing option {row['id']} no longer cites a moved claim"
+                )
+        return drift
+
+    def unmerge(
+        self, entity_id: int, *, decided_by: Literal["auto", "human"] = "human"
+    ) -> UnmergeResult:
+        """Move the merge's evidence back and append a ``reject`` audit row.
+
+        This is a true inverse of :meth:`merge`: only the row ids recorded in the
+        merge audit move back, and nothing moves if the evidence has drifted
+        (e.g. new claims arrived on the survivor). A conflict is returned with a
+        ``drift`` list instead of being applied silently.
+        """
         with self.db.connection() as conn:
             subject = conn.execute(
                 "SELECT * FROM entities WHERE id = %s", (entity_id,)
@@ -772,6 +1065,83 @@ class EntitiesRepo:
             previous = subject["merged_into_entity_id"]
             if previous is None:
                 raise ValueError(f"entity {entity_id} is not merged")
+            previous = int(previous)
+            merge_audit = conn.execute(
+                """
+                SELECT * FROM er_audit
+                WHERE subject_entity_id = %s AND candidate_entity_id = %s
+                  AND band = 'accept'
+                  AND features_json->>'operation' = 'merge'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (entity_id, previous),
+            ).fetchone()
+            if merge_audit is None:
+                raise ValueError(
+                    f"entity {entity_id} has no merge audit row recording moved evidence; "
+                    "refusing to guess what to move back"
+                )
+            evidence = (merge_audit["features_json"] or {}).get("evidence")
+            if not evidence:
+                raise ValueError(
+                    f"merge audit for entity {entity_id} does not record the moved evidence; "
+                    "refusing to guess what to move back"
+                )
+
+            drift = self._unmerge_drift(conn, entity_id, previous, evidence)
+            if drift:
+                return UnmergeResult(
+                    entity=_entity(subject), conflict=True, drift=tuple(drift)
+                )
+
+            moved = evidence.get("evidence", evidence)
+            moved_back: dict[str, list[int]] = {}
+            for key in ("claims", "aliases"):
+                ids = [int(value) for value in moved.get(key) or []]
+                if ids:
+                    table = "claims" if key == "claims" else "entity_aliases"
+                    column = "entity_id"
+                    cursor = conn.execute(
+                        f"UPDATE {table} SET {column} = %s WHERE id = ANY(%s) "  # noqa: S608
+                        f"AND {column} = %s",
+                        (entity_id, ids, previous),
+                    )
+                    if cursor.rowcount != len(ids):
+                        raise ValueError(
+                            f"unmerge of entity {entity_id} moved {cursor.rowcount} of "
+                            f"{len(ids)} {key}; refusing a partial revert"
+                        )
+                    moved_back[key] = ids
+            programme_ids = [int(value) for value in moved.get("programmes") or []]
+            if programme_ids:
+                cursor = conn.execute(
+                    "UPDATE programmes SET institution_id = %s WHERE id = ANY(%s) "
+                    "AND institution_id = %s",
+                    (entity_id, programme_ids, previous),
+                )
+                if cursor.rowcount != len(programme_ids):
+                    raise ValueError(
+                        f"unmerge of entity {entity_id} moved {cursor.rowcount} of "
+                        f"{len(programme_ids)} programmes; refusing a partial revert"
+                    )
+                moved_back["programmes"] = programme_ids
+            affiliated_ids = [
+                int(value) for value in moved.get("affiliated_programmes") or []
+            ]
+            if affiliated_ids:
+                cursor = conn.execute(
+                    "UPDATE programmes SET affiliated_university_id = %s WHERE id = ANY(%s) "
+                    "AND affiliated_university_id = %s",
+                    (entity_id, affiliated_ids, previous),
+                )
+                if cursor.rowcount != len(affiliated_ids):
+                    raise ValueError(
+                        f"unmerge of entity {entity_id} reverted {cursor.rowcount} of "
+                        f"{len(affiliated_ids)} affiliations; refusing a partial revert"
+                    )
+                moved_back["affiliated_programmes"] = affiliated_ids
+
+            invalidated = self._invalidate_scores(conn, entity_id, previous)
             row = conn.execute(
                 """
                 UPDATE entities
@@ -781,6 +1151,12 @@ class EntitiesRepo:
                 """,
                 (entity_id,),
             ).fetchone()
+            payload = {
+                "operation": "unmerge",
+                "merged_into": previous,
+                "moved_back": moved_back,
+                "scores_invalidated": invalidated,
+            }
             audit_row = conn.execute(
                 """
                 INSERT INTO er_audit
@@ -789,15 +1165,12 @@ class EntitiesRepo:
                 VALUES (%s, %s, 'reject', 0.0, %s, 'manual', %s)
                 RETURNING *
                 """,
-                (
-                    entity_id,
-                    previous,
-                    _json({"operation": "unmerge", "merged_into": previous}),
-                    decided_by,
-                ),
+                (entity_id, previous, _json(payload), decided_by),
             ).fetchone()
         assert row is not None and audit_row is not None
-        return _entity(row), _er_audit(audit_row)
+        return UnmergeResult(
+            entity=_entity(row), audit=_er_audit(audit_row), moved_back=moved_back
+        )
 
     def audit_for_pair(
         self, subject_entity_id: int, candidate_entity_id: int, limit: int = 50
@@ -999,6 +1372,29 @@ class SnapshotsRepo:
                 "SELECT * FROM snapshots WHERE document_id = %s ORDER BY fetched_at DESC",
                 (document_id,),
             ).fetchall()
+        return [_snapshot(row) for row in rows]
+
+    def list_without_extraction(
+        self, tool_version: str | None = None, limit: int = 100
+    ) -> list[SnapshotRecord]:
+        """Snapshots with no extraction at (or above) ``tool_version``.
+
+        The orchestrator's resumable extract queue: a snapshot that already has an
+        extraction at the requested version is not re-processed. Passing ``None``
+        returns every snapshot (``extract --force``), still in a stable order.
+        """
+        sql = "SELECT * FROM snapshots s"
+        params: list[Any] = []
+        if tool_version is not None:
+            sql += (
+                " WHERE NOT EXISTS (SELECT 1 FROM extractions x"
+                " WHERE x.snapshot_id = s.id AND x.tool_version = %s)"
+            )
+            params.append(tool_version)
+        sql += " ORDER BY s.id LIMIT %s"
+        params.append(limit)
+        with self.db.connection() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
         return [_snapshot(row) for row in rows]
 
 
@@ -1376,22 +1772,67 @@ class ScoresRepo:
         assert row is not None
         return _score(row)
 
-    def latest_for_entity(self, entity_id: int) -> ScoreRecord | None:
-        with self.db.connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM scores WHERE entity_id = %s "
-                "ORDER BY computed_at DESC, id DESC LIMIT 1",
-                (entity_id,),
-            ).fetchone()
-        return _score(row) if row else None
+    def invalidated_score_ids(self, entity_id: int) -> set[int]:
+        """Score ids a merge/unmerge recorded as invalidated for ``entity_id``.
 
-    def list_for_entity(self, entity_id: int) -> list[ScoreRecord]:
+        Invalidation lives in the append-only ``er_audit`` row rather than a new
+        mutable column, so the merge decision and the scores it invalidated stay
+        in one audit record.
+        """
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT features_json FROM er_audit
+                WHERE (subject_entity_id = %s OR candidate_entity_id = %s)
+                  AND features_json ? 'scores_invalidated'
+                """,
+                (entity_id, entity_id),
+            ).fetchall()
+        invalidated: set[int] = set()
+        for row in rows:
+            block = (row["features_json"] or {}).get("scores_invalidated") or {}
+            for key in ("source", "target"):
+                invalidated.update(int(value) for value in block.get(key) or [])
+        return invalidated
+
+    def latest_for_entity(
+        self, entity_id: int, *, include_stale: bool = False
+    ) -> ScoreRecord | None:
+        invalidated = self.invalidated_score_ids(entity_id)
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scores WHERE entity_id = %s "
+                "ORDER BY computed_at DESC, id DESC",
+                (entity_id,),
+            ).fetchall()
+        for row in rows:
+            record = _score(row)
+            if record.id in invalidated:
+                if not include_stale:
+                    continue
+                record = record.model_copy(update={"stale": True})
+            return record
+        return None
+
+    def list_for_entity(
+        self, entity_id: int, *, include_stale: bool = True
+    ) -> list[ScoreRecord]:
+        invalidated = self.invalidated_score_ids(entity_id)
         with self.db.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM scores WHERE entity_id = %s ORDER BY computed_at DESC, id DESC",
                 (entity_id,),
             ).fetchall()
-        return [_score(row) for row in rows]
+        records: list[ScoreRecord] = []
+        for row in rows:
+            record = _score(row)
+            stale = record.id in invalidated
+            if stale:
+                if not include_stale:
+                    continue
+                record = record.model_copy(update={"stale": True})
+            records.append(record)
+        return records
 
 
 class ExamsRepo:

@@ -488,3 +488,306 @@ def test_alias_accepts_manual_and_evidence_span(pg_database) -> None:
     assert manual.confirmed_by == "reviewer@example.org"
     listed = AliasesRepo(pg_database).list_manual_for_entity(entity.id)
     assert [row.id for row in listed] == [manual.id]
+
+
+# --------------------------------------------------------------- merge integrity
+
+CLAIM_CONTENT_COLUMNS = (
+    "extraction_id",
+    "predicate",
+    "value_json",
+    "unit",
+    "qualifier_json",
+    "quote",
+    "char_start",
+    "char_end",
+    "confidence",
+    "observed_at",
+    "method",
+    "superseded_by",
+)
+
+
+def _extraction(database, suffix: str) -> tuple[int, str]:
+    url = f"https://example.ac.in/merge/{suffix}.pdf"
+    document = DocumentsRepo(database).upsert(
+        DocumentUpsert(url=url, domain="example.ac.in", kind="fee_schedule")
+    )
+    text = f"Tuition for {suffix} is INR 100000 per year."
+    data = text.encode()
+    digest = hashlib.sha256(data).hexdigest()
+    snapshot = SnapshotsRepo(database).create(
+        SnapshotCreate(document_id=document.id, sha256=digest, bytes_path=f"o/{digest}")
+    )
+    extraction = ExtractionsRepo(database).create(
+        ExtractionCreate(snapshot_id=snapshot.id, tool="test", text=text)
+    )
+    return extraction.id, text
+
+
+def _add_claim(database, entity_id: int, extraction_id: int, text: str, confidence: float = 0.9):
+    return ClaimsRepo(database).create(
+        ClaimCreate(
+            extraction_id=extraction_id,
+            entity_id=entity_id,
+            predicate="tuition_per_year",
+            value={"amount": 100000, "currency": "INR"},
+            unit="INR",
+            qualifier={"period": "per_year"},
+            quote=text,
+            char_start=0,
+            char_end=len(text),
+            confidence=confidence,
+        )
+    )
+
+
+def _claim_rows(database, entity_id: int) -> dict[int, dict]:
+    with database.connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM claims WHERE entity_id = %s ORDER BY id", (entity_id,)
+        ).fetchall()
+    return {int(row["id"]): dict(row) for row in rows}
+
+
+def _score(database, entity_id: int, claims_hash: str) -> int:
+    return ScoresRepo(database).create(
+        ScoreCreate(
+            entity_id=entity_id,
+            scorer_version="0.1.0",
+            weights_version="test",
+            claims_hash=claims_hash,
+            sub_scores={"fees": {"point": 1, "lo": 1, "hi": 1}},
+            evidence_tier="thin",
+        )
+    ).id
+
+
+def test_merge_reparents_evidence_and_unmerge_restores_exactly(pg_database) -> None:
+    suffix = _suffix()
+    entities = EntitiesRepo(pg_database)
+    source = entities.create(
+        EntityCreate(kind="institution", canonical_name=f"Source Institute {suffix}", country="IN")
+    )
+    target = entities.create(
+        EntityCreate(kind="institution", canonical_name=f"Target Institute {suffix}", country="IN")
+    )
+    extraction_id, text = _extraction(pg_database, suffix)
+    source_claim = _add_claim(pg_database, source.id, extraction_id, text)
+    target_claim = _add_claim(pg_database, target.id, extraction_id, text, confidence=0.7)
+
+    aliases = AliasesRepo(pg_database)
+    manual = aliases.create(
+        AliasCreate(
+            entity_id=source.id,
+            alias=f"Source Vishwavidyalaya {suffix}",
+            alias_type="manual",
+            confirmed_by="reviewer@example.org",
+            confirmed_at=datetime.now(UTC),
+        )
+    )
+    acronym = aliases.create(
+        AliasCreate(entity_id=source.id, alias=f"SI{suffix}", alias_type="acronym")
+    )
+
+    programme = ProgrammesRepo(pg_database).create(
+        ProgrammeCreate(
+            institution_id=source.id,
+            name=f"BSc MLT {suffix}",
+            credential_level="degree",
+        )
+    )
+    cost = CostItemsRepo(pg_database).create(
+        CostItemCreate(
+            programme_id=programme.id,
+            category="tuition",
+            label="Year 1",
+            amount=100000,
+            currency="INR",
+            period="per_year",
+        )
+    )
+    financing = FinancingOptionsRepo(pg_database).create(
+        FinancingOptionCreate(
+            scope="domestic",
+            lender="Example Bank",
+            scheme=f"scheme-{suffix}",
+            source_claim_id=source_claim.id,
+        )
+    )
+
+    before = _claim_rows(pg_database, source.id)
+    assert set(before) == {source_claim.id}
+
+    _, audit = entities.merge(source.id, target.id, score=0.9, thresholds_version="er-v1")
+    evidence = audit.features["evidence"]
+    assert evidence["claims"] == [source_claim.id]
+    assert set(evidence["aliases"]) == {manual.id, acronym.id}
+    assert evidence["programmes"] == [programme.id]
+    assert evidence["cost_items"] == [cost.id]
+    assert evidence["financing_options"] == [financing.id]
+    assert evidence["target_claims_before"] == [target_claim.id]
+
+    # Evidence moved, content untouched.
+    assert set(_claim_rows(pg_database, source.id)) == set()
+    moved_rows = _claim_rows(pg_database, target.id)
+    assert set(moved_rows) == {source_claim.id, target_claim.id}
+    for column in CLAIM_CONTENT_COLUMNS:
+        assert moved_rows[source_claim.id][column] == before[source_claim.id][column]
+    assert ProgrammesRepo(pg_database).get(programme.id).institution_id == target.id
+
+    moved_manual = AliasesRepo(pg_database).list_manual_for_entity(target.id)
+    assert [(row.id, row.alias_type) for row in moved_manual] == [(manual.id, "manual")]
+
+    result = entities.unmerge(source.id)
+    assert result.ok and not result.conflict
+    assert result.moved_back["claims"] == [source_claim.id]
+    assert result.moved_back["programmes"] == [programme.id]
+
+    restored = _claim_rows(pg_database, source.id)
+    assert set(restored) == {source_claim.id}
+    for column in CLAIM_CONTENT_COLUMNS:
+        assert restored[source_claim.id][column] == before[source_claim.id][column]
+    assert set(_claim_rows(pg_database, target.id)) == {target_claim.id}
+    assert ProgrammesRepo(pg_database).get(programme.id).institution_id == source.id
+    restored_manual = AliasesRepo(pg_database).list_manual_for_entity(source.id)
+    assert [(row.id, row.alias_type) for row in restored_manual] == [(manual.id, "manual")]
+    assert aliases.list_for_entity(target.id) == []
+    history = entities.audit_for_pair(source.id, target.id)
+    assert [row.band for row in history] == ["reject", "accept"]
+
+
+def test_merge_never_alters_claim_content_and_hash_follows_membership(pg_database) -> None:
+    suffix = _suffix()
+    entities = EntitiesRepo(pg_database)
+    source = entities.create(
+        EntityCreate(kind="institution", canonical_name=f"Hash Source {suffix}", country="IN")
+    )
+    target = entities.create(
+        EntityCreate(kind="institution", canonical_name=f"Hash Target {suffix}", country="IN")
+    )
+    blank = entities.create(
+        EntityCreate(kind="institution", canonical_name=f"Blank {suffix}", country="IN")
+    )
+    extraction_id, text = _extraction(pg_database, suffix)
+    claims = ClaimsRepo(pg_database)
+    source_claim = _add_claim(pg_database, source.id, extraction_id, text)
+    target_claim = _add_claim(pg_database, target.id, extraction_id, text, confidence=0.55)
+
+    source_hash_before = claims.claims_hash(source.id)
+    target_hash_before = claims.claims_hash(target.id)
+    content_before = {
+        claim_id: {
+            column: row[column] for column in CLAIM_CONTENT_COLUMNS
+        }
+        for claim_id, row in _claim_rows(pg_database, target.id).items()
+    }
+    content_before.update(
+        {
+            claim_id: {column: row[column] for column in CLAIM_CONTENT_COLUMNS}
+            for claim_id, row in _claim_rows(pg_database, source.id).items()
+        }
+    )
+
+    entities.merge(source.id, target.id, score=0.8, thresholds_version="er-v1")
+
+    content_after = {
+        claim_id: {column: row[column] for column in CLAIM_CONTENT_COLUMNS}
+        for claim_id, row in _claim_rows(pg_database, target.id).items()
+    }
+    assert content_after == content_before
+
+    # The source's hash changed only because its claim membership became empty;
+    # the target's only because it gained the source's rows.
+    assert claims.claims_hash(source.id) == claims.claims_hash(blank.id)
+    assert claims.claims_hash(source.id) != source_hash_before
+    assert claims.claims_hash(target.id) != target_hash_before
+    assert set(content_after) == {source_claim.id, target_claim.id}
+
+
+def test_merge_marks_scores_stale_without_deleting_them(pg_database) -> None:
+    suffix = _suffix()
+    entities = EntitiesRepo(pg_database)
+    source = entities.create(
+        EntityCreate(kind="institution", canonical_name=f"Score Source {suffix}", country="IN")
+    )
+    target = entities.create(
+        EntityCreate(kind="institution", canonical_name=f"Score Target {suffix}", country="IN")
+    )
+    scores = ScoresRepo(pg_database)
+    source_score = _score(pg_database, source.id, "a" * 64)
+    target_score = _score(pg_database, target.id, "b" * 64)
+    assert scores.latest_for_entity(source.id).id == source_score
+
+    _, audit = entities.merge(source.id, target.id, score=0.95, thresholds_version="er-v1")
+    assert audit.features["scores_invalidated"] == {
+        "source": [source_score],
+        "target": [target_score],
+    }
+
+    for entity_id, score_id in ((source.id, source_score), (target.id, target_score)):
+        rows = scores.list_for_entity(entity_id)
+        assert [(row.id, row.stale) for row in rows] == [(score_id, True)]
+        # The stale row survives; it is never deleted.
+        assert scores.latest_for_entity(entity_id) is None
+        assert scores.latest_for_entity(entity_id, include_stale=True).id == score_id
+
+    fresh = _score(pg_database, target.id, "c" * 64)
+    latest = scores.latest_for_entity(target.id)
+    assert latest is not None and latest.id == fresh and latest.stale is False
+
+
+def test_unmerge_returns_a_conflict_when_the_evidence_has_drifted(pg_database) -> None:
+    suffix = _suffix()
+    entities = EntitiesRepo(pg_database)
+    source = entities.create(
+        EntityCreate(kind="institution", canonical_name=f"Drift Source {suffix}", country="IN")
+    )
+    target = entities.create(
+        EntityCreate(kind="institution", canonical_name=f"Drift Target {suffix}", country="IN")
+    )
+    extraction_id, text = _extraction(pg_database, suffix)
+    source_claim = _add_claim(pg_database, source.id, extraction_id, text)
+    entities.merge(source.id, target.id, score=0.9, thresholds_version="er-v1")
+
+    intruder = _add_claim(pg_database, target.id, extraction_id, text, confidence=0.4)
+
+    result = entities.unmerge(source.id)
+    assert result.conflict and not result.ok
+    assert result.audit is None
+    assert any(str(intruder.id) in item for item in result.drift)
+
+    # Nothing moved, the merge link is intact, and no decision was recorded.
+    assert EntitiesRepo(pg_database).get(source.id).merged_into_entity_id == target.id
+    assert set(_claim_rows(pg_database, target.id)) == {source_claim.id, intruder.id}
+    assert [row.band for row in entities.audit_for_pair(source.id, target.id)] == ["accept"]
+
+
+def test_frontier_keeps_post_shape_and_conditional_validators_across_the_queue(
+    pg_database,
+) -> None:
+    from fmd.discover.base import DocumentRef
+    from fmd.frontier.queue import Frontier
+
+    suffix = _suffix()
+    ref = DocumentRef(
+        url=f"https://nabh.example/admin-ajax.php?t={suffix}",
+        etag='"abc123"',
+        last_modified="Tue, 13 Oct 2026 10:00:00 GMT",
+        metadata={
+            "request_method": "POST",
+            "request_body": {"action": "hospitals"},
+            "request_headers": {"X-Requested-With": "XMLHttpRequest"},
+        },
+    )
+    frontier = Frontier.from_database(pg_database)
+    queued = frontier.enqueue_ref(ref)
+    assert queued.http_method == "POST"
+    assert queued.http_body == {"action": "hospitals"}
+
+    stored = CrawlFrontierRepo(pg_database).get(ref.url)
+    assert stored is not None
+    assert stored.request_headers is not None
+    assert stored.request_headers["If-None-Match"] == '"abc123"'
+    assert stored.request_headers["If-Modified-Since"] == "Tue, 13 Oct 2026 10:00:00 GMT"
+    assert stored.request_headers["X-Requested-With"] == "XMLHttpRequest"

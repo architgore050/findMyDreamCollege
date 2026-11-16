@@ -92,12 +92,24 @@ class InMemoryFrontierRepo:
             data["updated_at"] = datetime.now(UTC)
             record = FrontierRecord(**data)
         else:
+            method = item.http_method
+            if (
+                existing.http_method == "POST"
+                and item.http_method == "GET"
+                and item.http_body is None
+            ):
+                method = "POST"
             record = existing.model_copy(
                 update={
                     "domain": item.domain,
                     "priority": item.priority,
                     "next_allowed_at": min(existing.next_allowed_at, next_allowed),
                     "state": "done" if existing.state == "done" else item.state,
+                    "http_method": method,
+                    "http_body": item.http_body
+                    if item.http_body is not None
+                    else existing.http_body,
+                    "request_headers": item.request_headers or existing.request_headers,
                     "updated_at": datetime.now(UTC),
                 }
             )
@@ -247,8 +259,14 @@ class Frontier:
         *,
         priority: int = 0,
         next_allowed_at: datetime | None = None,
+        http_method: str = "GET",
+        http_body: dict | None = None,
+        request_headers: dict | None = None,
     ) -> FrontierRecord:
         domain = registrable_domain(url)
+        method = http_method.upper()
+        if method not in {"GET", "POST"}:
+            raise ValueError(f"unsupported request method {method!r} (GET or POST)")
         return self.repo.enqueue(
             FrontierUpsert(
                 url=url,
@@ -256,14 +274,30 @@ class Frontier:
                 priority=priority,
                 next_allowed_at=next_allowed_at or self.clock.now(),
                 state="queued",
+                http_method=method,
+                http_body=http_body,
+                request_headers=request_headers,
             )
         )
 
     def enqueue_ref(self, ref, *, priority: int | None = None) -> FrontierRecord:
-        """Enqueue any object exposing the ``DocumentRef`` protocol."""
+        """Enqueue any object exposing the ``DocumentRef`` protocol.
+
+        The full request shape is forwarded — method, body, headers and
+        conditional validators — so a POST lead is replayable when its turn
+        comes, not just the URL.
+        """
         if priority is None:
             priority = getattr(ref, "priority", 0) or 0
-        return self.enqueue(ref.url, priority=priority)
+        return self.repo.enqueue(
+            FrontierUpsert.from_document_ref(
+                ref,
+                domain=registrable_domain(ref.url),
+                priority=priority,
+                next_allowed_at=self.clock.now(),
+                state="queued",
+            )
+        )
 
     # ------------------------------------------------------------------- budget
     def pages_today(self, domain: str, *, at: datetime | None = None) -> int:

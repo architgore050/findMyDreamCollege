@@ -257,3 +257,33 @@ def test_manual_lock_declines_a_model_accept(tmp_path: Path) -> None:
     assert resolution.band == "adjudicate"
     assert resolution.audit.model_verdict is not None
     assert any(note.startswith("manual_canonical_lock") for note in resolution.audit.notes)
+
+
+def test_a_manual_alias_carried_by_a_merge_stays_authoritative() -> None:
+    """Merge reparents aliases without changing their type (WS-E3).
+
+    The service only sees candidates, so this pins the resolution semantics a
+    reparented manual alias must keep: it outranks heuristics and the survivor's
+    canonical name stays locked for review.
+    """
+    survivor = EntityCandidate(
+        entity_id=60,
+        canonical_name="Survivor University",
+        state="Delhi",
+        aliases=[Alias(alias="Former Duplicate Vishwavidyalaya", alias_type="manual")],
+    )
+    resolutions = resolve(
+        [
+            Mention(text="Former Duplicate Vishwavidyalaya", state="Delhi"),
+            Mention(text="Survivor University", state="Delhi"),
+        ],
+        [survivor],
+        config=_config(),
+    )
+    carried, canonical = resolutions
+    assert carried.chosen is not None
+    assert carried.chosen.entity_id == 60
+    assert carried.audit.decided_by == "manual"
+    assert "manual_alias_authoritative" in carried.audit.notes
+    assert canonical.chosen is None
+    assert "manual_canonical_lock" in canonical.audit.notes

@@ -214,3 +214,52 @@ def test_frontier_counts_are_not_in_memory_only() -> None:
         repo, stats=InMemoryCrawlStats(), domain_state=InMemoryDomainStateStore(), clock=clock
     )
     assert restarted.counts().get("done") == 1
+
+
+def test_enqueue_ref_forwards_the_full_post_request_shape() -> None:
+    from fmd.discover.base import DocumentRef
+
+    frontier = make_frontier()
+    ref = DocumentRef(
+        url="https://nabh.example/admin-ajax.php?page=2",
+        priority=4,
+        etag='"v7"',
+        last_modified="Tue, 13 Oct 2026 10:00:00 GMT",
+        metadata={
+            "request_method": "POST",
+            "request_body": {"action": "hospitals", "page": 2},
+            "request_headers": {"X-Requested-With": "XMLHttpRequest"},
+        },
+    )
+    record = frontier.enqueue_ref(ref)
+    assert record.priority == 4
+    assert record.http_method == "POST"
+    assert record.http_body == {"action": "hospitals", "page": 2}
+    assert record.request_headers is not None
+    assert record.request_headers["X-Requested-With"] == "XMLHttpRequest"
+    assert record.request_headers["If-None-Match"] == '"v7"'
+    assert record.request_headers["If-Modified-Since"] == "Tue, 13 Oct 2026 10:00:00 GMT"
+
+    # The shape survives a claim (the replayable unit a worker picks up).
+    claimed = frontier.claim()
+    assert claimed is not None
+    assert claimed.http_method == "POST"
+    assert claimed.http_body == {"action": "hospitals", "page": 2}
+
+
+def test_post_shape_is_not_erased_by_a_bare_duplicate_enqueue() -> None:
+    from fmd.discover.base import DocumentRef
+
+    repo = InMemoryFrontierRepo()
+    clock = FakeClock()
+    frontier = Frontier(
+        repo, stats=InMemoryCrawlStats(), domain_state=InMemoryDomainStateStore(), clock=clock
+    )
+    ref = DocumentRef(
+        "https://nabh.example/admin-ajax.php?page=3",
+        metadata={"request_method": "POST", "request_body": {"action": "states"}},
+    )
+    frontier.enqueue_ref(ref)
+    duplicate = frontier.enqueue_ref(DocumentRef("https://nabh.example/admin-ajax.php?page=3"))
+    assert duplicate.http_method == "POST"
+    assert duplicate.http_body == {"action": "states"}
