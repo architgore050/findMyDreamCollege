@@ -1,0 +1,13 @@
+{
+  "mentions": [
+    {"text": "King George's Medical University", "state": "Uttar Pradesh", "city": "Lucknow"},
+    {"text": "King George Medical University", "state": "Uttar Pradesh"},
+    {"text": "KGMU", "state": "Uttar Pradesh"},
+    {"text": "University of Delhi", "state": "Delhi", "city": "Delhi"},
+    {"text": "King George Medcal University", "state": "Uttar Pradesh"},
+    {"text": "Government Medical College, Patna", "state": "Bihar", "city": "Patna"},
+    {"text": "Rajendra Institute of Medical Sciences", "state": "Bihar", "city": "Patna"},
+    {"text": "Sarojini Naidu Medical College", "state": "Uttar Pradesh", "city": "Agra"},
+    {"text": "All India Institute of Medical Sciences, Bhopal", "state": "Madhya Pradesh"}
+  ]
+}

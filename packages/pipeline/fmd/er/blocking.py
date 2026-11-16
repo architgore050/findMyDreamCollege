@@ -12,10 +12,9 @@ from __future__ import annotations
 import importlib.util
 import logging
 from collections.abc import Sequence
-from typing import Any
 
-from fmd.er.config import BlockingConfig, ERConfig, Lexicon
-from fmd.er.normalise import blocking_keys, normalise_name
+from fmd.er.config import BlockingConfig, Lexicon
+from fmd.er.normalise import Transliterator, blocking_keys, normalise_name
 from fmd.er.types import BlockingResult, EntityCandidate, Mention
 
 LOGGER = logging.getLogger(__name__)
@@ -54,7 +53,7 @@ def _name_keys(
     pincode: str | None,
     config: BlockingConfig,
     lexicon: Lexicon,
-    transliterate: Any | None = None,
+    transliterate: Transliterator | None = None,
 ):
     normalised = normalise_name(text, lexicon, transliterate=transliterate)
     return blocking_keys(
@@ -67,7 +66,7 @@ def _mention_keys(
     *,
     config: BlockingConfig,
     lexicon: Lexicon,
-    transliterate: Any | None = None,
+    transliterate: Transliterator | None = None,
 ) -> tuple[str, ...]:
     forms = [mention.text, *(alias.alias for alias in mention.aliases)]
     keys: list[str] = []
@@ -90,7 +89,7 @@ def _candidate_keys(
     *,
     config: BlockingConfig,
     lexicon: Lexicon,
-    transliterate: Any | None = None,
+    transliterate: Transliterator | None = None,
 ) -> tuple[str, ...]:
     forms = [candidate.canonical_name, *(alias.alias for alias in candidate.aliases)]
     keys: list[str] = []
@@ -129,6 +128,8 @@ def _global_fallback(
     pairs: dict[str, list[int]],
     candidate_count: int,
 ) -> list[int]:
+    if candidate_count == 0:
+        return []
     empty = [int(key) for key, value in pairs.items() if not value]
     if not empty:
         return []
@@ -183,12 +184,8 @@ def _duckdb_pairs(
     ]
     connection = duckdb.connect(database=":memory:")
     try:
-        connection.execute(
-            "CREATE TABLE mention_keys (mention_id INTEGER, key VARCHAR)"
-        )
-        connection.execute(
-            "CREATE TABLE candidate_keys (candidate_id INTEGER, key VARCHAR)"
-        )
+        connection.execute("CREATE TABLE mention_keys (mention_id INTEGER, key VARCHAR)")
+        connection.execute("CREATE TABLE candidate_keys (candidate_id INTEGER, key VARCHAR)")
         if mention_rows:
             connection.executemany("INSERT INTO mention_keys VALUES (?, ?)", mention_rows)
         if candidate_rows:
@@ -249,9 +246,7 @@ def block_splink(
     """
     if not splink_available():
         raise CapabilityUnavailable("splink", "install the `er` extra: uv sync --extra er")
-    result = block_duckdb(
-        mentions, candidates, config=config, lexicon=lexicon
-    )
+    result = block_duckdb(mentions, candidates, config=config, lexicon=lexicon)
     return result.model_copy(
         update={
             "backend": "splink",
@@ -281,8 +276,10 @@ def block(
             log.warning("ER blocking: %s; falling back to deterministic keys", exc)
             fallback = block_deterministic(mentions, candidates, config=cfg, lexicon=lex)
             return fallback.model_copy(
-                update={"reason": f"{exc}; fell back to deterministic blocking",
-                        "used_fallback": True}
+                update={
+                    "reason": f"{exc}; fell back to deterministic blocking",
+                    "used_fallback": True,
+                }
             )
     if cfg.backend == "auto":
         for name in ("splink", "duckdb"):

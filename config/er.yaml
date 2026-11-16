@@ -1,0 +1,44 @@
+# Entity-resolution tunables (brief §10). Loaded through the registry as the
+# seventh config file; every stage reads ERConfig, never these numbers directly.
+#
+# `denylisted_domains` deliberately lives in sources.yaml (spec §4.2.2) and is
+# NOT duplicated here.
+
+version: er-v1
+
+# Band boundaries. `accept` at/above `high`, `reject` at/below `low`, and the
+# open interval between them goes to model adjudication.
+thresholds:
+  high: 0.85
+  low: 0.40
+
+# Declared low → high; validated so a reordered config fails at load time.
+bands:
+  order: [reject, adjudicate, accept]
+  accept_at_or_above: high
+  reject_at_or_below: low
+
+# Ambiguous pairs per model call; bundles are cached by pair hash.
+bundling:
+  bundle_size: 20
+  cache: true
+
+# Multipliers applied to a name match when the best form is an alias of that type.
+alias_weights:
+  manual: 1.0
+  former_name: 1.0
+  transliteration: 0.95
+  local_name: 0.95
+  acronym: 0.97
+  misspelling: 0.90
+
+# Fellegi–Sunter placeholders. v1 has no labelled pair set, so the score is a
+# calibrated-ish heuristic and these maps stay empty. `method` is the honest
+# label surfaced in reports; do not fill `m`/`u` without an eval that proves them.
+priors:
+  method: not_calibrated
+  m: {}
+  u: {}
+  note: >-
+    No real m/u priors yet. Enabling them requires a labelled pair set and an
+    eval report; until then the similarity score is heuristic, not probabilistic.

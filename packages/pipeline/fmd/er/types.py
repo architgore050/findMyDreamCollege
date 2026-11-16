@@ -49,7 +49,13 @@ class Alias(ErModel):
 
 
 class Mention(ErModel):
-    """A name observed in evidence (a document, header, sitemap entry, ...)."""
+    """A name observed in evidence (a document, header, sitemap entry, ...).
+
+    ``entity_id`` is optional: when the mention is already attached to a
+    provisional entity row, the service can emit a persistable audit decision.
+    A bare string mention has no entity pair to audit, so it stays reviewable in
+    memory without inventing an id.
+    """
 
     text: str
     state: str | None = None
@@ -57,6 +63,7 @@ class Mention(ErModel):
     pincode: str | None = None
     source_id: str | None = None
     doc_id: str | None = None
+    entity_id: int | None = None
     aliases: list[Alias] = Field(default_factory=list)
 
 
@@ -170,6 +177,26 @@ class AuditRecord(ErModel):
     adjudication_pairs: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
     features: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditDecision(ErModel):
+    """A persistable ``er_audit`` row (field names match ``ERAuditCreate``).
+
+    The service stays database-free: it emits these values and an injected sink
+    (``EntitiesRepo.record_audit`` wrapped by the caller) writes them.
+    """
+
+    subject_entity_id: int
+    candidate_entity_id: int
+    band: Band
+    score: float
+    features: dict[str, Any] = Field(default_factory=dict)
+    thresholds_version: str
+    model: str | None = None
+    model_verdict: str | None = None
+    model_reason: str | None = None
+    decided_by: Literal["auto", "model", "human"]
+    claims_hash: str | None = None
 
 
 class Resolution(ErModel):

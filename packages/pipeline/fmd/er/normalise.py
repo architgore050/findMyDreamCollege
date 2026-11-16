@@ -65,6 +65,16 @@ def _strip_accents(text: str) -> str:
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 
+def _fold_latin_accents(text: str) -> str:
+    """Drop combining marks on Latin letters only (never on Devanagari matras)."""
+    folded: list[str] = []
+    for char in unicodedata.normalize("NFKD", text):
+        if unicodedata.combining(char) and folded and _LATIN.fullmatch(folded[-1]):
+            continue
+        folded.append(char)
+    return "".join(folded)
+
+
 def _tokenize(text: str) -> list[str]:
     cleaned = _NON_WORD.sub(" ", text)
     # ``\w`` keeps letters/digits of every script and drops punctuation.
@@ -83,7 +93,7 @@ def _expand_tokens(
         if expansion:
             seen.append(token)
             acronyms.append(token)
-            expanded.extend(_tokenize(expansion.casefold()))
+            expanded.extend(_tokenize(normalise_text(expansion, lexicon)))
             continue
         abbreviation = lexicon.abbreviations.get(token)
         expanded.append(abbreviation or token)
@@ -141,6 +151,7 @@ def soundex(value: str, length: int = 4) -> str:
 def normalise_text(text: str, lexicon: Lexicon) -> str:
     """NFKC + casefold + punctuation cleanup, before token-level work."""
     folded = unicodedata.normalize("NFKC", text).casefold()
+    folded = _fold_latin_accents(folded)
     folded = _POSSESSIVE.sub("", folded)
     return _MULTISPACE.sub(" ", _NON_WORD.sub(" ", folded)).strip()
 
@@ -174,6 +185,7 @@ def normalise_name(
     folded = normalise_text(working, lexicon)
     tokens = _tokenize(folded)
     tokens, acronyms, _ = _expand_tokens(tokens, lexicon)
+    raw_derived = _derived_acronyms([token for token in tokens if token not in lexicon.stopwords])
     tokens = _strip_phrases(tokens, lexicon.legal_phrases)
     tokens = [token for token in tokens if token not in lexicon.stopwords]
     # Collapse immediate repeats ("medical medical college").
@@ -186,7 +198,7 @@ def normalise_name(
         notes.append("empty_after_normalisation")
         tokens = _tokenize(folded)
     derived = _derived_acronyms(tokens)
-    all_acronyms = tuple(dict.fromkeys([*acronyms, *derived]))
+    all_acronyms = tuple(dict.fromkeys([*acronyms, *raw_derived, *derived]))
     return NormalisedName(
         raw=raw,
         text=" ".join(tokens),

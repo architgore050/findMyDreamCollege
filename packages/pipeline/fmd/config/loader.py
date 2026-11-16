@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import ValidationError
@@ -23,6 +24,7 @@ from fmd.config.models import (
     DISCOVERY_PARAMS_REQUIRED,
     CostRulesConfig,
     CountriesConfig,
+    ErConfig,
     ExamsConfig,
     ModelsConfig,
     SourcesConfig,
@@ -38,6 +40,7 @@ CONFIG_FILES: dict[str, str] = {
     "models": "models.yaml",
     "exams": "exams.yaml",
     "cost_rules": "cost_rules.yaml",
+    "er": "er.yaml",
 }
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -52,6 +55,48 @@ class ConfigError(RuntimeError):
         super().__init__("config registry is invalid. Fix the following and re-run:\n" + joined)
 
 
+class RecognitionOriginError(ValueError):
+    """A recognition claim points at a non-statutory / impersonating host.
+
+    Spec §4.2.2: a trust registered under the Indian Trusts Act is never a
+    statutory State Allied and Healthcare Council. Only the NCAHP list (or a
+    human-approved ``*.gov.in``/``*.nic.in``/``*.ac.in`` host) may originate
+    recognition evidence.
+    """
+
+
+def host_of(url: str) -> str:
+    return (urlsplit(url).hostname or "").strip().lower().rstrip(".")
+
+
+def denied_domain(url: str, domains: Iterable[str]) -> str | None:
+    """Return the denylisted suffix matching ``url``, or ``None``."""
+    host = host_of(url)
+    if not host:
+        return None
+    for domain in domains:
+        suffix = domain.strip().lower().lstrip(".")
+        if not suffix:
+            continue
+        if host == suffix or host.endswith("." + suffix):
+            return suffix
+    return None
+
+
+def validate_recognition_origin(url: str, domains: Iterable[str]) -> None:
+    """Raise :class:`RecognitionOriginError` if ``url`` is denylisted.
+
+    Call this before creating any claim whose predicate starts with
+    ``recognition.`` or ``regulator.``. The loader also applies it to every
+    configured source URL so an impersonating domain cannot enter the registry.
+    """
+    match = denied_domain(url, domains)
+    if match is not None:
+        raise RecognitionOriginError(
+            f"recognition claims may not originate from denylisted domain {match!r} ({url})"
+        )
+
+
 @dataclass(frozen=True)
 class Registry:
     """Validated, typed view of every config file."""
@@ -62,6 +107,7 @@ class Registry:
     models: ModelsConfig
     exams: ExamsConfig
     cost_rules: CostRulesConfig
+    er: ErConfig
     config_dir: Path
 
     @property
@@ -151,6 +197,31 @@ def _format_validation_error(filename: str, exc: ValidationError) -> list[str]:
     return formatted
 
 
+def _source_urls(source: Any) -> list[str]:
+    """Every URL a source declares, for denylist validation."""
+    urls: list[str] = []
+    if getattr(source, "base_url", None):
+        urls.append(source.base_url)
+    urls.extend(getattr(source, "seeds", None) or [])
+    params = getattr(source, "params", None)
+    if params is not None:
+        data = (
+            params.model_dump(exclude_none=True) if hasattr(params, "model_dump") else dict(params)
+        )
+        for key in (
+            "api_endpoint",
+            "listing_url",
+            "ajax_url",
+            "asset_url_template",
+            "static_xlsx_url",
+        ):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                urls.append(value)
+        urls.extend(value for value in data.get("listing_urls", []) if isinstance(value, str))
+    return urls
+
+
 def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
     countries = registry.countries
     sources = registry.sources
@@ -158,6 +229,7 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
     models = registry.models
     exams = registry.exams
     cost_rules = registry.cost_rules
+    er = registry.er
 
     if not countries.enabled:
         errors.append(
@@ -174,11 +246,20 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
             )
 
     seen_source_ids: set[str] = set()
+    denied = sources.denied_domains()
     for position, source in enumerate(sources.sources):
         where = f"sources.yaml: sources[{position}] ({source.id!r})"
         if source.id in seen_source_ids:
             errors.append(f"{where}: duplicate source id")
         seen_source_ids.add(source.id)
+        for url in _source_urls(source):
+            domain = denied_domain(url, denied)
+            if domain is not None:
+                errors.append(
+                    f"{where}: URL {url!r} is on the denylisted_domains list "
+                    f"({domain!r}); impersonating councils may never be crawled or cited "
+                    "(spec §4.2.2). Remove the URL or remove the domain from the registry."
+                )
         if source.adapter is None:
             errors.append(
                 f"{where}: `adapter` is null. Every source must name an implementation "
@@ -267,6 +348,30 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
             # base_url may be unresolved because an env var is unset; ping reports it.
             continue
 
+    # ---------------------------------------------------------------- entity resolution
+    if not er.version.strip():
+        errors.append("er.yaml: version must be non-empty")
+    if er.adjudication.purpose not in models.profiles:
+        errors.append(
+            f"er.yaml: adjudication purpose {er.adjudication.purpose!r} has no profile in "
+            "models.yaml. Add a profile or change the purpose; a silent untuned fallback "
+            "would hide the misconfiguration."
+        )
+    for fallback_purpose in er.adjudication.fallback_purposes:
+        if fallback_purpose not in models.profiles:
+            errors.append(
+                f"er.yaml: adjudication fallback purpose {fallback_purpose!r} has no "
+                "profile in models.yaml"
+            )
+    if er.priors.method not in {"not_calibrated"} and (not er.priors.m or not er.priors.u):
+        errors.append(
+            "er.yaml: priors.method claims calibration but priors.m/priors.u are empty. "
+            "Leave method='not_calibrated' until a labelled pair set exists."
+        )
+    for alias_type, weight in er.similarity.alias_type_weights.items():
+        if weight < 0:
+            errors.append(f"er.yaml: alias_weights[{alias_type!r}] must be >= 0")
+
     seen_exam_ids: set[str] = set()
     for position, exam in enumerate(exams.exams):
         where = f"exams.yaml: exams[{position}] ({exam.id!r})"
@@ -295,7 +400,7 @@ def load_registry(
     config_dir: str | Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Registry:
-    """Read, interpolate, parse and cross-validate all six config files."""
+    """Read, interpolate, parse and cross-validate all seven config files."""
     directory = Path(config_dir) if config_dir is not None else resolve_config_dir()
     environment: Mapping[str, str] = os.environ if env is None else env
 
@@ -321,11 +426,17 @@ def load_registry(
         "models": ModelsConfig,
         "exams": ExamsConfig,
         "cost_rules": CostRulesConfig,
+        "er": ErConfig,
     }
     for key, model in model_for.items():
         filename = CONFIG_FILES[key]
         try:
-            parsed[key] = model.model_validate(documents[key])
+            if key == "er":
+                # ``ERConfig.from_mapping`` translates the file's ``bundling`` and
+                # ``alias_weights`` blocks into the canonical nested fields.
+                parsed[key] = ErConfig.from_mapping(documents[key])
+            else:
+                parsed[key] = model.model_validate(documents[key])
         except ValidationError as exc:
             errors.extend(_format_validation_error(filename, exc))
 
@@ -339,6 +450,7 @@ def load_registry(
         models=parsed["models"],
         exams=parsed["exams"],
         cost_rules=parsed["cost_rules"],
+        er=parsed["er"],
         config_dir=directory.resolve(),
     )
     _validate_cross_references(registry, errors)

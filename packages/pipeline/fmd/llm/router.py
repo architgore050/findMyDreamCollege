@@ -209,13 +209,36 @@ class ModelRouter:
     # ------------------------------------------------------------------ internals
 
     def _profile(self, purpose: str) -> ProfileConfig:
-        try:
+        if purpose in self.models.profiles:
             return self.models.profiles[purpose]
-        except KeyError as exc:
-            raise ProfileUnresolved(
-                f"unknown model purpose {purpose!r}. Configured profiles: "
-                + ", ".join(sorted(self.models.profiles))
-            ) from exc
+        routed = self._routed_purpose(purpose)
+        if routed is not None and routed in self.models.profiles:
+            return self.models.profiles[routed]
+        raise ProfileUnresolved(
+            f"unknown model purpose {purpose!r}. Configured profiles: "
+            + ", ".join(sorted(self.models.profiles))
+        )
+
+    def _routed_purpose(self, purpose: str) -> str | None:
+        """Resolve a purpose-only ``routing_rules`` entry to a profile name.
+
+        A rule is honoured only when its condition is exactly ``{purpose: X}``:
+        rules that also depend on document properties (``doc_kind``,
+        ``pages_gt``) cannot be evaluated from a purpose alone, so they are left
+        for the code path that knows the document. A dedicated profile with the
+        requested name always wins over a routing rule.
+        """
+        for rule in self.models.routing_rules:
+            condition = rule.get("if")
+            target = rule.get("use")
+            if not isinstance(condition, dict) or not target:
+                continue
+            if condition.get("purpose") != purpose:
+                continue
+            if any(key != "purpose" for key in condition):
+                continue
+            return str(target)
+        return None
 
     def _get_provider(self, name: str) -> Provider:
         if name in self._provider_instances:

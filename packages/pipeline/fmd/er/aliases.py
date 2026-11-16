@@ -35,11 +35,6 @@ class AliasCandidate(ErModel):
     marker: str | None = None
 
 
-def _initials(text: str, lexicon: Lexicon) -> str:
-    normalised = normalise_name(text, lexicon)
-    return "".join(token[0] for token in normalised.tokens if token)
-
-
 def _line_spans(text: str) -> list[tuple[str, int, int]]:
     spans: list[tuple[str, int, int]] = []
     offset = 0
@@ -65,7 +60,8 @@ def _looks_like_acronym(value: str) -> bool:
 
 
 def _normalised_key(value: str, lexicon: Lexicon) -> str:
-    return normalise_name(value, lexicon).text
+    """Identity used for dedupe: surface form, not the expanded canonical tokens."""
+    return normalise_text(value, lexicon)
 
 
 def _trim_alias(value: str) -> str:
@@ -167,6 +163,9 @@ def _caps_candidates(
     canonical = normalise_name(canonical_name, lexicon)
     canonical_key = canonical.text
     signature = set(canonical.tokens)
+    legal_terms = {
+        term for phrase in lexicon.legal_phrases for term in normalise_text(phrase, lexicon).split()
+    }
     name_lines = {
         index
         for index, (line, _, _) in enumerate(spans)
@@ -179,6 +178,8 @@ def _caps_candidates(
         for match in _CAPS_TOKEN.finditer(line):
             token = match.group(0)
             key = token.casefold()
+            if key in signature or key in lexicon.stopwords or key in legal_terms:
+                continue
             if key == canonical_key or key in derived:
                 confidence = 0.95
             elif index in name_lines or kind in {"header", "footer"}:
@@ -257,7 +258,7 @@ def _retype_misspellings(
     canonical_key = canonical.text
     retyped: list[AliasCandidate] = []
     for candidate in candidates:
-        key = _normalised_key(candidate.alias, lexicon)
+        key = normalise_name(candidate.alias, lexicon).text
         looks_like_misspelling = (
             candidate.alias_type not in {"misspelling", "transliteration", "local_name", "acronym"}
             and key != canonical_key
@@ -279,12 +280,19 @@ def _dedupe(
     lexicon: Lexicon,
     config: AliasMiningConfig,
 ) -> list[AliasCandidate]:
-    excluded = {_normalised_key(canonical_name, lexicon)}
-    excluded.update(_normalised_key(value, lexicon) for value in known if value)
+    canonical_key = _normalised_key(canonical_name, lexicon)
+    known_keys = {_normalised_key(value, lexicon) for value in known if value}
     best: dict[str, AliasCandidate] = {}
     for candidate in candidates:
         key = _normalised_key(candidate.alias, lexicon)
-        if not key or key in excluded:
+        if not key or key in known_keys:
+            continue
+        # A transliterated/local-script form often normalises to the canonical
+        # string; it is still a distinct, useful alias surface form.
+        if key == canonical_key and candidate.alias_type not in {
+            "transliteration",
+            "local_name",
+        }:
             continue
         if len(candidate.alias.split()) > config.max_alias_tokens:
             continue
@@ -307,16 +315,12 @@ def mine_aliases(
     """Extract candidate aliases from a document, deduped and ranked."""
     lex = lexicon or Lexicon.default()
     cfg = config or AliasMiningConfig()
-    known = [
-        item.alias if isinstance(item, Alias) else str(item) for item in known_aliases
-    ]
+    known = [item.alias if isinstance(item, Alias) else str(item) for item in known_aliases]
     spans = _line_spans(text)
     found = [
         *_marker_candidates(spans, lexicon=lex, config=cfg),
         *_bracket_candidates(spans, lexicon=lex, config=cfg),
-        *_caps_candidates(
-            spans, canonical_name=canonical_name, lexicon=lex, config=cfg
-        ),
+        *_caps_candidates(spans, canonical_name=canonical_name, lexicon=lex, config=cfg),
         *_local_name_candidates(
             text,
             canonical_name=canonical_name,
@@ -325,9 +329,7 @@ def mine_aliases(
             transliterate=transliterate,
         ),
     ]
-    found = _retype_misspellings(
-        found, canonical_name=canonical_name, lexicon=lex, config=cfg
-    )
+    found = _retype_misspellings(found, canonical_name=canonical_name, lexicon=lex, config=cfg)
     return _dedupe(
         found,
         canonical_name=canonical_name,

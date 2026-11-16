@@ -1,0 +1,72 @@
+{
+  "candidates": [
+    {
+      "entity_id": 1,
+      "canonical_name": "King George's Medical University",
+      "kind": "institution",
+      "state": "Uttar Pradesh",
+      "city": "Lucknow",
+      "pincode": "226003",
+      "aliases": [
+        {"alias": "KGMU", "alias_type": "acronym", "confidence": 1.0},
+        {"alias": "King George Medical College", "alias_type": "former_name", "confidence": 0.9}
+      ]
+    },
+    {
+      "entity_id": 2,
+      "canonical_name": "Delhi University",
+      "kind": "institution",
+      "state": "Delhi",
+      "city": "Delhi",
+      "aliases": []
+    },
+    {
+      "entity_id": 3,
+      "canonical_name": "All India Institute of Medical Sciences, New Delhi",
+      "kind": "institution",
+      "state": "Delhi",
+      "city": "New Delhi",
+      "aliases": [{"alias": "AIIMS", "alias_type": "acronym", "confidence": 1.0}]
+    },
+    {
+      "entity_id": 4,
+      "canonical_name": "Government Medical College, Patna",
+      "kind": "institution",
+      "state": "Bihar",
+      "city": "Patna",
+      "aliases": []
+    },
+    {
+      "entity_id": 5,
+      "canonical_name": "Government Medical College, Nagpur",
+      "kind": "institution",
+      "state": "Maharashtra",
+      "city": "Nagpur",
+      "aliases": []
+    },
+    {
+      "entity_id": 6,
+      "canonical_name": "Rajendra Institute of Medical Sciences",
+      "kind": "institution",
+      "state": "Bihar",
+      "city": "Patna",
+      "aliases": []
+    },
+    {
+      "entity_id": 7,
+      "canonical_name": "Rajendra Institute of Medical Technology",
+      "kind": "institution",
+      "state": "Bihar",
+      "city": "Patna",
+      "aliases": []
+    },
+    {
+      "entity_id": 8,
+      "canonical_name": "Sarojini Naidu Medical College",
+      "kind": "institution",
+      "state": "Uttar Pradesh",
+      "city": "Agra",
+      "aliases": []
+    }
+  ]
+}

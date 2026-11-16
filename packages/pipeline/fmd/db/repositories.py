@@ -7,6 +7,8 @@ connection context.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Literal
@@ -75,23 +77,58 @@ class EntityCreate(RowModel):
     state: str | None = None
     city: str | None = None
     status: str = "active"
+    normalised_name: str | None = None
+    blocking_key: str | None = None
 
 
 class EntityRecord(EntityCreate):
     id: int
+    merged_into_entity_id: int | None = None
+    merged_at: datetime | None = None
     created_at: datetime | None = None
 
 
 class AliasCreate(RowModel):
     entity_id: int
     alias: str
-    alias_type: Literal["acronym", "former_name", "transliteration", "misspelling", "local_name"]
+    alias_type: Literal[
+        "acronym", "former_name", "transliteration", "misspelling", "local_name", "manual"
+    ]
     source_id: str | None = None
     confidence: float | None = 1.0
+    span_start: int | None = None
+    span_end: int | None = None
+    quote: str | None = None
+    source_document_id: int | None = None
+    source_extraction_id: int | None = None
+    confirmed_by: str | None = None
+    confirmed_at: datetime | None = None
 
 
 class AliasRecord(AliasCreate):
     id: int
+
+
+class ERAuditCreate(RowModel):
+    """One append-only merge/non-merge decision (brief §10)."""
+
+    subject_entity_id: int
+    candidate_entity_id: int
+    band: Literal["accept", "reject", "adjudicate"]
+    score: float
+    features: dict[str, Any] = Field(default_factory=dict)
+    thresholds_version: str
+    model: str | None = None
+    model_verdict: str | None = None
+    model_reason: str | None = None
+    decided_by: Literal["auto", "model", "human"]
+    claims_hash: str | None = None
+
+
+class ERAuditRecord(ERAuditCreate):
+    id: int
+    created_at: datetime | None = None
+
 
 
 class DocumentUpsert(RowModel):
@@ -105,6 +142,40 @@ class DocumentUpsert(RowModel):
     robots_decision: str | None = None
     robots_checked_at: datetime | None = None
     http_status: int | None = None
+    http_method: Literal["GET", "POST"] = "GET"
+    http_body: dict[str, Any] | None = None
+    request_headers: dict[str, Any] | None = None
+
+    @classmethod
+    def from_document_ref(cls, ref: Any, *, domain: str | None = None) -> DocumentUpsert:
+        """Accept a ``DocumentRef`` (keeping POST shape from ``metadata``).
+
+        WS-C adapters put ``request_method`` / ``request_body`` /
+        ``request_headers`` in ``DocumentRef.metadata``. Persisting that shape is
+        what makes an admin-ajax POST source replayable.
+        """
+        metadata = getattr(ref, "metadata", None) or {}
+        method = str(
+            metadata.get("request_method") or metadata.get("http_method") or "GET"
+        ).upper()
+        if method not in {"GET", "POST"}:
+            raise ValueError(f"unsupported request method {method!r} (GET or POST)")
+        body = metadata.get("request_body", metadata.get("http_body"))
+        headers = metadata.get("request_headers") or metadata.get("headers")
+        host = domain
+        if host is None:
+            from urllib.parse import urlsplit
+
+            host = (urlsplit(getattr(ref, "url", "")).hostname or "").lower()
+        if not host:
+            raise ValueError(f"cannot derive a domain for {getattr(ref, 'url', ref)!r}")
+        return cls(
+            url=ref.url,
+            domain=host,
+            http_method=method,
+            http_body=body if isinstance(body, dict) else None,
+            request_headers=headers if isinstance(headers, dict) else None,
+        )
 
 
 class DocumentRecord(DocumentUpsert):
@@ -329,6 +400,34 @@ class FrontierUpsert(RowModel):
     priority: int = 0
     next_allowed_at: datetime | None = None
     state: Literal["queued", "in_progress", "done", "failed", "quarantined"] = "queued"
+    http_method: Literal["GET", "POST"] = "GET"
+    http_body: dict[str, Any] | None = None
+    request_headers: dict[str, Any] | None = None
+
+    @classmethod
+    def from_document_ref(cls, ref: Any, **fields: Any) -> FrontierUpsert:
+        """Enqueue a ``DocumentRef`` without losing its POST request shape."""
+        metadata = getattr(ref, "metadata", None) or {}
+        method = str(
+            metadata.get("request_method") or metadata.get("http_method") or "GET"
+        ).upper()
+        if method not in {"GET", "POST"}:
+            raise ValueError(f"unsupported request method {method!r} (GET or POST)")
+        body = metadata.get("request_body", metadata.get("http_body"))
+        headers = metadata.get("request_headers") or metadata.get("headers")
+        from urllib.parse import urlsplit
+
+        return cls(
+            url=ref.url,
+            domain=fields.pop("domain", None)
+            or (urlsplit(ref.url).hostname or ""),
+            priority=fields.pop("priority", getattr(ref, "priority", 0) or 0),
+            http_method=method,
+            http_body=body if isinstance(body, dict) else None,
+            request_headers=headers if isinstance(headers, dict) else None,
+            **fields,
+        )
+
 
 
 class FrontierRecord(FrontierUpsert):
@@ -484,8 +583,10 @@ class EntitiesRepo:
         with self.db.connection() as conn:
             row = conn.execute(
                 """
-                INSERT INTO entities (kind, canonical_name, country, state, city, status)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO entities
+                    (kind, canonical_name, country, state, city, status, normalised_name,
+                     blocking_key)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
                 (
@@ -495,6 +596,8 @@ class EntitiesRepo:
                     create.state,
                     create.city,
                     create.status,
+                    create.normalised_name,
+                    create.blocking_key,
                 ),
             ).fetchone()
         assert row is not None
@@ -514,18 +617,215 @@ class EntitiesRepo:
             ).fetchone()
         return _entity(row) if row else None
 
-    def list(
-        self, kind: str | None = None, limit: int = 100, offset: int = 0
+    def find_by_blocking_key(
+        self, blocking_key: str, kind: str | None = None, limit: int = 50
     ) -> list[EntityRecord]:
-        if kind is None:
-            sql = "SELECT * FROM entities ORDER BY id LIMIT %s OFFSET %s"
-            params: tuple[Any, ...] = (limit, offset)
+        sql = "SELECT * FROM entities WHERE blocking_key = %s AND merged_into_entity_id IS NULL"
+        params: list[Any] = [blocking_key]
+        if kind is not None:
+            sql += " AND kind = %s"
+            params.append(kind)
+        sql += " ORDER BY id LIMIT %s"
+        params.append(limit)
+        with self.db.connection() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        return [_entity(row) for row in rows]
+
+    def list(
+        self,
+        kind: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        include_merged: bool = True,
+    ) -> list[EntityRecord]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if kind is not None:
+            conditions.append("kind = %s")
+            params.append(kind)
+        if not include_merged:
+            conditions.append("merged_into_entity_id IS NULL")
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.extend([limit, offset])
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM entities{where} ORDER BY id LIMIT %s OFFSET %s",  # noqa: S608
+                tuple(params),
+            ).fetchall()
+        return [_entity(row) for row in rows]
+
+    # ------------------------------------------------------------------ merge audit
+    def record_audit(self, audit: ERAuditCreate) -> ERAuditRecord:
+        if audit.subject_entity_id == audit.candidate_entity_id:
+            raise ValueError("an entity cannot be audited against itself")
+        if not 0.0 <= audit.score <= 1.0:
+            raise ValueError("audit score must be in [0, 1]")
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO er_audit
+                    (subject_entity_id, candidate_entity_id, band, score, features_json,
+                     thresholds_version, model, model_verdict, model_reason, decided_by,
+                     claims_hash)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING *
+                """,
+                (
+                    audit.subject_entity_id,
+                    audit.candidate_entity_id,
+                    audit.band,
+                    audit.score,
+                    _json(audit.features),
+                    audit.thresholds_version,
+                    audit.model,
+                    audit.model_verdict,
+                    audit.model_reason,
+                    audit.decided_by,
+                    audit.claims_hash,
+                ),
+            ).fetchone()
+        assert row is not None
+        return _er_audit(row)
+
+    def merge(
+        self,
+        entity_id: int,
+        into_entity_id: int,
+        *,
+        score: float = 1.0,
+        features: dict[str, Any] | None = None,
+        thresholds_version: str = "manual",
+        model: str | None = None,
+        model_verdict: str | None = None,
+        model_reason: str | None = None,
+        decided_by: Literal["auto", "model", "human"] = "human",
+        claims_hash: str | None = None,
+    ) -> tuple[EntityRecord, ERAuditRecord]:
+        """Point ``entity_id`` at ``into_entity_id`` and append an audit row.
+
+        Reversible: :meth:`unmerge` clears the link and appends a ``reject``
+        audit row, so the full history is preserved.
+        """
+        if entity_id == into_entity_id:
+            raise ValueError("cannot merge an entity into itself")
+        with self.db.connection() as conn:
+            subject = conn.execute(
+                "SELECT * FROM entities WHERE id = %s", (entity_id,)
+            ).fetchone()
+            target = conn.execute(
+                "SELECT * FROM entities WHERE id = %s", (into_entity_id,)
+            ).fetchone()
+            if subject is None:
+                raise ValueError(f"entity {entity_id} does not exist")
+            if target is None:
+                raise ValueError(f"target entity {into_entity_id} does not exist")
+            if subject["merged_into_entity_id"] is not None:
+                raise ValueError(f"entity {entity_id} is already merged")
+            if target["merged_into_entity_id"] is not None:
+                raise ValueError(
+                    f"target entity {into_entity_id} is itself merged; merge into the survivor"
+                )
+            row = conn.execute(
+                """
+                UPDATE entities
+                SET merged_into_entity_id = %s, merged_at = now(), status = 'merged'
+                WHERE id = %s
+                RETURNING *
+                """,
+                (into_entity_id, entity_id),
+            ).fetchone()
+            audit_row = conn.execute(
+                """
+                INSERT INTO er_audit
+                    (subject_entity_id, candidate_entity_id, band, score, features_json,
+                     thresholds_version, model, model_verdict, model_reason, decided_by,
+                     claims_hash)
+                VALUES (%s, %s, 'accept', %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING *
+                """,
+                (
+                    entity_id,
+                    into_entity_id,
+                    score,
+                    _json(features or {"operation": "merge"}),
+                    thresholds_version,
+                    model,
+                    model_verdict,
+                    model_reason,
+                    decided_by,
+                    claims_hash,
+                ),
+            ).fetchone()
+        assert row is not None and audit_row is not None
+        return _entity(row), _er_audit(audit_row)
+
+    def unmerge(self, entity_id: int, *, decided_by: Literal["auto", "human"] = "human") -> tuple[
+        EntityRecord, ERAuditRecord
+    ]:
+        """Reverse a merge, preserving the decision history as a ``reject`` row."""
+        with self.db.connection() as conn:
+            subject = conn.execute(
+                "SELECT * FROM entities WHERE id = %s", (entity_id,)
+            ).fetchone()
+            if subject is None:
+                raise ValueError(f"entity {entity_id} does not exist")
+            previous = subject["merged_into_entity_id"]
+            if previous is None:
+                raise ValueError(f"entity {entity_id} is not merged")
+            row = conn.execute(
+                """
+                UPDATE entities
+                SET merged_into_entity_id = NULL, merged_at = NULL, status = 'active'
+                WHERE id = %s
+                RETURNING *
+                """,
+                (entity_id,),
+            ).fetchone()
+            audit_row = conn.execute(
+                """
+                INSERT INTO er_audit
+                    (subject_entity_id, candidate_entity_id, band, score, features_json,
+                     thresholds_version, decided_by)
+                VALUES (%s, %s, 'reject', 0.0, %s, 'manual', %s)
+                RETURNING *
+                """,
+                (
+                    entity_id,
+                    previous,
+                    _json({"operation": "unmerge", "merged_into": previous}),
+                    decided_by,
+                ),
+            ).fetchone()
+        assert row is not None and audit_row is not None
+        return _entity(row), _er_audit(audit_row)
+
+    def audit_for_pair(
+        self, subject_entity_id: int, candidate_entity_id: int, limit: int = 50
+    ) -> list[ERAuditRecord]:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM er_audit WHERE subject_entity_id = %s "
+                "AND candidate_entity_id = %s ORDER BY created_at DESC, id DESC LIMIT %s",
+                (subject_entity_id, candidate_entity_id, limit),
+            ).fetchall()
+        return [_er_audit(row) for row in rows]
+
+    def audit_recent(
+        self, limit: int = 50, since: datetime | None = None
+    ) -> list[ERAuditRecord]:
+        if since is None:
+            sql = "SELECT * FROM er_audit ORDER BY created_at DESC, id DESC LIMIT %s"
+            params: tuple[Any, ...] = (limit,)
         else:
-            sql = "SELECT * FROM entities WHERE kind = %s ORDER BY id LIMIT %s OFFSET %s"
-            params = (kind, limit, offset)
+            sql = (
+                "SELECT * FROM er_audit WHERE created_at >= %s "
+                "ORDER BY created_at DESC, id DESC LIMIT %s"
+            )
+            params = (since, limit)
         with self.db.connection() as conn:
             rows = conn.execute(sql, params).fetchall()
-        return [_entity(row) for row in rows]
+        return [_er_audit(row) for row in rows]
+
 
 
 class AliasesRepo:
@@ -537,8 +837,10 @@ class AliasesRepo:
             row = conn.execute(
                 """
                 INSERT INTO entity_aliases
-                    (entity_id, alias, alias_type, source_id, confidence)
-                VALUES (%s, %s, %s, %s, %s)
+                    (entity_id, alias, alias_type, source_id, confidence, span_start,
+                     span_end, quote, source_document_id, source_extraction_id,
+                     confirmed_by, confirmed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
                 (
@@ -547,6 +849,13 @@ class AliasesRepo:
                     create.alias_type,
                     create.source_id,
                     create.confidence,
+                    create.span_start,
+                    create.span_end,
+                    create.quote,
+                    create.source_document_id,
+                    create.source_extraction_id,
+                    create.confirmed_by,
+                    create.confirmed_at,
                 ),
             ).fetchone()
         assert row is not None
@@ -556,6 +865,15 @@ class AliasesRepo:
         with self.db.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM entity_aliases WHERE entity_id = %s ORDER BY id",
+                (entity_id,),
+            ).fetchall()
+        return [AliasRecord.model_validate(row) for row in rows]
+
+    def list_manual_for_entity(self, entity_id: int) -> list[AliasRecord]:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM entity_aliases WHERE entity_id = %s AND alias_type = 'manual' "
+                "ORDER BY id",
                 (entity_id,),
             ).fetchall()
         return [AliasRecord.model_validate(row) for row in rows]
@@ -571,8 +889,10 @@ class DocumentsRepo:
                 """
                 INSERT INTO documents
                     (url, domain, kind, first_seen, last_seen, etag, last_modified,
-                     robots_decision, robots_checked_at, http_status)
-                VALUES (%s, %s, %s, COALESCE(%s, now()), COALESCE(%s, now()), %s, %s, %s, %s, %s)
+                     robots_decision, robots_checked_at, http_status, http_method, http_body,
+                     request_headers)
+                VALUES (%s, %s, %s, COALESCE(%s, now()), COALESCE(%s, now()), %s, %s, %s, %s,
+                        %s, %s, %s, %s)
                 ON CONFLICT (url) DO UPDATE SET
                     domain = EXCLUDED.domain,
                     kind = COALESCE(EXCLUDED.kind, documents.kind),
@@ -582,7 +902,14 @@ class DocumentsRepo:
                     robots_decision = COALESCE(EXCLUDED.robots_decision, documents.robots_decision),
                     robots_checked_at = COALESCE(EXCLUDED.robots_checked_at,
                                                  documents.robots_checked_at),
-                    http_status = COALESCE(EXCLUDED.http_status, documents.http_status)
+                    http_status = COALESCE(EXCLUDED.http_status, documents.http_status),
+                    http_method = CASE
+                        WHEN EXCLUDED.http_method = 'GET' AND documents.http_method = 'POST'
+                             AND EXCLUDED.http_body IS NULL
+                        THEN documents.http_method ELSE EXCLUDED.http_method END,
+                    http_body = COALESCE(EXCLUDED.http_body, documents.http_body),
+                    request_headers = COALESCE(EXCLUDED.request_headers,
+                                               documents.request_headers)
                 RETURNING *
                 """,
                 (
@@ -596,6 +923,9 @@ class DocumentsRepo:
                     document.robots_decision,
                     document.robots_checked_at,
                     document.http_status,
+                    document.http_method,
+                    _json(document.http_body),
+                    _json(document.request_headers),
                 ),
             ).fetchone()
         assert row is not None
@@ -859,6 +1189,45 @@ class ClaimsRepo:
         with self.db.connection() as conn:
             row = conn.execute(sql, params).fetchone()
         return int(row["n"]) if row else 0
+
+    def claims_hash(self, entity_id: int) -> str:
+        """Deterministic hash of the live claims for one entity.
+
+        Written to ``er_audit.claims_hash`` so a merge decision can be tied to
+        the exact evidence visible when it was taken (mirrors ``scores``).
+        """
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT predicate, value_json, unit, qualifier_json, quote, char_start,
+                       char_end, confidence, method, observed_at
+                FROM claims
+                WHERE entity_id = %s AND superseded_by IS NULL
+                ORDER BY id
+                """,
+                (entity_id,),
+            ).fetchall()
+        payload = [
+            {
+                "predicate": row["predicate"],
+                "value": row["value_json"],
+                "unit": row["unit"],
+                "qualifier": row["qualifier_json"],
+                "quote": row["quote"],
+                "char_start": row["char_start"],
+                "char_end": row["char_end"],
+                "confidence": row["confidence"],
+                "method": row["method"],
+                "observed_at": row["observed_at"].isoformat()
+                if row["observed_at"] is not None
+                else None,
+            }
+            for row in rows
+        ]
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class ProgrammesRepo:
@@ -1267,8 +1636,10 @@ class CrawlFrontierRepo:
         with self.db.connection() as conn:
             row = conn.execute(
                 """
-                INSERT INTO crawl_frontier (url, domain, priority, next_allowed_at, state)
-                VALUES (%s, %s, %s, COALESCE(%s, now()), %s)
+                INSERT INTO crawl_frontier
+                    (url, domain, priority, next_allowed_at, state, http_method, http_body,
+                     request_headers)
+                VALUES (%s, %s, %s, COALESCE(%s, now()), %s, %s, %s, %s)
                 ON CONFLICT (url) DO UPDATE SET
                     domain = EXCLUDED.domain,
                     priority = EXCLUDED.priority,
@@ -1276,10 +1647,26 @@ class CrawlFrontierRepo:
                                             EXCLUDED.next_allowed_at),
                     state = CASE WHEN crawl_frontier.state = 'done'
                                  THEN crawl_frontier.state ELSE EXCLUDED.state END,
+                    http_method = CASE
+                        WHEN EXCLUDED.http_method = 'GET' AND crawl_frontier.http_method = 'POST'
+                             AND EXCLUDED.http_body IS NULL
+                        THEN crawl_frontier.http_method ELSE EXCLUDED.http_method END,
+                    http_body = COALESCE(EXCLUDED.http_body, crawl_frontier.http_body),
+                    request_headers = COALESCE(EXCLUDED.request_headers,
+                                               crawl_frontier.request_headers),
                     updated_at = now()
                 RETURNING *
                 """,
-                (item.url, item.domain, item.priority, item.next_allowed_at, item.state),
+                (
+                    item.url,
+                    item.domain,
+                    item.priority,
+                    item.next_allowed_at,
+                    item.state,
+                    item.http_method,
+                    _json(item.http_body),
+                    _json(item.request_headers),
+                ),
             ).fetchone()
         assert row is not None
         return FrontierRecord.model_validate(row)
@@ -1576,8 +1963,25 @@ def _extraction(row: dict[str, Any]) -> ExtractionRecord:
     )
 
 
-def _claim(row: dict[str, Any]) -> ClaimRecord:
-    return ClaimRecord(
+def _er_audit(row: dict[str, Any]) -> ERAuditRecord:
+    return ERAuditRecord(
+        subject_entity_id=row["subject_entity_id"],
+        candidate_entity_id=row["candidate_entity_id"],
+        band=row["band"],
+        score=row["score"],
+        features=row["features_json"] or {},
+        thresholds_version=row["thresholds_version"],
+        model=row["model"],
+        model_verdict=row["model_verdict"],
+        model_reason=row["model_reason"],
+        decided_by=row["decided_by"],
+        claims_hash=row["claims_hash"],
+        id=row["id"],
+        created_at=row["created_at"],
+    )
+
+
+def _claim(row: dict[str, Any]) -> ClaimRecord:    return ClaimRecord(
         extraction_id=row["extraction_id"],
         entity_id=row["entity_id"],
         predicate=row["predicate"],

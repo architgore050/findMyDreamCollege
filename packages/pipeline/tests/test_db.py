@@ -70,8 +70,7 @@ def _country(database) -> None:
 def test_migrations_are_idempotent(pg_database) -> None:
     assert run_migrations(pg_database) == []
     applied = applied_migrations(pg_database)
-    assert "0001_init" in applied
-    assert len(applied) == 1
+    assert list(applied) == ["0001_init", "0002_er_audit_and_replay"]
 
 
 def test_evidence_and_claim_supersede_roundtrip(pg_database) -> None:
@@ -399,3 +398,93 @@ def test_seed_projects_registry(pg_database, registry) -> None:
     assert CountriesRepo(pg_database).get("IN") is not None
     assert SourcesRepo(pg_database).get(registry.sources.sources[0].id) is not None
     assert ExamsRepo(pg_database).get(registry.exams.exams[0].id) is not None
+
+
+def test_post_request_shape_is_replayable_on_documents_and_frontier(pg_database) -> None:
+    suffix = _suffix()
+    documents = DocumentsRepo(pg_database)
+    url = f"https://nabh.example/admin-ajax.php?t={suffix}"
+    body = {"action": "hospitals", "page": 2}
+    stored = documents.upsert(
+        DocumentUpsert(
+            url=url,
+            domain="nabh.example",
+            kind="directory",
+            http_method="POST",
+            http_body=body,
+            request_headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+    )
+    assert stored.http_method == "POST"
+    assert stored.http_body == body
+    assert stored.request_headers is not None
+    # A later conditional revalidation written as a bare GET must not erase the
+    # POST shape that makes the source replayable.
+    revalidated = documents.upsert(
+        DocumentUpsert(url=url, domain="nabh.example", http_status=304)
+    )
+    assert revalidated.http_method == "POST"
+    assert revalidated.http_body == body
+
+    frontier = CrawlFrontierRepo(pg_database)
+    record = frontier.enqueue(
+        FrontierUpsert(
+            url=f"https://nabh.example/page/{suffix}",
+            domain="nabh.example",
+            http_method="POST",
+            http_body=body,
+        )
+    )
+    assert record.http_method == "POST"
+    assert record.http_body == body
+    again = frontier.enqueue(
+        FrontierUpsert(url=record.url, domain="nabh.example")
+    )
+    assert again.http_method == "POST"
+    assert again.http_body == body
+
+
+def test_document_upsert_can_be_built_from_a_document_ref(pg_database) -> None:
+    from fmd.discover.base import DocumentRef
+
+    suffix = _suffix()
+    ref = DocumentRef(
+        url=f"https://nabh.example/admin-ajax.php?d={suffix}",
+        metadata={"request_method": "POST", "request_body": {"action": "states"}},
+    )
+    upsert = DocumentUpsert.from_document_ref(ref)
+    assert upsert.domain == "nabh.example"
+    assert upsert.http_method == "POST"
+    assert upsert.http_body == {"action": "states"}
+    saved = DocumentsRepo(pg_database).upsert(upsert)
+    assert saved.http_body == {"action": "states"}
+
+    frontier_upsert = FrontierUpsert.from_document_ref(ref)
+    assert frontier_upsert.domain == "nabh.example"
+    assert frontier_upsert.http_method == "POST"
+    frontier_record = CrawlFrontierRepo(pg_database).enqueue(frontier_upsert)
+    assert frontier_record.http_body == {"action": "states"}
+
+
+def test_alias_accepts_manual_and_evidence_span(pg_database) -> None:
+    suffix = _suffix()
+    entity = EntitiesRepo(pg_database).create(
+        EntityCreate(kind="institution", canonical_name=f"Span Institute {suffix}")
+    )
+    manual = AliasesRepo(pg_database).create(
+        AliasCreate(
+            entity_id=entity.id,
+            alias=f"Span Vishwavidyalaya {suffix}",
+            alias_type="manual",
+            span_start=4,
+            span_end=31,
+            quote=f"Span Vishwavidyalaya {suffix}",
+            confirmed_by="reviewer@example.org",
+            confirmed_at=datetime.now(UTC),
+        )
+    )
+    assert manual.alias_type == "manual"
+    assert (manual.span_start, manual.span_end) == (4, 31)
+    assert manual.confirmed_by == "reviewer@example.org"
+    listed = AliasesRepo(pg_database).list_manual_for_entity(entity.id)
+    assert [row.id for row in listed] == [manual.id]

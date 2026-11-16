@@ -34,6 +34,12 @@ profiles:
     temperature: 0
     guided_json: true
     bundle_pairs_per_call: 20
+  entity_adjudication:
+    provider: local
+    model: ${FMD_LOCAL_ADJUDICATE_MODEL:-Qwen3-14B-AWQ}
+    temperature: 0
+    guided_json: true
+    bundle_pairs_per_call: 20
   nlp_rubric:
     provider: api
     model: ${FMD_API_NLP_MODEL}

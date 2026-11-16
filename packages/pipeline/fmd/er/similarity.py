@@ -138,9 +138,7 @@ class EmbeddingScorer:
     def similarity(self, left: str, right: str) -> float | None:
         if self.backend is None:
             return None
-        digest = hashlib.sha256(
-            f"{self.backend.name}\x00{left}\x00{right}".encode()
-        ).hexdigest()
+        digest = hashlib.sha256(f"{self.backend.name}\x00{left}\x00{right}".encode()).hexdigest()
         if digest in self._cache:
             return self._cache[digest]
         try:
@@ -160,9 +158,7 @@ def _candidate_forms(
     forms: list[tuple[Alias | None, NormalisedName]] = [
         (None, normalise_name(candidate.canonical_name, lexicon))
     ]
-    forms.extend(
-        (alias, normalise_name(alias.alias, lexicon)) for alias in candidate.aliases
-    )
+    forms.extend((alias, normalise_name(alias.alias, lexicon)) for alias in candidate.aliases)
     return forms
 
 
@@ -176,14 +172,13 @@ def _acronym_match(
         return 1.0
     if mention.text == form.text:
         return 0.0  # identical names are handled by token/char similarity
-    if set(mention.acronyms) & set(form.acronyms):
-        return 1.0
     return 0.0
 
 
 def _context(
     mention: Mention,
     candidate: EntityCandidate,
+    lexicon: Lexicon,
 ) -> tuple[dict[str, float | None], dict[str, float]]:
     pairs = {
         "state": (mention.state, candidate.state),
@@ -197,9 +192,7 @@ def _context(
             matches[name] = None
             conflicts[name] = 0.0
             continue
-        equal = normalise_text(str(left), Lexicon.default()) == normalise_text(
-            str(right), Lexicon.default()
-        )
+        equal = normalise_text(str(left), lexicon) == normalise_text(str(right), lexicon)
         matches[name] = 1.0 if equal else 0.0
         conflicts[name] = 0.0 if equal else 1.0
     return matches, conflicts
@@ -250,7 +243,7 @@ def score_pair(
             best_token = tokens
             best_char = chars
 
-    matches, conflicts = _context(mention, candidate)
+    matches, conflicts = _context(mention, candidate, lex)
     embedding: float | None = None
     if embedder is not None and cfg.use_embeddings:
         embedding = embedder.similarity(mention_norm.text, best_form.text)
@@ -309,11 +302,11 @@ def score_pairs(
         )
         for candidate in candidates
     ]
-    scored.sort(key=lambda item: (-item.score, _candidate_sort_key(item.candidate)))
+    scored.sort(key=lambda item: (-item.score, candidate_sort_key(item.candidate)))
     return scored
 
 
-def _candidate_sort_key(candidate: EntityCandidate) -> tuple[int, int, str]:
+def candidate_sort_key(candidate: EntityCandidate) -> tuple[int, int, str]:
     return (
         1 if candidate.entity_id is None else 0,
         candidate.entity_id if candidate.entity_id is not None else 0,
@@ -334,6 +327,7 @@ __all__ = [
     "EmbeddingBackend",
     "EmbeddingScorer",
     "SentenceTransformerEmbedder",
+    "candidate_sort_key",
     "char_ratio",
     "cosine",
     "score_pair",

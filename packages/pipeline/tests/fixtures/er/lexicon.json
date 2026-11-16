@@ -1,0 +1,38 @@
+{
+  "abbreviations": {
+    "instt": "institute",
+    "inst": "institute",
+    "univ": "university",
+    "coll": "college",
+    "govt": "government",
+    "med": "medical",
+    "tech": "technology",
+    "sci": "science"
+  },
+  "acronyms": {
+    "aiims": "all india institute of medical sciences",
+    "kgmu": "king george's medical university",
+    "rmc": "rajendra medical college",
+    "iit": "indian institute of technology",
+    "nit": "national institute of technology"
+  },
+  "legal_phrases": [
+    "university of",
+    "college of",
+    "institute of",
+    "school of",
+    "university",
+    "college",
+    "institute",
+    "school"
+  ],
+  "stopwords": ["the", "of", "and", "for", "at", "in", "a", "an", "to", "on"],
+  "alias_markers": [
+    {"marker": "also known as", "alias_type": "former_name", "confidence": 0.8},
+    {"marker": "formerly known as", "alias_type": "former_name", "confidence": 0.85},
+    {"marker": "formerly", "alias_type": "former_name", "confidence": 0.8},
+    {"marker": "erstwhile", "alias_type": "former_name", "confidence": 0.75},
+    {"marker": "previously called", "alias_type": "former_name", "confidence": 0.75},
+    {"marker": "previously", "alias_type": "former_name", "confidence": 0.7}
+  ]
+}

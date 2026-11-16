@@ -1,9 +1,9 @@
 """Configuration and data lexicons for entity resolution.
 
 Thresholds, weights, alias markers and abbreviation lexicons are injected here —
-never baked into stage logic. A caller can build :class:`ERConfig` from a mapping
-(e.g. a future ``config/er.yaml``) or use the documented defaults for offline
-work. ``config/er.yaml`` is not part of this workstream's scope.
+never baked into stage logic. The committed defaults live in ``config/er.yaml``
+and are loaded through the registry; the in-code defaults are the offline
+fallback for tests and one-off scripts.
 """
 
 from __future__ import annotations
@@ -108,6 +108,32 @@ class Thresholds(ErConfigModel):
         return self
 
 
+Band = Literal["reject", "adjudicate", "accept"]
+
+
+class BandsConfig(ErConfigModel):
+    """The decision bands, declared in scoring order (reject → accept).
+
+    Band boundaries stay in :class:`Thresholds`; this block pins the order and
+    the comparison direction so a mistyped config fails loudly instead of
+    silently making every pair adjudicate.
+    """
+
+    order: tuple[Band, ...] = ("reject", "adjudicate", "accept")
+    accept_at_or_above: Literal["high"] = "high"
+    reject_at_or_below: Literal["low"] = "low"
+
+    @model_validator(mode="after")
+    def _ordered(self) -> BandsConfig:
+        expected = ("reject", "adjudicate", "accept")
+        if tuple(self.order) != expected:
+            raise ValueError(
+                "bands.order must be ['reject', 'adjudicate', 'accept'] (low → high), "
+                f"got {list(self.order)}"
+            )
+        return self
+
+
 class BlockingConfig(ErConfigModel):
     backend: Literal["auto", "deterministic", "duckdb", "splink"] = "auto"
     use_state_token: bool = True
@@ -134,15 +160,18 @@ class SimilarityConfig(ErConfigModel):
             "misspelling": 0.90,
         }
     )
-    state_conflict_penalty: float = 0.45
+    state_conflict_penalty: float = 0.35
     city_conflict_penalty: float = 0.80
-    pincode_conflict_penalty: float = 0.35
+    pincode_conflict_penalty: float = 0.25
     use_embeddings: bool = True
     embedding_model: str = "BAAI/bge-m3"
     embedding_weight: float = 1.0
 
     @model_validator(mode="after")
     def _weights_sum(self) -> SimilarityConfig:
+        weights = (self.token_weight, self.char_weight, self.context_weight)
+        if any(weight < 0 for weight in weights):
+            raise ValueError("token_weight, char_weight and context_weight must be >= 0")
         total = self.token_weight + self.char_weight + self.context_weight
         if abs(total - 1.0) > 1e-6:
             raise ValueError("token_weight + char_weight + context_weight must equal 1")
@@ -150,6 +179,19 @@ class SimilarityConfig(ErConfigModel):
         missing -= set(self.alias_type_weights)
         if missing:
             raise ValueError(f"alias_type_weights missing: {sorted(missing)}")
+        for alias_type, weight in self.alias_type_weights.items():
+            if weight < 0:
+                raise ValueError(f"alias_type_weights[{alias_type!r}] must be >= 0")
+        for name in (
+            "acronym_score",
+            "state_conflict_penalty",
+            "city_conflict_penalty",
+            "pincode_conflict_penalty",
+            "embedding_weight",
+        ):
+            value = getattr(self, name)
+            if value < 0:
+                raise ValueError(f"{name} must be >= 0")
         return self
 
 
@@ -173,6 +215,36 @@ class AdjudicationConfig(ErConfigModel):
         "former name or acronym of the other."
     )
 
+    @model_validator(mode="after")
+    def _sane_bundle(self) -> AdjudicationConfig:
+        if self.bundle_size < 1:
+            raise ValueError("bundle_size must be >= 1")
+        if not self.purpose.strip():
+            raise ValueError("adjudication purpose must not be blank")
+        return self
+
+
+class PriorsConfig(ErConfigModel):
+    """Placeholders for Fellegi–Sunter m/u probabilities.
+
+    v1 does not calibrate m/u (there is no labelled pair set), so
+    ``method='not_calibrated'`` and the maps are empty. The shape is fixed now so
+    enabling real priors is a config change, not a schema migration.
+    """
+
+    method: str = "not_calibrated"
+    m: dict[str, float] = Field(default_factory=dict)
+    u: dict[str, float] = Field(default_factory=dict)
+    note: str = ""
+
+    @model_validator(mode="after")
+    def _probabilities(self) -> PriorsConfig:
+        for label, values in (("m", self.m), ("u", self.u)):
+            for feature, probability in values.items():
+                if not 0.0 <= probability <= 1.0:
+                    raise ValueError(f"priors.{label}[{feature!r}] must be in [0, 1]")
+        return self
+
 
 class AliasMiningConfig(ErConfigModel):
     header_lines: int = 3
@@ -193,16 +265,35 @@ class ERConfig(ErConfigModel):
     version: str = "er-v1"
     lexicon: Lexicon = Field(default_factory=lambda: DEFAULT_LEXICON)
     thresholds: Thresholds = Field(default_factory=Thresholds)
+    bands: BandsConfig = Field(default_factory=BandsConfig)
     blocking: BlockingConfig = Field(default_factory=BlockingConfig)
     similarity: SimilarityConfig = Field(default_factory=SimilarityConfig)
     adjudication: AdjudicationConfig = Field(default_factory=AdjudicationConfig)
     alias_mining: AliasMiningConfig = Field(default_factory=AliasMiningConfig)
+    priors: PriorsConfig = Field(default_factory=PriorsConfig)
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> ERConfig:
         payload = dict(data)
         if "lexicon" in payload:
             payload["lexicon"] = Lexicon.from_mapping(payload["lexicon"])
+        # ``config/er.yaml`` groups the adjudication knobs under ``bundling`` and
+        # the per-type multipliers under ``alias_weights``. Translate those into
+        # the canonical nested fields without duplicating the model.
+        bundling = payload.pop("bundling", None)
+        if isinstance(bundling, dict):
+            payload["adjudication"] = {
+                **(payload.get("adjudication") or {}),
+                **bundling,
+            }
+        alias_weights = payload.pop("alias_weights", None)
+        if isinstance(alias_weights, dict):
+            similarity = dict(payload.get("similarity") or {})
+            similarity["alias_type_weights"] = {
+                **(similarity.get("alias_type_weights") or {}),
+                **alias_weights,
+            }
+            payload["similarity"] = similarity
         return cls.model_validate(payload)
 
     @classmethod

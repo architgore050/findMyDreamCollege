@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from fmd.er.config import ERConfig as ErConfig  # noqa: F401  (re-exported typed model)
+
 
 class ConfigModel(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
@@ -59,12 +61,47 @@ class DiscoveryParams(ConfigModel):
     ``domain_suffixes`` and ``pdf_url_patterns`` drive the Common Crawl URL-index
     sweep; ``query_templates`` drive SearXNG. Suffixes are bare eTLDs without a
     leading dot; PDF patterns are SQL ``LIKE`` patterns.
+
+    The remaining fields are the per-source parameters adapters read instead of
+    hardcoding URLs, query-parameter names or field lists (invariant 7). They are
+    optional so a source only declares the block it needs.
     """
 
     index_glob: str | None = None
     domain_suffixes: list[str] = Field(default_factory=list)
     pdf_url_patterns: list[str] = Field(default_factory=list)
     query_templates: list[str] = Field(default_factory=list)
+
+    # Listing / index pages and the API endpoints behind them.
+    api_endpoint: str | None = None
+    listing_urls: list[str] = Field(default_factory=list)
+    listing_url: str | None = None
+    ajax_url: str | None = None
+    asset_url_template: str | None = None
+    static_xlsx_url: str | None = None
+
+    # UGC JSON XHR.
+    unitype_param: str | None = None
+    unitype_ids: list[int] = Field(default_factory=list)
+    field_whitelist: list[str] = Field(default_factory=list)
+
+    # Listing filters (regex). Anchors are kept only when both match.
+    pdf_href_pattern: str | None = None
+    link_text_pattern: str | None = None
+    report_link_pattern: str | None = None
+    date_pattern: str | None = None
+
+    # NABH admin-ajax request shape.
+    action_hospitals: str | None = None
+    action_states: str | None = None
+    state_param: str | None = None
+    page_param: str | None = None
+    request_method: str | None = None
+    states: list[str] = Field(default_factory=list)
+    max_pages: int | None = None
+
+    # AISHE is disabled until a human confirms the static asset path.
+    verified: bool = False
 
     @field_validator("domain_suffixes")
     @classmethod
@@ -111,12 +148,40 @@ class Source(ConfigModel):
     seeds: list[str] = Field(default_factory=list)
     params: DiscoveryParams | None = None
 
+    # Audit fields for source-level traps (spec §3, §4).
+    pii_fields: list[str] = Field(default_factory=list)
+    verify_first: bool = False
+    abstain: bool = False
+    scanned: bool = False
+    level: int | None = None
+
     @field_validator("id", "name", "kind", "format", "adapter")
     @classmethod
     def _not_blank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
             raise ValueError("must not be blank")
         return value
+
+    @field_validator("pii_fields")
+    @classmethod
+    def _pii_fields_not_blank(cls, values: list[str]) -> list[str]:
+        if any(not value.strip() for value in values):
+            raise ValueError("must not contain a blank field name")
+        return values
+
+
+class DenylistedDomain(ConfigModel):
+    """A host that must never originate a recognition claim (spec §4.2.2)."""
+
+    domain: str
+    reason: str
+
+    @field_validator("domain", "reason")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value.strip().lower() if value is not None else value
 
 
 class SourceExclusion(ConfigModel):
@@ -128,6 +193,7 @@ class SourceExclusion(ConfigModel):
 class SourcesConfig(ConfigModel):
     sources: list[Source] = Field(default_factory=list)
     exclusions: list[SourceExclusion] = Field(default_factory=list)
+    denylisted_domains: list[DenylistedDomain] = Field(default_factory=list)
 
     @property
     def enabled(self) -> list[Source]:
@@ -135,6 +201,9 @@ class SourcesConfig(ConfigModel):
 
     def by_id(self, source_id: str) -> Source | None:
         return next((s for s in self.sources if s.id == source_id), None)
+
+    def denied_domains(self) -> list[str]:
+        return [entry.domain for entry in self.denylisted_domains]
 
 
 # --------------------------------------------------------------------------- weights
