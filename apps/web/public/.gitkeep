@@ -1,0 +1,2 @@
+# Required by the Dockerfile's `COPY --from=build /app/public ./public`.
+# Keep this directory present even when there are no static assets.

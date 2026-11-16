@@ -43,7 +43,7 @@ dev: ## local dev (uvicorn + next dev, no docker for the apps)
 
 test: ## unit + integration, mock provider, no network
 	cd packages/pipeline && uv run pytest -q
-	cd apps/web && pnpm test --run
+	cd apps/web && pnpm test
 
 lint: ## ruff + eslint
 	cd packages/pipeline && uv run ruff check . && uv run ruff format --check .

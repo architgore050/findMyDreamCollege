@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@layer base {
+  html {
+    font-size: 15px;
+  }
+
+  body {
+    font-family: var(--font-sans);
+  }
+
+  :focus-visible {
+    outline: 2px solid #1d4ed8;
+    outline-offset: 2px;
+  }
+
+  input,
+  select,
+  textarea {
+    @apply rounded border border-stone-300 bg-white px-2 py-1 text-sm text-stone-900;
+  }
+
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    @apply border-blue-700;
+  }
+
+  table {
+    @apply w-full border-collapse text-left text-xs;
+  }
+
+  th {
+    @apply border-b border-stone-300 px-2 py-1.5 font-semibold text-stone-700;
+  }
+
+  td {
+    @apply border-b border-stone-200 px-2 py-1.5 align-top;
+  }
+
+  summary {
+    @apply cursor-pointer;
+  }
+}
+
+@layer components {
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .panel {
+    @apply rounded border border-stone-300 bg-white;
+  }
+
+  .panel-head {
+    @apply flex flex-wrap items-baseline justify-between gap-2 border-b border-stone-200 px-3 py-2;
+  }
+
+  .kicker {
+    @apply text-[11px] font-semibold uppercase tracking-wide text-stone-500;
+  }
+
+  .link {
+    @apply text-blue-800 underline decoration-blue-300 underline-offset-2 hover:decoration-blue-800;
+  }
+
+  .btn {
+    @apply inline-flex min-h-9 items-center justify-center gap-1.5 rounded border border-stone-400 bg-white px-3 py-1.5 text-sm font-medium text-stone-900 hover:bg-stone-100;
+  }
+
+  .btn-primary {
+    @apply border-stone-900 bg-stone-900 text-white hover:bg-stone-700;
+  }
+}
