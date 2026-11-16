@@ -1,8 +1,6 @@
 import Link from "next/link";
 
-import { ApiFailurePanel, EmptyPanel } from "@/components/api-state";
-import { HardFilterRow, type FilterState } from "@/components/hard-filter";
-import { apiProgrammes, isOk } from "@/lib/api";
+import { ExclusionsClient } from "@/components/exclusions-client";
 
 export const dynamic = "force-dynamic";
 
@@ -27,10 +25,7 @@ const FILTERS = [
   { name: "budget_ceiling", rule: "fail only when the TCOA lower bound exceeds the ceiling" },
 ] as const;
 
-export default async function ExclusionsPage() {
-  const programmes = await apiProgrammes({ limit: 1 });
-  const exclusions = isOk(programmes) ? programmes.data.exclusions : undefined;
-
+export default function ExclusionsPage() {
   return (
     <div className="space-y-5">
       <header className="space-y-2">
@@ -38,50 +33,12 @@ export default async function ExclusionsPage() {
         <h1 className="text-2xl font-bold tracking-tight">Exclusions</h1>
         <p className="max-w-3xl text-sm text-stone-700">
           A programme disappears from the shortlist only because a hard filter failed. Every
-          exclusion must name the filter and the claim that decided it. Unknown is not silently
-          treated as pass, and nothing is excluded for a low score.
+          exclusion names the filter and, where one exists, the claim that decided it. Unknown is
+          not silently treated as pass, and nothing is excluded for a low score.
         </p>
       </header>
 
-      {!isOk(programmes) ? <ApiFailurePanel result={programmes} /> : null}
-
-      <section className="panel" aria-labelledby="histogram-title">
-        <div className="panel-head">
-          <h2 id="histogram-title" className="text-sm font-bold">
-            Exclusion histogram
-          </h2>
-          <span className="rounded border border-amber-700 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-950">
-            not published
-          </span>
-        </div>
-        <div className="space-y-2 px-3 py-3 text-sm text-stone-800">
-          <p>
-            The API reports{" "}
-            <code className="num">
-              exclusions:{" "}
-              {exclusions
-                ? JSON.stringify({ available: exclusions.available, owner: exclusions.owner })
-                : "unavailable"}
-            </code>
-            . No programme has a published exclusion decision yet, so this page cannot name a count,
-            a reason histogram or a deciding claim.
-          </p>
-          <p className="text-xs text-stone-600">
-            N programmes excluded: <strong>not reported</strong>. That is an evidence gap, not zero
-            exclusions. Ownership: {exclusions?.owner ?? "WS-F"}.
-          </p>
-          <p className="text-xs">
-            <Link className="link" href="/shortlist">
-              Return to the unranked inventory
-            </Link>{" "}
-            or{" "}
-            <Link className="link" href="/sources">
-              inspect source coverage
-            </Link>
-            .
-          </p>
-        </div>
-      </section>
+      <ExclusionsClient />
 
       <section className="space-y-2" aria-labelledby="filter-catalogue-title">
         <div>
@@ -89,44 +46,42 @@ export default async function ExclusionsPage() {
             Filter catalogue
           </h2>
           <p className="text-xs text-stone-600">
-            All eight cutoffs, in evaluation order. Current state is unknown for every programme
-            because WS-F has not published filter decisions.
+            All eight cutoffs, in evaluation order. The counts above come from the current run
+            against the profile stored in this browser.
           </p>
         </div>
         <div className="panel overflow-x-auto">
           <table>
-            <caption className="sr-only">
-              Hard filter catalogue and current evaluation state
-            </caption>
+            <caption className="sr-only">Hard filter catalogue and deciding rule</caption>
             <thead>
               <tr>
                 <th scope="col">Filter</th>
-                <th scope="col">State</th>
                 <th scope="col">Deciding rule</th>
               </tr>
             </thead>
             <tbody>
               {FILTERS.map((filter) => (
-                <HardFilterRow
-                  key={filter.name}
-                  name={filter.name}
-                  state={"unknown" as FilterState}
-                  reason={`${filter.rule}. No deciding claim has been published.`}
-                />
+                <tr key={filter.name}>
+                  <th scope="row" className="font-mono text-[11px] font-normal text-stone-700">
+                    {filter.name}
+                  </th>
+                  <td>{filter.rule}</td>
+                </tr>
               ))}
             </tbody>
           </table>
         </div>
+        <p className="text-xs">
+          <Link className="link" href="/shortlist">
+            Return to the ranked shortlist
+          </Link>{" "}
+          or{" "}
+          <Link className="link" href="/sources">
+            inspect source coverage
+          </Link>
+          .
+        </p>
       </section>
-
-      {isOk(programmes) && programmes.data.items.length === 0 ? (
-        <EmptyPanel title="No programmes in the database">
-          <p>
-            Exclusions require an inventory to exclude from. Run{" "}
-            <code className="num">make seed</code> and the inventory adapters first.
-          </p>
-        </EmptyPanel>
-      ) : null}
     </div>
   );
 }

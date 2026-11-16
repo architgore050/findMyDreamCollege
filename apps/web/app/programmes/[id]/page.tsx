@@ -3,7 +3,7 @@ import Link from "next/link";
 import { ApiFailurePanel, EmptyPanel, EnvelopeStamp } from "@/components/api-state";
 import { EvidenceTierBadge } from "@/components/badges";
 import { ClaimValue } from "@/components/claim-value";
-import { CostScenarios } from "@/components/cost-scenarios";
+import { CostPanel } from "@/components/cost-panel";
 import { EvidenceTabs } from "@/components/evidence-tabs";
 import { HardFilterRow, type FilterState } from "@/components/hard-filter";
 import { ScoreBand } from "@/components/score-band";
@@ -263,7 +263,7 @@ export default async function ProgrammePage({ params }: { params: Promise<{ id: 
                   key={filter}
                   name={filter}
                   state={"unknown" as FilterState}
-                  reason="No filter decision has been published for this programme by WS-F (brief §12). Unknown is not pass."
+                  reason="Filter outcomes depend on a profile. This record view carries no profile, so the state is UNKNOWN here; the ranked shortlist and exclusions screens publish the decided outcomes. Unknown is not pass."
                 />
               ))}
             </tbody>
@@ -277,21 +277,12 @@ export default async function ProgrammePage({ params }: { params: Promise<{ id: 
             Cost scenarios
           </h2>
           <p className="text-xs text-stone-600">
-            Hostel and independent are complete alternatives. They are shown side by side and never
-            added together.
+            Hostel and independent are complete alternatives, returned together and never added
+            together. Published components carry their method; modelled or assumed values are
+            labelled as such.
           </p>
         </div>
-        {!isOk(cost) ? <ApiFailurePanel result={cost} /> : null}
-        {data.costs.length === 0 ? (
-          <EmptyPanel title="No cost items published">
-            <p>
-              No tuition, hostel, mess, rent, food, utilities or transport cost item exists for this
-              programme. Nothing has been estimated to fill the gap.
-            </p>
-          </EmptyPanel>
-        ) : (
-          <CostScenarios items={data.costs} />
-        )}
+        {isOk(cost) ? <CostPanel cost={cost.data} /> : <ApiFailurePanel result={cost} />}
       </section>
 
       <section className="space-y-2" aria-labelledby="subscores-title">
@@ -307,8 +298,8 @@ export default async function ProgrammePage({ params }: { params: Promise<{ id: 
         {subScores.length === 0 ? (
           <EmptyPanel title="No sub-scores computed">
             <p>
-              No score row with sub-scores exists for this institution. The weighted breakdown will
-              appear once WS-F publishes the scoring run and its evidence versions.
+              No score row with sub-scores exists for this institution yet. The weighted breakdown
+              appears after a scoring run; a missing breakdown is not a zero score.
             </p>
           </EmptyPanel>
         ) : (

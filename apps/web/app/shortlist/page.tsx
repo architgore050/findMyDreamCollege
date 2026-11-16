@@ -1,8 +1,8 @@
 import Link from "next/link";
 
 import { ApiFailurePanel, EmptyPanel } from "@/components/api-state";
-import { ProfileSummary } from "@/components/profile-summary";
-import { apiProgrammes, apiRankings, isOk } from "@/lib/api";
+import { ShortlistClient } from "@/components/shortlist-client";
+import { apiProgrammes, isOk } from "@/lib/api";
 import { formatNumber } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -12,10 +12,9 @@ export const metadata = {
 };
 
 export default async function ShortlistPage() {
-  // The profile never leaves the browser: the endpoint is probed with an empty
-  // profile to report availability, while ranking inputs are supplied later by
-  // the client once WS-F ships `/api/rankings`.
-  const [rankings, programmes] = await Promise.all([apiRankings({}), apiProgrammes({ limit: 25 })]);
+  // Server-rendered inventory only. The profile never reaches this server: the
+  // ranked shortlist is fetched by the client from the browser-stored profile.
+  const programmes = await apiProgrammes({ limit: 25 });
 
   return (
     <div className="space-y-5">
@@ -24,35 +23,21 @@ export default async function ShortlistPage() {
         <h1 className="text-2xl font-bold tracking-tight">Shortlist</h1>
         <p className="max-w-3xl text-sm text-stone-700">
           A programme appears here only after hard filters pass. Composite scores are bands, never
-          decimals, and every published number links to the claim that proves it.
+          decimals, and every published number links to the claim that proves it. No programme is
+          described as the “best”: dominance is pairwise, and only on known evidence.
         </p>
       </header>
 
-      <ProfileSummary />
-
-      {isOk(rankings) ? (
-        <section className="panel px-3 py-3" aria-labelledby="rankings-ok-title">
-          <h2 id="rankings-ok-title" className="text-sm font-bold">
-            Ranking endpoint responded
-          </h2>
-          <p className="mt-1 text-xs text-stone-700">
-            The API returned a ranked payload, but this build only renders the documented programme
-            records below. Ranked card fields (dominance, DSR₂₅, insight sets) are not interpreted
-            here until the payload contract is frozen by WS-F.
-          </p>
-        </section>
-      ) : (
-        <ApiFailurePanel result={rankings} />
-      )}
+      <ShortlistClient />
 
       <section className="space-y-2" aria-labelledby="inventory-title">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
             <h2 id="inventory-title" className="text-lg font-bold">
-              Unranked inventory
+              Inventory (unranked)
             </h2>
             <p className="text-xs text-stone-600">
-              Database order, not a ranking. No programme here has been scored or filtered yet.
+              Database order, not the ranking above. Ids here are the ones the compare form takes.
             </p>
           </div>
           <Link className="link text-xs" href="/sources">

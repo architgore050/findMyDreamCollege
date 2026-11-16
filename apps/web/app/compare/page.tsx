@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { ApiFailurePanel, EmptyPanel } from "@/components/api-state";
 import { CompareForm } from "@/components/compare-form";
+import { CompareMatrix } from "@/components/compare-matrix";
 import { ScoreBand } from "@/components/score-band";
 import { apiCompare, apiProgramme, isOk, type ApiResult } from "@/lib/api";
 import type { ProgrammeDetail } from "@/lib/types";
@@ -31,9 +32,14 @@ export default async function ComparePage({
   const initialIds = ids.join(", ");
 
   const [compare, details] = await Promise.all([
-    ids.length > 0 ? apiCompare(ids) : Promise.resolve(null),
+    ids.length >= 2 ? apiCompare(ids) : Promise.resolve(null),
     Promise.all(ids.map((id) => apiProgramme(id))),
   ]);
+
+  const names: Record<number, string> = {};
+  details.forEach((detail) => {
+    if (isOk(detail)) names[detail.data.programme.id] = detail.data.programme.name;
+  });
 
   return (
     <div className="space-y-5">
@@ -61,48 +67,55 @@ export default async function ComparePage({
         </EmptyPanel>
       ) : null}
 
-      {compare ? (
-        <>
-          <section className="space-y-2" aria-labelledby="pareto-title">
-            <div>
-              <h2 id="pareto-title" className="text-lg font-bold">
-                Pareto matrix
-              </h2>
-              <p className="text-xs text-stone-600">
-                Dominance, differing claims and confidence are computed by the API. No local
-                substitute is fabricated when the endpoint is absent.
-              </p>
-            </div>
-            {!isOk(compare) ? (
-              <ApiFailurePanel result={compare} />
-            ) : (
-              <p className="panel px-3 py-3 text-sm text-stone-700">
-                The compare endpoint responded successfully, but this build does not interpret its
-                payload until the WS-F response contract is frozen. No dominance claim is rendered.
-              </p>
-            )}
-          </section>
+      {ids.length === 1 ? (
+        <EmptyPanel title="One programme is not a comparison" showSourcesLink={false}>
+          <p>
+            Pareto dominance compares pairs. Add a second id above; a single programme has no
+            relation to publish.
+          </p>
+        </EmptyPanel>
+      ) : null}
 
-          <section className="space-y-2" aria-labelledby="side-by-side-title">
-            <div>
-              <h2 id="side-by-side-title" className="text-lg font-bold">
-                Stored records, side by side
-              </h2>
-              <p className="text-xs text-stone-600">
-                These are programme fields and evidence volumes, not scores. “unknown” is a value.
-              </p>
-            </div>
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {details.map((detail, index) => (
-                <ComparisonCard
-                  key={ids[index] ?? index}
-                  programmeId={ids[index] ?? 0}
-                  result={detail}
-                />
-              ))}
-            </div>
-          </section>
-        </>
+      {compare ? (
+        <section className="space-y-2" aria-labelledby="pareto-title">
+          <div>
+            <h2 id="pareto-title" className="text-lg font-bold">
+              Pareto matrix
+            </h2>
+            <p className="text-xs text-stone-600">
+              Dominance, differing claims and confidence are computed by the API. Pairs with an
+              UNKNOWN dimension are not comparable, and that is shown as a failure to rank, not as a
+              tie.
+            </p>
+          </div>
+          {!isOk(compare) ? (
+            <ApiFailurePanel result={compare} />
+          ) : (
+            <CompareMatrix payload={compare.data} names={names} />
+          )}
+        </section>
+      ) : null}
+
+      {ids.length > 0 ? (
+        <section className="space-y-2" aria-labelledby="side-by-side-title">
+          <div>
+            <h2 id="side-by-side-title" className="text-lg font-bold">
+              Stored records, side by side
+            </h2>
+            <p className="text-xs text-stone-600">
+              These are programme fields and evidence volumes, not scores. “unknown” is a value.
+            </p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {details.map((detail, index) => (
+              <ComparisonCard
+                key={ids[index] ?? index}
+                programmeId={ids[index] ?? 0}
+                result={detail}
+              />
+            ))}
+          </div>
+        </section>
       ) : null}
     </div>
   );
@@ -200,9 +213,9 @@ function ComparisonCard({
             </tr>
           </tbody>
         </table>
-        <p className="mt-2 text-[11px] text-amber-950">
-          Not comparable on current evidence: Pareto dominance is computed by WS-F and is not
-          available. No band overlap across cards implies a winner.
+        <p className="mt-2 text-[11px] text-stone-600">
+          Card values are record fields, not a ranking. Overlapping bands across cards do not imply
+          a winner; only the Pareto matrix above publishes dominance.
         </p>
       </div>
     </section>

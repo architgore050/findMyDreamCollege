@@ -1,9 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
 
-import { parseStoredProfile, PROFILE_STORAGE_KEY, type Profile } from "@/lib/types";
+import type { Profile } from "@/lib/types";
 
 function summarise(profile: Profile): string[] {
   const rows: string[] = [];
@@ -22,16 +21,10 @@ function summarise(profile: Profile): string[] {
 }
 
 /**
- * The profile lives only in localStorage (brief §2). This component is the only
- * place a screen reads it, and it never sends it to the Next.js server.
+ * Renders the profile the caller read from localStorage. Purely presentational:
+ * it receives the value and never re-reads or transmits it.
  */
-export function ProfileSummary() {
-  const [profile, setProfile] = useState<Profile | null>(null);
-
-  useEffect(() => {
-    setProfile(parseStoredProfile(window.localStorage.getItem(PROFILE_STORAGE_KEY)));
-  }, []);
-
+export function ProfileSummary({ profile }: { profile: Profile | null }) {
   if (profile === null) {
     return <p className="text-xs text-stone-600">Reading profile from this browser…</p>;
   }
@@ -40,12 +33,12 @@ export function ProfileSummary() {
   if (answered.length === 0) {
     return (
       <div className="rounded border border-dashed border-stone-400 bg-white px-3 py-2 text-xs text-stone-700">
-        <strong>No profile saved in this browser.</strong> Ranking needs at least a target intake
-        year and field.{" "}
+        <strong>No profile saved in this browser.</strong> Ranking still runs, but almost every
+        input is UNKNOWN and the bands widen accordingly. Nothing has been assumed on your behalf.{" "}
         <Link className="link" href="/">
           Fill in the profile
         </Link>
-        . Nothing has been assumed on your behalf.
+        .
       </div>
     );
   }

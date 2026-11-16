@@ -4,9 +4,16 @@ import {
   apiErrorSchema,
   apiMetaSchema,
   claimEvidencePageSchema,
+  comparePayloadSchema,
+  costPayloadSchema,
+  examWindowsPayloadSchema,
+  exclusionsPayloadSchema,
   healthSchema,
   programmeDetailSchema,
   programmeListSchema,
+  profileRequestSchema,
+  rankingsPayloadSchema,
+  rankingsRequestSchema,
   sourcesPayloadSchema,
   type ApiMeta,
   type Profile,
@@ -68,6 +75,8 @@ interface RequestOptions {
   signal?: AbortSignal;
   method?: "GET" | "POST";
   body?: unknown;
+  /** Validated before the request leaves the browser (strictly no `any`). */
+  bodySchema?: ZodSchema<unknown>;
 }
 
 function readMeta(body: unknown): ApiMeta | null {
@@ -140,6 +149,24 @@ async function request<T>(
 ): Promise<ApiResult<T>> {
   const endpoint = path.split("?")[0] ?? path;
   const fetchImpl = options.fetchImpl ?? fetch;
+
+  if (options.bodySchema !== undefined) {
+    const checked = options.bodySchema.safeParse(options.body);
+    if (!checked.success) {
+      return {
+        state: "error",
+        endpoint,
+        code: "invalid_request",
+        message: `Refusing to send a request that fails its schema: ${checked.error.issues
+          .slice(0, 3)
+          .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
+          .join("; ")}`,
+        status: 0,
+        meta: null,
+      };
+    }
+  }
+
   let response: Response;
   try {
     response = await fetchImpl(`${apiBaseUrl()}${path}`, {
@@ -269,7 +296,7 @@ export function apiProgrammeEvidence(
   );
 }
 
-/** WS-F (brief §13). Returns not_implemented until the cost model lands. */
+/** WS-F (brief §13). Both living scenarios arrive in one non-additive payload. */
 export function apiProgrammeCost(
   programmeId: number,
   living: "hostel" | "independent",
@@ -277,32 +304,51 @@ export function apiProgrammeCost(
 ) {
   return request(
     `/api/programmes/${programmeId}/cost${queryString({ living })}`,
-    unknownPayloadSchema,
+    costPayloadSchema,
     options,
   );
 }
 
-/** WS-F (brief §11). Ranked + dominance + confidence + insights. */
+/**
+ * WS-F (brief §11). The profile travels in the JSON body only: never in a URL,
+ * never in a log line, never persisted by this client or the API.
+ */
 export function apiRankings(profile: Profile, options?: RequestOptions) {
-  return request(
-    `/api/rankings${queryString({ profile: JSON.stringify(profile) })}`,
-    unknownPayloadSchema,
-    options,
-  );
+  return request("/api/rankings", rankingsPayloadSchema, {
+    ...options,
+    method: "POST",
+    body: { profile },
+    bodySchema: rankingsRequestSchema,
+  });
 }
 
-/** WS-F (brief §11). Pareto matrix + differing claims. */
+/** WS-F (brief §11). Pareto matrix + differing claims + not_comparable pairs. */
 export function apiCompare(ids: number[], options?: RequestOptions) {
   return request(
     `/api/compare${queryString({ ids: ids.join(",") })}`,
-    unknownPayloadSchema,
+    comparePayloadSchema,
     options,
   );
 }
 
-/** WS-F (brief §12.5). */
-export function apiExams(options?: RequestOptions) {
-  return request("/api/exams", unknownPayloadSchema, options);
+/** WS-F (brief §12.5). Profile in the body so travel preference can cut exams. */
+export function apiExams(profile: Profile, options?: RequestOptions) {
+  return request("/api/exams", examWindowsPayloadSchema, {
+    ...options,
+    method: "POST",
+    body: { profile },
+    bodySchema: profileRequestSchema,
+  });
+}
+
+/** WS-F (brief §12). Histogram + per-programme deciding claim; profile in body. */
+export function apiExclusions(profile: Profile, options?: RequestOptions) {
+  return request("/api/exclusions", exclusionsPayloadSchema, {
+    ...options,
+    method: "POST",
+    body: { profile },
+    bodySchema: profileRequestSchema,
+  });
 }
 
 /** WS-G (brief §18.7). Queue is served by the API workstream, not the browser. */

@@ -204,6 +204,19 @@ export type ClaimEvidencePage = z.infer<typeof claimEvidencePageSchema>;
 export const evidenceTierSchema = z.enum(["well_evidenced", "partial", "thin", "insufficient"]);
 export type EvidenceTier = z.infer<typeof evidenceTierSchema>;
 
+export const componentScoreSchema = z.object({
+  name: z.string(),
+  label: z.string(),
+  value: z.unknown(),
+  score: z.number(),
+  lo: z.number(),
+  hi: z.number(),
+  method: z.string(),
+  claim_id: z.union([z.number(), z.string()]).nullable().optional(),
+  source_id: z.union([z.number(), z.string()]).nullable().optional(),
+});
+export type ComponentScore = z.infer<typeof componentScoreSchema>;
+
 export const subScoreSchema = z.object({
   point: z.number().nullable().optional(),
   lo: z.number().nullable().optional(),
@@ -211,8 +224,104 @@ export const subScoreSchema = z.object({
   n_claims: z.number().nullable().optional(),
   n_sources: z.number().nullable().optional(),
   evidence_tier: evidenceTierSchema.optional(),
+  measured: z.number().nullable().optional(),
+  prior_adjusted: z.number().nullable().optional(),
+  components: z.array(componentScoreSchema).optional(),
+  unknown_reason: z.string().nullable().optional(),
+  modelled_share: z.number().optional(),
+  widened: z.boolean().optional(),
+  shrinkage_inactive: z.boolean().optional(),
 });
 export type SubScore = z.infer<typeof subScoreSchema>;
+
+export const compositeSchema = z.object({
+  point: z.number().nullable(),
+  lo: z.number(),
+  hi: z.number(),
+  bound: z.string(),
+  lo_independent: z.number().optional(),
+  hi_independent: z.number().optional(),
+  lo_comonotonic: z.number().optional(),
+  hi_comonotonic: z.number().optional(),
+  evidence_tier: evidenceTierSchema.optional(),
+  known_weight: z.number().optional(),
+  total_weight: z.number().optional(),
+  unknown_sub_scores: z.array(z.string()).optional(),
+});
+export type Composite = z.infer<typeof compositeSchema>;
+
+/** `/api/rankings` composite band. A band, never a decimal rank (brief §11). */
+export const compositeBandSchema = z.object({
+  point: z.number().nullable(),
+  lo: z.number(),
+  hi: z.number(),
+  method: z.string(),
+  bound: z.string(),
+});
+export type CompositeBand = z.infer<typeof compositeBandSchema>;
+
+export const filterResultSchema = z.enum(["pass", "fail", "unknown"]);
+export type FilterResult = z.infer<typeof filterResultSchema>;
+
+export const filterDecisionSchema = z.object({
+  filter_id: z.string(),
+  result: filterResultSchema,
+  claim_id: z.union([z.number(), z.string()]).nullable(),
+  reason: z.string(),
+  observed_at: z.string().nullable().optional(),
+  stale: z.boolean().optional(),
+  detail: z.record(z.string(), z.unknown()).optional(),
+});
+export type FilterDecision = z.infer<typeof filterDecisionSchema>;
+
+export const filterSummarySchema = z.object({
+  order: z.array(z.string()),
+  counts: z.object({
+    pass: z.number(),
+    fail: z.number(),
+    unknown: z.number(),
+  }),
+  excluded: z.array(z.string()),
+  unverified: z.array(z.string()),
+  decisions: z.record(z.string(), filterDecisionSchema),
+});
+export type FilterSummary = z.infer<typeof filterSummarySchema>;
+
+export const insightSchema = z.object({
+  id: z.string(),
+  predicate: z.string(),
+  text: z.string(),
+  coverage: z.array(z.string()),
+  claim_ids: z.array(z.union([z.number(), z.string()])),
+  kind: z.string(),
+  detail: z.record(z.string(), z.unknown()),
+});
+export type Insight = z.infer<typeof insightSchema>;
+
+export const insightSelectionSchema = z.object({
+  selected: z.array(insightSchema),
+  mandatory: z.array(insightSchema),
+  coverage: z.number(),
+  covered_units: z.array(z.string()),
+  uncovered_units: z.array(z.string()),
+  stopped_reason: z.string(),
+});
+export type InsightSelection = z.infer<typeof insightSelectionSchema>;
+
+export const scoreResultSchema = z.object({
+  entity_id: z.number().nullable(),
+  scorer_version: z.string(),
+  weights_version: z.string(),
+  claims_hash: z.string(),
+  sub_scores: z.record(z.string(), subScoreSchema),
+  composite: compositeSchema,
+  evidence_tier: evidenceTierSchema,
+  computed_at: z.string(),
+  insights: insightSelectionSchema.nullable().optional(),
+  gaming_flags: z.array(z.record(z.string(), z.unknown())).optional(),
+  assumptions: z.array(z.string()).optional(),
+});
+export type ScoreResult = z.infer<typeof scoreResultSchema>;
 
 export const scoreSchema = z.object({
   id: z.number(),
@@ -229,10 +338,88 @@ export const scoreSchema = z.object({
 });
 export type Score = z.infer<typeof scoreSchema>;
 
+// --------------------------------------------------------------------------- cost snapshot
+
+/** `MoneyBand` from the cost model. `render()` keeps model fields only. */
+export const moneyBandSchema = z.object({
+  value: z.number().nullable(),
+  lo: z.number().nullable(),
+  hi: z.number().nullable(),
+  currency: z.string(),
+  method: z.string(),
+  assumptions: z.array(z.string()),
+});
+export type MoneyBand = z.infer<typeof moneyBandSchema>;
+
+export const livingScenarioCostSchema = z.object({
+  name: z.string(),
+  components: z.record(z.string(), moneyBandSchema),
+  annual: moneyBandSchema,
+  total: moneyBandSchema,
+  modelled: z.boolean(),
+});
+export type LivingScenarioCost = z.infer<typeof livingScenarioCostSchema>;
+
+export const dsr25Schema = z.object({
+  value: z.number().nullable(),
+  band: z.string(),
+  formula: z.string(),
+  first_year_emi: z.number().nullable(),
+  p25_first_year_salary: z.number().nullable(),
+  bands: z.record(z.string(), z.record(z.string(), z.number())),
+  inputs: z.record(z.string(), z.unknown()).optional(),
+});
+export type DSR25 = z.infer<typeof dsr25Schema>;
+
+export const affordabilitySchema = z.object({
+  value: z.number().nullable(),
+  flagged: z.boolean().nullable(),
+  flag_above: z.number(),
+  formula: z.string(),
+  family_out_of_pocket: z.number(),
+  annual_family_income: z.number().nullable(),
+});
+export type Affordability = z.infer<typeof affordabilitySchema>;
+
+/**
+ * `/api/programmes/{id}/cost`. Both living scenarios are returned in one
+ * payload and are complete alternatives: never summed (brief §13).
+ */
+export const costPayloadSchema = z.object({
+  programme_id: z.number(),
+  living: z.enum(["hostel", "independent"]),
+  available: z.boolean(),
+  reason: z.string().optional(),
+  note: z.string().optional(),
+  non_additive_scenarios: z.boolean().optional(),
+  /** True flags for values the model assumed rather than extracted. */
+  assumed: z.record(z.string(), z.unknown()).optional(),
+  currency: z.string().optional(),
+  duration_months: z.number().optional(),
+  scenarios: z.record(z.string(), livingScenarioCostSchema).default({}),
+  tcoa: moneyBandSchema.optional(),
+  tcoa_first_year: moneyBandSchema.optional(),
+  net_price: moneyBandSchema.optional(),
+  aid_total: moneyBandSchema.optional(),
+  loan_principal: moneyBandSchema.optional(),
+  family_out_of_pocket: moneyBandSchema.optional(),
+  student_work_offset: moneyBandSchema.optional(),
+  debt_at_repayment: moneyBandSchema.optional(),
+  emi: moneyBandSchema.optional(),
+  dsr25: dsr25Schema.optional(),
+  affordability_gap: affordabilitySchema.optional(),
+  fx_band_pct: z.number().optional(),
+  bands: z.record(z.string(), z.record(z.string(), z.number())).optional(),
+  methods: z.record(z.string(), z.string()).optional(),
+  assumptions: z.array(z.string()).optional(),
+  assumptions_flags: z.record(z.string(), z.unknown()).optional(),
+  display: z.record(z.string(), z.unknown()).optional(),
+});
+export type CostPayload = z.infer<typeof costPayloadSchema>;
+
 // --------------------------------------------------------------------------- costs
 
 export const costCategorySchema = z.enum([
-  "tuition",
   "hostel",
   "mess",
   "rent",
@@ -359,6 +546,121 @@ export const programmeDetailSchema = z.object({
   score: scoreSchema.nullable(),
 });
 export type ProgrammeDetail = z.infer<typeof programmeDetailSchema>;
+
+// --------------------------------------------------------------------------- WS-F requests
+
+/** Profile travels in the body; nothing else identifies the user. */
+export const profileRequestSchema = z.object({
+  profile: profileSchema,
+  limit: z.number().int().min(1).max(500).optional(),
+});
+export type ProfileRequest = z.infer<typeof profileRequestSchema>;
+
+export const rankingsRequestSchema = z.object({
+  profile: profileSchema,
+  limit: z.number().int().min(1).max(500).optional(),
+});
+export type RankingsRequest = z.infer<typeof rankingsRequestSchema>;
+
+// --------------------------------------------------------------------------- WS-F payloads
+
+export const rankingRowSchema = z.object({
+  programme: programmeSchema,
+  score: scoreResultSchema,
+  composite_band: compositeBandSchema,
+  evidence_tier: evidenceTierSchema,
+  filters: filterSummarySchema,
+  excluded: z.boolean(),
+  insights: insightSelectionSchema.nullable(),
+  cost: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+export type RankingRow = z.infer<typeof rankingRowSchema>;
+
+export const rankingsPayloadSchema = z.object({
+  items: z.array(rankingRowSchema),
+  total: z.number(),
+  weights: z.record(z.string(), z.number()),
+  profile_persisted: z.boolean(),
+});
+export type RankingsPayload = z.infer<typeof rankingsPayloadSchema>;
+
+export const examStatusSchema = z.enum(["open", "closed", "unverified"]);
+export type ExamStatus = z.infer<typeof examStatusSchema>;
+
+export const examWindowSchema = z.object({
+  exam_id: z.string(),
+  name: z.string(),
+  country: z.string(),
+  status: examStatusSchema,
+  observed_at: z.string().nullable(),
+  stale: z.boolean(),
+  ttl_days: z.number(),
+  requires_travel: z.boolean(),
+  remote_options: z.boolean(),
+  travel_blocked: z.boolean(),
+  deciding_claim_id: z.union([z.number(), z.string()]).nullable(),
+  reason: z.string(),
+});
+export type ExamWindow = z.infer<typeof examWindowSchema>;
+
+export const examWindowsPayloadSchema = z.object({
+  items: z.array(examWindowSchema),
+  counts: z.object({
+    open: z.number(),
+    closed: z.number(),
+    unverified: z.number(),
+  }),
+  profile_persisted: z.boolean(),
+});
+export type ExamWindowsPayload = z.infer<typeof examWindowsPayloadSchema>;
+
+export const excludedProgrammeSchema = z.object({
+  programme: programmeSchema,
+  deciding_filters: z.array(filterDecisionSchema),
+  deciding_claim_ids: z.array(z.union([z.number(), z.string()])),
+});
+export type ExcludedProgramme = z.infer<typeof excludedProgrammeSchema>;
+
+export const exclusionsPayloadSchema = z.object({
+  histogram: z.record(z.string(), z.number()),
+  unknown_histogram: z.record(z.string(), z.number()),
+  excluded: z.array(excludedProgrammeSchema),
+  excluded_total: z.number(),
+  evaluated_total: z.number(),
+  profile_persisted: z.boolean(),
+});
+export type ExclusionsPayload = z.infer<typeof exclusionsPayloadSchema>;
+
+export const dominanceVerdictSchema = z.enum(["better", "worse", "not_comparable"]);
+export type DominanceVerdict = z.infer<typeof dominanceVerdictSchema>;
+
+export const paretoCellSchema = z.object({
+  undominated: z.boolean(),
+  better_than: z.array(z.string()),
+  worse_than: z.array(z.string()),
+  not_comparable: z.array(z.string()),
+});
+export type ParetoCell = z.infer<typeof paretoCellSchema>;
+
+const claimIdMapSchema = z.record(z.string(), z.array(z.union([z.number(), z.string()])));
+
+export const comparisonSchema = z.object({
+  verdict: dominanceVerdictSchema,
+  differing_sub_scores: z.array(z.string()),
+  differing_claims: z.object({
+    left: claimIdMapSchema,
+    right: claimIdMapSchema,
+  }),
+});
+export type Comparison = z.infer<typeof comparisonSchema>;
+
+export const comparePayloadSchema = z.object({
+  ids: z.array(z.number()),
+  matrix: z.record(z.string(), paretoCellSchema),
+  comparisons: z.record(z.string(), comparisonSchema),
+  not_comparable_pairs: z.array(z.string()),
+});
+export type ComparePayload = z.infer<typeof comparePayloadSchema>;
 
 export const sourcesPayloadSchema = z.object({
   items: z.array(sourceSchema),

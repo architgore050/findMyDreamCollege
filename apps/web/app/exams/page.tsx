@@ -1,7 +1,4 @@
-import Link from "next/link";
-
-import { ApiFailurePanel, EmptyPanel } from "@/components/api-state";
-import { apiExams, isOk } from "@/lib/api";
+import { ExamsClient } from "@/components/exams-client";
 
 export const dynamic = "force-dynamic";
 
@@ -24,9 +21,7 @@ const STATES = [
   },
 ] as const;
 
-export default async function ExamsPage() {
-  const exams = await apiExams();
-
+export default function ExamsPage() {
   return (
     <div className="space-y-5">
       <header className="space-y-2">
@@ -35,18 +30,12 @@ export default async function ExamsPage() {
         <p className="max-w-3xl text-sm text-stone-700">
           Open, closed and unverified are three different states. A stale calendar is unverified,
           never “probably open”, and a travel-required exam is a hard cutoff when your profile
-          forbids travel.
+          forbids travel. Your travel preference is read from this browser and sent only in the
+          request body.
         </p>
       </header>
 
-      {isOk(exams) ? (
-        <p className="panel px-3 py-3 text-sm text-stone-700">
-          The exams endpoint responded, but this build does not interpret its payload until the WS-F
-          response contract is frozen. No exam rows are rendered.
-        </p>
-      ) : (
-        <ApiFailurePanel result={exams} />
-      )}
+      <ExamsClient />
 
       <section className="panel" aria-labelledby="exam-states-title">
         <div className="panel-head">
@@ -74,23 +63,6 @@ export default async function ExamsPage() {
           </tbody>
         </table>
       </section>
-
-      <EmptyPanel title="No exam calendar is being served">
-        <p>
-          Registration windows require an observed source claim with{" "}
-          <code className="num">observed_at</code> and a TTL. The exam registry exists in{" "}
-          <code className="num">config/exams.yaml</code>, but the API endpoint that would serve
-          per-profile open/closed status (with travel requirement) is owned by WS-F.
-        </p>
-        <p className="text-xs">
-          When it lands, this table will link each sitting to a past-paper or notice URL only where
-          the source is public.{" "}
-          <Link className="link" href="/sources">
-            Check whether an admissions source is enabled
-          </Link>
-          .
-        </p>
-      </EmptyPanel>
     </div>
   );
 }
