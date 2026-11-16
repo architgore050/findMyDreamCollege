@@ -1,0 +1,354 @@
+# Source registry. Every crawled URL must be attributable to an entry here or to a
+# query template. `adapter` maps to fmd/adapters/<adapter>.py
+#
+# kind:     inventory | regulator | quality | admissions | fees | financing | clinical | payload | institution
+# format:   html | html_paginated | pdf | pdf_scan | excel | js_dashboard | api
+# trust:    high (primary/official) | medium (aggregator) | low (self-reported promotional)
+
+sources:
+  # ---------- inventory ----------
+  - id: ugc_university_list
+    name: UGC recognised universities (filterable)
+    base_url: https://www.ugc.gov.in/universitydetails/university
+    kind: inventory
+    format: html_paginated
+    cadence_days: 30
+    trust: high
+    adapter: ugc
+    enabled: true
+    notes: Tokenised query params; 460 state / 128 deemed / 56 central / 430 private at last snapshot.
+
+  - id: ugc_consolidated_lists
+    name: UGC consolidated university PDFs
+    base_url: https://www.ugc.gov.in/oldpdf/
+    kind: inventory
+    format: pdf
+    cadence_days: 90
+    trust: high
+    adapter: ugc_pdf
+    enabled: true
+    notes: Annual snapshot; useful for diffing appearance/disappearance of institutions.
+
+  - id: aishe_reports
+    name: AISHE final reports + dashboard
+    base_url: https://aishe.gov.in/aishe-final-report
+    kind: inventory
+    format: excel
+    cadence_days: 365
+    trust: high
+    adapter: aishe
+    enabled: true
+    notes: Self-reported, voluntary, ~18-month lag. Gives discipline-level enrolment, not MLT seats.
+
+  # ---------- regulator (drives hard filters) ----------
+  - id: ncahp
+    name: National Commission for Allied and Healthcare Professions
+    base_url: https://ncahp.abdm.gov.in/
+    kind: regulator
+    format: pdf
+    cadence_days: 30
+    trust: high
+    adapter: ncahp
+    enabled: true
+    notes: Act 2021, MLS 2025 curriculum, AHP Registration Regulations 2026. Drives recognition_status.
+
+  - id: state_paramedical_councils
+    name: State allied-health / paramedical councils
+    base_url: null
+    kind: regulator
+    format: mixed_html_pdf
+    cadence_days: 90
+    trust: medium
+    adapter: state_council
+    enabled: true
+    requires_manual_review: true
+    notes: No single portal; several states have no functioning council site. 6 UTs/states had none as of Sep 2026.
+
+  # ---------- affiliating universities ----------
+  - id: state_health_universities
+    name: State health-science universities (affiliated college lists)
+    base_url: null
+    kind: inventory
+    format: mixed_html_pdf
+    cadence_days: 90
+    trust: high
+    adapter: health_university
+    enabled: true
+    seeds:
+      - https://ruhsraj.org
+      - https://wbuhs.ac.in
+      - https://www.tnmgrmu.ac.in
+      - https://bfuhs.ac.in
+      - https://www.knruhs.telangana.gov.in
+
+  # ---------- quality ----------
+  - id: naac_results
+    name: NAAC accreditation results
+    base_url: http://naac.gov.in/index.php/en/19-quick-links/62-accreditationresults
+    kind: quality
+    format: html
+    cadence_days: 30
+    trust: high
+    adapter: naac
+    enabled: true
+    notes: CGPA/grade/cycle/validity per institution. SSR/AQAR PDFs live on college sites, not here.
+
+  - id: nirf_rankings
+    name: NIRF rankings (institution-level proxy only)
+    base_url: https://www.nirfindia.org/
+    kind: quality
+    format: html
+    cadence_days: 365
+    trust: high
+    adapter: nirf
+    enabled: true
+    notes: No paramedical category. Never treat NIRF as programme-level evidence.
+
+  - id: ugc_autonomous_colleges
+    name: UGC autonomous colleges
+    base_url: https://www.ugc.gov.in/
+    kind: quality
+    format: pdf
+    cadence_days: 365
+    trust: high
+    adapter: ugc_pdf
+    enabled: true
+
+  # ---------- clinical infrastructure (training-quality proxy) ----------
+  - id: nabl_labs
+    name: NABL accredited laboratories
+    base_url: https://nablwp.qci.org.in/laboratorysearchone
+    kind: clinical
+    format: html
+    cadence_days: 30
+    trust: high
+    adapter: nabl
+    enabled: true
+    notes: Form-post search; no documented API.
+
+  - id: nabh_hospitals
+    name: NABH accredited hospitals
+    base_url: https://nabh.co.in/
+    kind: clinical
+    format: mixed_html_pdf
+    cadence_days: 30
+    trust: high
+    adapter: nabh
+    enabled: true
+
+  # ---------- admissions ----------
+  - id: counselling_maharashtra
+    name: MHT CET / State CET Cell (Maharashtra)
+    base_url: https://cetcell.mahacet.org
+    kind: admissions
+    format: mixed_html_pdf
+    cadence_days: 7
+    trust: high
+    adapter: state_counselling
+    enabled: true
+    notes: Seat matrix + cutoffs + eligibility. Paramedical courses handled via state CET.
+
+  - id: counselling_karnataka
+    name: KEA / KCET (Karnataka)
+    base_url: https://cetonline.karnataka.gov.in/kea
+    kind: admissions
+    format: mixed_html_pdf
+    cadence_days: 7
+    trust: high
+    adapter: state_counselling
+    enabled: true
+
+  - id: counselling_tamil_nadu
+    name: TN Health / medical counselling (merit-based)
+    base_url: https://www.tnhealth.tn.gov.in
+    kind: admissions
+    format: mixed_html_pdf
+    cadence_days: 7
+    trust: high
+    adapter: state_counselling
+    enabled: true
+
+  - id: counselling_kerala
+    name: LBS Centre (Kerala)
+    base_url: https://lbscentre.kerala.gov.in
+    kind: admissions
+    format: mixed_html_pdf
+    cadence_days: 7
+    trust: high
+    adapter: state_counselling
+    enabled: true
+
+  - id: counselling_west_bengal
+    name: WBJEEB JENPAS-UG (West Bengal)
+    base_url: https://wbjeeb.nic.in
+    kind: admissions
+    format: mixed_html_pdf
+    cadence_days: 7
+    trust: high
+    adapter: state_counselling
+    enabled: true
+
+  - id: counselling_punjab
+    name: BFUHS (Punjab)
+    base_url: https://bfuhs.ac.in
+    kind: admissions
+    format: mixed_html_pdf
+    cadence_days: 7
+    trust: high
+    adapter: state_counselling
+    enabled: true
+
+  - id: counselling_odisha
+    name: OJEE (Odisha)
+    base_url: https://ojee.nic.in
+    kind: admissions
+    format: mixed_html_pdf
+    cadence_days: 7
+    trust: high
+    adapter: state_counselling
+    enabled: true
+
+  - id: counselling_madhya_pradesh
+    name: DME MP
+    base_url: null
+    kind: admissions
+    format: mixed_html_pdf
+    cadence_days: 7
+    trust: high
+    adapter: state_counselling
+    enabled: true
+
+  - id: counselling_uttar_pradesh
+    name: DGME UP
+    base_url: null
+    kind: admissions
+    format: mixed_html_pdf
+    cadence_days: 7
+    trust: high
+    adapter: state_counselling
+    enabled: true
+
+  - id: counselling_rajasthan
+    name: RUHS (Rajasthan)
+    base_url: https://ruhsraj.org
+    kind: admissions
+    format: mixed_html_pdf
+    cadence_days: 7
+    trust: high
+    adapter: state_counselling
+    enabled: true
+    notes: Announced NEET-based paramedical admission for 2025-26; re-verify each cycle.
+
+  - id: counselling_telangana_ap
+    name: KNRUHS / EAPCET (Telangana, Andhra Pradesh)
+    base_url: https://www.knruhs.telangana.gov.in
+    kind: admissions
+    format: mixed_html_pdf
+    cadence_days: 7
+    trust: high
+    adapter: state_counselling
+    enabled: true
+
+  # ---------- fees ----------
+  - id: fee_regulators
+    name: State fee regulatory commissions (MH, RJ, KL, TN, MP)
+    base_url: null
+    kind: fees
+    format: pdf_scan
+    cadence_days: 365
+    trust: high
+    adapter: fee_regulator
+    enabled: true
+    notes: Scanned orders, inconsistent coverage, often only professional courses. Partial by design.
+
+  # ---------- pay anchor ----------
+  - id: seventh_cpc_pay_matrix
+    name: 7th CPC pay matrix (Level 5/6 anchor)
+    base_url: https://dcsem.gov.in/resources/uploads/rti_links/l4Paymatrix.pdf
+    kind: payload
+    format: pdf
+    cadence_days: 3650
+    trust: high
+    adapter: pay_matrix
+    enabled: true
+
+  # ---------- financing ----------
+  - id: vidya_lakshmi
+    name: Vidya Lakshmi (loan single window)
+    base_url: https://www.vidyalakshmi.co.in/
+    kind: financing
+    format: html
+    cadence_days: 30
+    trust: high
+    adapter: financing
+    enabled: true
+    notes: Scheme comparison is public; application flow is behind login and out of scope.
+
+  - id: csis_subsidy
+    name: CSIS interest subsidy scheme
+    base_url: https://www.vidyalakshmi.co.in/Students/resources/SubsidyScheme.html
+    kind: financing
+    format: html
+    cadence_days: 30
+    trust: high
+    adapter: financing
+    enabled: true
+    notes: Eligibility for BSc MLT as a "professional course" is lender-dependent. Mark conditional.
+
+  - id: pm_vidyalaxmi
+    name: PM-Vidyalaxmi (2024)
+    base_url: https://pmvidyalaxmi.co.in/
+    kind: financing
+    format: html
+    cadence_days: 30
+    trust: high
+    adapter: financing
+    enabled: true
+    notes: Excludes foreign universities and NRI/management quota. QHEI list is downloadable.
+
+  # ---------- discovery only ----------
+  - id: searxng
+    name: Self-hosted SearXNG meta-search
+    base_url: http://searxng:8080
+    kind: discovery
+    format: api
+    cadence_days: 1
+    trust: low
+    adapter: searxng
+    enabled: true
+    notes: Query templates only; results are leads, never evidence.
+
+  - id: common_crawl_index
+    name: Common Crawl URL index
+    base_url: s3://commoncrawl/cc-index/
+    kind: discovery
+    format: parquet
+    cadence_days: 30
+    trust: low
+    adapter: common_crawl
+    enabled: true
+    notes: Bulk discovery of *.ac.in / *.gov.in PDFs. Never evidence.
+
+  # ---------- institution sites (discovered at runtime) ----------
+  - id: institution_sites
+    name: Discovered institutional domains
+    base_url: null
+    kind: institution
+    format: html
+    cadence_days: 90
+    trust: low
+    adapter: institution_site
+    enabled: true
+    notes: Placement PDFs usually live in NAAC SSR/AQAR/NIRF DCS annexures. Self-reported, promotional; treat as low trust.
+
+# Explicitly excluded, with reasons (append-only log).
+exclusions:
+  - id: nirf_dcs
+    name: NIRF Data Collection System (bulk)
+    reason: Login-walled. Only public mirrors on college sites may be fetched.
+  - id: job_portals
+    name: Naukri / Indeed / Glassdoor bulk
+    reason: ToS-restricted scraping. Aggregate figures only via public pages, low trust, never bulk.
+  - id: captcha_gated_portals
+    name: Any portal requiring CAPTCHA solving
+    reason: Policy violation. Mark the record `unknown`, never bypass.

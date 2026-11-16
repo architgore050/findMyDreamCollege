@@ -1,0 +1,97 @@
+# AGENTS.md
+
+Orientation for any agent (human or model) working in this repo. Read this before touching code.
+
+## What this is
+
+A data-mining + scoring tool that inventories bachelor's-level Medical Laboratory Technology / Medical Laboratory Science programmes, mines public evidence, and produces a sourced, filterable shortlist for a user-supplied profile.
+
+**v1 scope: India only, maximum depth.** Global coverage is tracked in `docs/product-development-cycle/05-gaps-and-full-solution-backlog.md`. Do not expand scope silently.
+
+## Read in this order
+
+1. `docs/product-development-cycle/04-phase-3-implementation-brief.md` — the build contract. Authoritative.
+2. `docs/product-development-cycle/01..03-*.md` — why the product exists.
+3. `docs/product-development-cycle/05-gaps-and-full-solution-backlog.md` — what is intentionally missing.
+4. `config/` — the registry. If behaviour is not driven by config, it is probably wrong.
+
+## Invariants (a PR that violates one is rejected)
+
+1. **No user-specific logic.** No applicant's marks, budget, intake year, country, or family situation in code, defaults, seeds, or fixtures. Profiles are runtime input.
+2. **Numbers are computed; prose is generated.** LLMs extract claims. They never emit scores.
+3. **Every published number resolves to a span** — `claim → extraction → snapshot → URL + fetched_at + sha256`. Unresolvable ⇒ drop or mark `modelled`.
+4. **Filters are binary; scores are weighted.** Closed registration, travel-required exams, unmet eligibility, unrecognised institutes are cutoffs, never penalties.
+5. **`UNKNOWN` is a value**, never 0 and never 50. It propagates as an interval.
+6. **Internships are not employment.** Enforced in schema and scoring.
+7. **Registry-driven.** Countries, sources, weights, exams, fee rules ⇒ `config/*.yaml`.
+8. **Append-only evidence, versioned scores.** Never mutate a claim; supersede it.
+9. **Politeness beats throughput.** robots.txt is honoured, no auth/CAPTCHA bypass, per-registrable-domain rate limits, truthful UA with contact.
+10. **No paid APIs in v1.** Open-source crawling only; model access goes through the provider-agnostic router.
+
+## Layout
+
+```
+config/            countries, sources, weights, exams, models, cost rules
+db/migrations/     plain SQL, numbered, forward-only
+packages/pipeline/ Python 3.12 package `fmd` (+ tests beside modules)
+apps/web/          Next.js app (TS, Tailwind, shadcn)
+infra/             docker-compose, Dockerfiles
+scripts/           seed, crawl, score, eval entrypoints
+docs/              product-development-cycle/
+```
+
+Python: `uv` for env/deps, `ruff` for lint+format, `pytest` for tests, `pydantic` for all I/O boundaries.
+TypeScript: `pnpm`, `eslint`, `prettier`, `zod` for runtime schemas.
+
+## Common commands
+
+```
+make up          # postgres + pgvector + api + web
+make migrate     # apply SQL migrations
+make seed        # load config registry into DB
+make crawl       # run the frontier (respects budgets)
+make extract     # snapshots -> extractions -> claims
+make score       # claims -> scores + insights
+make eval        # golden set, provenance coverage, drift
+make dev         # web app against local API
+make test        # pytest + vitest, mock model provider, no network
+```
+
+`make test` must never hit the network or a real model. Use the `--mock` provider and committed fixtures.
+
+## How to add a source
+
+1. Add a `config/sources.yaml` entry: `id, name, base_url, kind, format, cadence_days, trust, adapter, enabled`.
+2. Implement `SourceAdapter.fetch() -> Iterable[DocumentRef]` in `fmd/adapters/<family>.py`. No parsing in the fetch layer.
+3. Add an extraction schema in `fmd/extract/schemas/<source>.py` with `value/unit/quote/char_start/char_end/confidence` on every field.
+4. Add a fixture + a test asserting span resolution on the fixture.
+5. Record `trust` honestly. Low-trust sources may inform `modelled` claims only.
+
+## How to add a country (post-v1)
+
+Read `05-gaps-…` §G1.6 first. Minimum: programme inventory source, regulator/recognition source, admissions calendar source, city CoL basket, currency, licensure gate, student-work rules. Country files are data, not branches.
+
+## Data rules
+
+- Claims: append-only; corrections insert + set `superseded_by`.
+- Quotes are verbatim; spans must resolve in `extractions.text`.
+- Rates require a denominator in the same claim's `qualifier_json`, or they are rejected.
+- Money always carries `currency`, `period`, and `as_of`.
+- Salaries: prefer median → Q1 → mean; mean-only cannot produce a point estimate.
+- Every modelled value carries method + confidence + interval.
+
+## Testing expectations
+
+- Pipeline unit tests per module; golden-set tests for extraction on committed fixtures.
+- `provenance_coverage` must stay at 100%: any published number whose span does not resolve is a failing test, not a warning.
+- Score changes require a version bump (`scorer_version` / `weights_version`) and an eval report diff.
+
+## Documentation expectations
+
+- Prompt changes: bump `prompt_version`, keep the old file.
+- Schema changes: new migration, never edit an applied one.
+- Any deviation from the brief: note it in `05-gaps-…` with a reason.
+
+## Definition of done for any task
+
+`make test` green, `make eval` provenance coverage 100%, docs updated, and no new user-specific assumptions. If a task cannot meet that, say so instead of shipping it.

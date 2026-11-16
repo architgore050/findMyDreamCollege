@@ -1,0 +1,71 @@
+name: findmydreamcollege
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fmd}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fmd}
+      POSTGRES_DB: ${POSTGRES_DB:-fmd}
+    ports: ["${POSTGRES_PORT:-5433}:5432"]
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fmd} -d ${POSTGRES_DB:-fmd}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Optional meta-search for discovery. Never evidence; leads only.
+  searxng:
+    image: searxng/searxng:latest
+    profiles: ["discovery"]
+    ports: ["${SEARXNG_PORT:-8888}:8080"]
+    environment:
+      SEARXNG_BASE_URL: http://localhost:${SEARXNG_PORT:-8888}/
+    volumes:
+      - ./infra/searxng:/etc/searxng:rw
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.pipeline
+    command: ["uvicorn", "fmd.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fmd}:${POSTGRES_PASSWORD:-fmd}@db:5432/${POSTGRES_DB:-fmd}
+    ports: ["${API_PORT:-8000}:8000"]
+    volumes:
+      - ./packages/pipeline:/app
+      - ./config:/config:ro
+      - snapshots:/data/snapshots
+    depends_on:
+      db: {condition: service_healthy}
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.pipeline
+    command: ["python", "-m", "fmd.cli", "worker"]
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fmd}:${POSTGRES_PASSWORD:-fmd}@db:5432/${POSTGRES_DB:-fmd}
+    volumes:
+      - ./packages/pipeline:/app
+      - ./config:/config:ro
+      - snapshots:/data/snapshots
+    depends_on:
+      db: {condition: service_healthy}
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports: ["${WEB_PORT:-3000}:3000"]
+    depends_on: [api]
+
+volumes:
+  dbdata:
+  snapshots:

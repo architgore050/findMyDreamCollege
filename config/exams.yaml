@@ -1,0 +1,121 @@
+# Canonical exam catalogue. Windows are NEVER hardcoded values: they are claims
+# extracted per cycle. This file only declares which exams exist, their scope and
+# whether sitting them requires physically being in the country.
+#
+# registration windows: null until extracted. A null window => filter returns UNKNOWN,
+# never "open". `observed_at` + TTL (weights.yaml: filter_policy.stale_exam_window_ttl_days)
+# decides staleness.
+
+exams:
+  # ---- national / multi-state ----
+  - id: neet_ug
+    name: NEET-UG
+    scope: national
+    country: IN
+    provider: NTA
+    used_for_mlt: false
+    notes: Not the national route for BSc MLT. Some states (e.g. Rajasthan) use NEET scores for paramedical UG. Re-verify per state per cycle.
+    requires_travel: true
+    remote_options: false
+    registration: {opens: null, closes: null, sitting_dates: null}
+
+  - id: cuet_ug
+    name: CUET-UG
+    scope: national
+    country: IN
+    provider: NTA
+    used_for_mlt: partial
+    notes: Accepted by some deemed/private universities.
+    requires_travel: true
+    remote_options: false
+    registration: {opens: null, closes: null, sitting_dates: null}
+
+  # ---- state counselling entrance tests ----
+  - id: mht_cet_pcb
+    name: MHT CET (PCB)
+    scope: state
+    state: MH
+    country: IN
+    provider: State CET Cell, Maharashtra
+    used_for_mlt: true
+    requires_travel: true
+    remote_options: false
+    registration: {opens: null, closes: null, sitting_dates: null}
+
+  - id: kcet
+    name: KCET
+    scope: state
+    state: KA
+    country: IN
+    provider: KEA
+    used_for_mlt: true
+    requires_travel: true
+    remote_options: false
+    registration: {opens: null, closes: null, sitting_dates: null}
+
+  - id: jenpas_ug
+    name: JENPAS-UG
+    scope: state
+    state: WB
+    country: IN
+    provider: WBJEEB
+    used_for_mlt: true
+    requires_travel: true
+    remote_options: false
+    registration: {opens: null, closes: null, sitting_dates: null}
+
+  - id: ojee
+    name: OJEE
+    scope: state
+    state: OD
+    country: IN
+    provider: OJEE
+    used_for_mlt: true
+    requires_travel: true
+    remote_options: false
+    registration: {opens: null, closes: null, sitting_dates: null}
+
+  - id: eapcet
+    name: AP/TS EAPCET
+    scope: state
+    state: [AP, TS]
+    country: IN
+    provider: State EAPCET bodies
+    used_for_mlt: true
+    requires_travel: true
+    remote_options: false
+    registration: {opens: null, closes: null, sitting_dates: null}
+
+  # ---- merit-based (no entrance test) ----
+  - id: merit_class12
+    name: Class 12 merit (state counselling)
+    scope: state
+    state: [TN, KL, PB, MP, UP, RJ]
+    country: IN
+    provider: State counselling authority
+    used_for_mlt: true
+    requires_exam: false
+    requires_travel: false
+    notes: Eligibility is marks-based; travel only for document verification/counselling, usually online now.
+    registration: {opens: null, closes: null, sitting_dates: null}
+
+# Language / English tests (needed for overseas expansion; India v1 rarely requires them)
+language_tests:
+  - id: ielts
+    name: IELTS Academic
+    requires_travel: true
+    remote_options: false
+  - id: toefl
+    name: TOEFL iBT
+    requires_travel: true
+    remote_options: true   # at-home edition exists
+  - id: oet
+    name: OET
+    requires_travel: true
+    remote_options: true
+
+# Past-paper linkage policy: link to public repositories only. Never mirror copyrighted papers.
+past_papers_policy:
+  allowed: [official_provider_pdf, government_portal, university_library]
+  disallowed: [paywalled_coaching_sites, pirated_compilations]
+  attach_at: exam_windows

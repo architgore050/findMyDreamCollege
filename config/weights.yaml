@@ -1,0 +1,102 @@
+# Scoring configuration. Changing anything here requires bumping `weights_version`.
+# Sub-scores return {point, lo, hi, n_claims, n_sources, evidence_tier}. UNKNOWN propagates as [0,100].
+
+weights_version: "2026-11-16.1"
+scorer_version: "0.1.0"
+
+weights:
+  outcomes: 30
+  affordability_roi: 20
+  clinical_training: 15
+  academic_quality: 10
+  student_life_safety: 10
+  admission_realism: 10
+  financing_feasibility: 5
+
+# Sub-scores with no evidence below this many claims are returned as UNKNOWN, not scored.
+min_claims_for_score: 2
+# Below this, point estimates are shrunk toward the peer-group prior and the interval widened.
+min_claims_for_confidence: 5
+
+peer_groups:
+  keys: [ownership, state, affiliation_type]   # shrinkage target
+  min_group_size: 8
+  fallback: country_prior
+
+evidence_tiers:
+  well_evidenced: {min_sources: 3, min_claims: 8, max_modelled_share: 0.25}
+  partial:        {min_sources: 2, min_claims: 3, max_modelled_share: 0.60}
+  thin:           {min_sources: 1, min_claims: 1, max_modelled_share: 1.00}
+  insufficient:   {min_sources: 0, min_claims: 0, max_modelled_share: 1.00}  # rank, but never recommend
+
+# Monotone transforms: raw value -> 0..100. Bands are inclusive lower bounds, evaluated top-down.
+transforms:
+  naac_grade:
+    type: ordinal
+    map: {A++: 100, "A+": 90, A: 80, "B++": 68, "B+": 60, B: 52, C: 30, D: 10}
+  recognition_status:
+    type: ordinal
+    map: {recognised: 100, conditional: 60, unrecognised: 0, unknown: null}
+  internship_hours:
+    type: piecewise
+    points: [[0, 0], [600, 30], [1200, 70], [1800, 100]]
+  seats:
+    type: log
+    scale: 100
+
+# Hard filters (binary, never weighted). Order matters for reporting.
+filters:
+  - credential_level
+  - recognition_status
+  - eligibility
+  - language
+  - exam_registration_open
+  - exam_travel
+  - intake_year_available
+  - budget_ceiling
+
+filter_policy:
+  unknown_blocks_ranking: false      # UNKNOWN shows as "verify", not excluded
+  stale_exam_window_ttl_days: 3      # past TTL => registration_open becomes UNKNOWN
+  budget_uses: tcoa_lo               # fail only when tcoa_lo > ceiling
+
+# Red flags reduce claim confidence and are displayed verbatim in the UI.
+gaming_flags:
+  missing_denominator: 0.25
+  no_distribution: 0.10
+  headline_is_highest_package: 0.15
+  round_numbers: 0.05
+  yoy_jump_gt_2sigma: 0.15
+  aggregated_across_degrees: 0.20
+  recruiters_without_counts: 0.10
+  offers_not_joinings: 0.15
+  internship_counted_as_placement: 0.40   # near-disqualifying
+  no_cohort_year: 0.10
+
+# Salary handling. Never emit a point estimate from a mean alone.
+salary:
+  preferred_statistic: median
+  target_quantile: 0.25
+  assume_lognormal_when: [mean_and_median, median_and_range]
+  min_n_for_empirical_quantile: 10
+  unknown_sigma_prior_by_sector:
+    government: 0.35
+    private_hospital: 0.45
+    diagnostic_chain: 0.50
+    unknown: 0.55
+  narrow_interval_when_n_lt: 30
+
+# Cost-of-living frame. PPP for cross-country, city basket within-country. Never both.
+col:
+  within_country: city_basket
+  cross_country: ppp
+  numbeo_usage: ratio_only
+  numbeo_min_sample_note: true
+  numbeo_band_pct: 20
+
+insights:
+  method: greedy_max_coverage
+  max_insights: 5
+  require_predicate_diversity: true
+  always_include: [filter_failures, gaming_flags, recognition_status]
+  min_marginal_gain: 0.08

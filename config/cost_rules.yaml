@@ -1,0 +1,107 @@
+# Cost + financing rules. Money is counted once (see brief §13).
+
+currency:
+  base: INR
+  fx_sensitivity_pct: 10        # always report a band, never a point FX
+  as_of_required: true
+
+cost_categories:
+  - tuition
+  - hostel
+  - mess
+  - rent
+  - utilities
+  - food
+  - transport
+  - equipment          # apron, lab coat, consumable kits, logbook, dissection kit
+  - exam_fee
+  - visa
+  - insurance
+  - misc
+
+# Two complete, non-additive living scenarios. Never sum them.
+living_scenarios:
+  hostel:
+    components: [hostel, mess, utilities, transport, food_topup]
+    notes: Institution hostel + mess where published; otherwise city basket, method=modelled.
+  independent:
+    components: [rent, utilities, food, transport]
+    notes: PG/shared accommodation. Use city basket with ±20% band.
+
+modelled_defaults:
+  band_pct: 20
+  equipment_first_year:
+    government: {amount: 3000, currency: INR}
+    private: {amount: 6000, currency: INR}
+    deemed: {amount: 9000, currency: INR}
+    method: modelled
+  food_topup_monthly: {amount: 2500, currency: INR, method: modelled}
+
+# Student work: never reduces TCOA. Only reduces family out-of-pocket.
+student_work:
+  IN:
+    legal_hours_per_week: 0
+    notes: No legal part-time entitlement for full-time students.
+    realistic_informal_monthly: {amount: 3000, currency: INR, method: modelled}
+    cap_pct_of_tcoa: 10
+    label: informal_earnings
+  # overseas stubs for later
+  GB: {legal_hours_per_week: 20, term_time_only: true, notes: Student Route}
+  CA: {legal_hours_per_week: 24, notes: Verify current IEC rules per cycle}
+  AU: {legal_hours_per_week: 24, notes: 48h/fortnight during term}
+  DE: {legal_hours_per_week: 20, notes: 140 full days/year equivalent}
+  US: {legal_hours_per_week: 20, on_campus_only: true}
+
+# Debt service ratio at the 25th percentile salary. The headline affordability metric.
+dsr25:
+  formula: first_year_emi / p25_first_year_gross_salary
+  horizon_years: 1
+  bands:
+    comfortable: {max: 0.20}
+    manageable: {max: 0.30}
+    stressed: {max: 0.40}
+    not_financeable: {min: 0.40}
+  always_publish_inputs: true
+
+affordability_gap:
+  formula: family_out_of_pocket / annual_family_income
+  flag_above: 1.0
+
+# Financing products. Scope matters: domestic and overseas loans are different products.
+financing_scopes:
+  domestic:
+    schemes: [iba_model_scheme, pm_vidyalaxmi, csis, nbfc_secured, nbfc_unsecured]
+    notes: Small-ticket, subsidy-rich, rarely refused. PM-Vidyalaxmi applies (QHEI institutions only).
+  overseas:
+    schemes: [secured_loan, nbfc_secured, nbfc_unsecured]
+    notes: PM-Vidyalaxmi explicitly excludes foreign universities. Collateral/co-applicant driven.
+    fx_band_required: true
+
+loan_defaults:
+  iba_model_scheme:
+    collateral_free_upto: {amount: 750000, currency: INR}
+    no_margin_upto: {amount: 400000, currency: INR}
+    moratorium: course_plus_1y
+    max_tenure_months: 180
+  pm_vidyalaxmi:
+    collateral_free: true
+    subvention_pct: 3
+    subvention_max_principal: {amount: 1000000, currency: INR}
+    family_income_ceiling: {amount: 800000, currency: INR}
+    rate_cap: EBLR_plus_0_5
+    max_tenure_months: 180
+    excluded: [foreign_universities, nri_quota, management_quota]
+  csis:
+    interest_subvention_pct: 100
+    during: moratorium
+    max_principal: {amount: 1000000, currency: INR}
+    family_income_ceiling: {amount: 450000, currency: INR}
+    condition: professional_course_at_naac_accredited_or_nba_accredited
+    open_question: Whether BSc MLT qualifies as a "professional course" is lender-dependent.
+    status_if_unclear: conditional
+
+# Never present "loan available" as "loan approved".
+financing_labeling:
+  published_terms: documented
+  inferred_eligibility: conditional
+  sanction_probability: unknown

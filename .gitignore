@@ -1,0 +1,35 @@
+# env
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.uv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# node
+node_modules/
+.next/
+out/
+.turbo/
+pnpm-debug.log*
+
+# data + artifacts (never commit raw crawls or snapshots)
+data/
+snapshots/
+*.parquet
+*.warc
+*.warc.gz
+packages/pipeline/tests/fixtures/llm/*.real.json
+
+# os/editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

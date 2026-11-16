@@ -1,0 +1,35 @@
+# Country registry. Adding a country is data work (see docs/05 §G1.6), not code.
+# `enabled: true` is the only thing that puts a country in the crawl/score path.
+
+countries:
+  IN:
+    name: India
+    enabled: true
+    currency: INR
+    languages: [en, hi]
+    tier: A
+    # What the pipeline needs from a country before it can score anything.
+    capabilities:
+      programme_inventory: true      # UGC + state universities + counselling seat matrices
+      regulator: true                # NCAHP + state allied-health councils
+      recognition_chain: true        # institution -> affiliating university -> council
+      admissions_calendar: true      # state counselling cycles
+      fee_disclosure: partial        # MH/RJ/KL/TN/MP only
+      col_basket: true               # city-level basket, partly modelled
+      licensure_gate: true
+      student_work_rights: none      # no legal part-time entitlement for students
+      outcome_data: sparse           # no mandatory disclosure for health sciences
+
+  # Stubs: present so the schema does not assume "India == the world".
+  PH: {name: Philippines, enabled: false, currency: PHP, tier: B}
+  MY: {name: Malaysia, enabled: false, currency: MYR, tier: B}
+  AE: {name: United Arab Emirates, enabled: false, currency: AED, tier: B}
+  ZA: {name: South Africa, enabled: false, currency: ZAR, tier: B}
+  AU: {name: Australia, enabled: false, currency: AUD, tier: C}
+  CA: {name: Canada, enabled: false, currency: CAD, tier: C}
+  GB: {name: United Kingdom, enabled: false, currency: GBP, tier: C}
+  IE: {name: Ireland, enabled: false, currency: EUR, tier: C}
+  NZ: {name: New Zealand, enabled: false, currency: NZD, tier: C}
+  US: {name: United States, enabled: false, currency: USD, tier: C}
+  DE: {name: Germany, enabled: false, currency: EUR, tier: D}
+  NL: {name: Netherlands, enabled: false, currency: EUR, tier: D}

@@ -1,0 +1,68 @@
+# Provider-agnostic model routing. Nothing in the pipeline may hardcode a provider.
+# `local` assumes vLLM/SGLang exposing an OpenAI-compatible endpoint.
+# Hardware budget: 16 GB VRAM => <=14B at int4. Do not plan on a 70B local model.
+
+providers:
+  local:
+    base_url: ${FMD_LOCAL_LLM_URL:-http://host.docker.internal:8000/v1}
+    api_key: ${FMD_LOCAL_LLM_KEY:-not-needed}
+    kind: openai_compatible
+  api:
+    base_url: ${FMD_API_LLM_URL}
+    api_key: ${FMD_API_LLM_KEY}
+    kind: openai_compatible
+  mock:
+    kind: replay
+    fixtures_dir: packages/pipeline/tests/fixtures/llm
+
+profiles:
+  bulk_extract:
+    provider: local
+    model: ${FMD_LOCAL_EXTRACT_MODEL:-Qwen3-14B-AWQ}
+    temperature: 0
+    guided_json: true          # xgrammar; must allow null
+    max_tokens: 4096
+  hard_pdf:
+    provider: api
+    model: ${FMD_API_HARD_PDF_MODEL}
+    temperature: 0
+    guided_json: true
+    max_tokens: 8192
+  adjudicate:
+    provider: api
+    model: ${FMD_API_ADJUDICATE_MODEL}
+    temperature: 0
+    guided_json: true
+    bundle_pairs_per_call: 20
+  nlp_rubric:
+    provider: api
+    model: ${FMD_API_NLP_MODEL}
+    temperature: 0
+    require_quoted_evidence: true
+  ocr_vlm:
+    provider: local
+    model: ${FMD_LOCAL_OCR_MODEL:-Qwen2.5-VL-7B-Instruct}
+    temperature: 0
+  embed:
+    provider: local
+    model: ${FMD_EMBED_MODEL:-BAAI/bge-m3}
+    dim: 1024
+
+budgets:
+  daily_usd: 5.00
+  per_run_usd: 2.00
+  hard_stop: true
+  cache: true                 # keyed by (purpose, prompt_sha256, input_sha256, model)
+
+routing_rules:
+  - if: {doc_kind: pdf_scan, pages_gt: 30}
+    use: hard_pdf
+  - if: {doc_kind: pdf_text}
+    use: bulk_extract
+  - if: {purpose: entity_adjudication}
+    use: adjudicate
+  - default: bulk_extract
+
+fallbacks:
+  - {from: local, to: api, on: [connection_error, timeout, json_schema_violation]}
+  - {from: api, to: mock, on: [budget_exhausted]}
