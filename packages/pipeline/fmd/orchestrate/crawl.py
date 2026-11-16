@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -34,7 +35,7 @@ from fmd.db.repositories import (
 from fmd.discover.base import dedupe_refs
 from fmd.fetch.dedupe import near_duplicate, simhash64
 from fmd.fetch.politeness import registrable_domain
-from fmd.fetch.types import FetchRequest, FetchResult, TierUnavailable
+from fmd.fetch.types import FetchRequest, FetchResult, TierUnavailable, http_date
 from fmd.frontier.queue import Frontier
 from fmd.orchestrate.adapters import call_fetch
 from fmd.orchestrate.ledger import RunSummary
@@ -49,6 +50,28 @@ logger = logging.getLogger(__name__)
 # forever. A block/quarantine is handled per URL by the frontier as well.
 DEFAULT_SOURCE_FAILURE_BUDGET = 5
 SIMHASH_MAX_DISTANCE = 3
+PAGINATION_REPEAT = "pagination_repeat"
+
+
+@dataclass(frozen=True)
+class ReplayRequest(FetchRequest):
+    """A fetch request carrying the persisted replay shape.
+
+    ``fmd.fetch.types.FetchRequest`` is declared as a conditional GET and the
+    ladder tiers only read ``url``/validators. The frontier, however, persists
+    ``http_method``/``http_body``/``request_headers`` per document (migration
+    0001) because some sources answer only a POST body. The crawler builds the
+    complete request here instead of dropping that shape on the floor.
+
+    Interface gap (reported, not worked around): ``FetchLadder.fetch`` and the
+    tier fetchers ignore ``method``/``body`` and always send GET. Until the
+    fetch layer accepts these fields, a paginated POST source still serves page
+    1; the crawler surfaces that as a ``pagination_repeat`` warning.
+    """
+
+    method: str = "GET"
+    body: dict[str, Any] | None = None
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 def utc() -> datetime:
@@ -150,6 +173,9 @@ class Crawler:
         self._fingerprints: list[int] = []
         self._source_failures: dict[str, int] = {}
         self._stopped_sources: set[str] = set()
+        # Consecutive successful pages per source, for pagination diagnostics.
+        self._last_ok_sha: dict[str, str] = {}
+        self._last_ok_url: dict[str, str] = {}
 
     # ------------------------------------------------------------------- planning
     def plan(
@@ -293,7 +319,7 @@ class Crawler:
     def _process(self, record: Any, *, summary: RunSummary, source_id: str) -> None:
         self.frontier.repo.set_state(record.url, "in_progress")
         try:
-            result = self._fetch(record)
+            result = self._fetch(record, summary=summary)
         except Exception as exc:  # transport/trap: an abstention with a reason
             reason = getattr(exc, "reason", None) or type(exc).__name__
             summary.bump("abstained")
@@ -343,14 +369,65 @@ class Crawler:
         summary.fail("crawl.fetch", reason, url=record.url, source_id=source_id or None)
         self._note_source_failure(source_id)
 
-    def _fetch(self, record: Any) -> FetchResult:
-        document = self.documents.get_by_url(record.url)
-        request = FetchRequest.revalidate(
-            record.url,
-            etag=getattr(document, "etag", None) if document else None,
-            last_modified=getattr(document, "last_modified", None) if document else None,
-        )
+    def _fetch(self, record: Any, *, summary: RunSummary | None = None) -> FetchResult:
+        """Fetch with the request shape persisted on the frontier row.
+
+        A method-blind GET is what broke NABH's ``admin-ajax.php`` (HTTP 400) and
+        silently repeated page 1 for every paginated POST source. The persisted
+        shape wins; the stored ``documents`` row is the fallback so a re-crawl
+        cannot downgrade a POST because a later discovery ref omitted the body.
+        """
+        request = self._request_for(record)
+        if summary is not None:
+            methods = summary.metadata.setdefault("request_methods", {})
+            methods[request.method] = methods.get(request.method, 0) + 1
         return self.fetcher.fetch(request)
+
+    def _request_for(self, record: Any) -> ReplayRequest:
+        document = self.documents.get_by_url(record.url)
+        document_method = (
+            str(getattr(document, "http_method", None) or "GET").upper() if document else "GET"
+        )
+        method = str(getattr(record, "http_method", None) or document_method).upper()
+        body = getattr(record, "http_body", None)
+        if body is None and document is not None:
+            body = getattr(document, "http_body", None)
+        # A frontier row that lost its POST shape must not override a document
+        # that still records one (the failure mode this guard prevents).
+        if method == "GET" and document_method == "POST" and body is not None:
+            method = "POST"
+        if method not in {"GET", "POST"}:
+            raise ValueError(f"unsupported persisted request method {method!r} (GET or POST)")
+
+        raw_headers = getattr(record, "request_headers", None)
+        if not raw_headers and document is not None:
+            raw_headers = getattr(document, "request_headers", None)
+        headers = {str(key): str(value) for key, value in dict(raw_headers or {}).items()}
+
+        # Conditional re-crawl: the stored validator is the newest one; a header
+        # folded in at discovery time is the fallback. Overwrite (not setdefault)
+        # so a stale discovery ETag cannot mask the last fetched one.
+        etag = (getattr(document, "etag", None) if document else None) or headers.get(
+            "If-None-Match"
+        )
+        last_modified = (
+            http_date(getattr(document, "last_modified", None)) if document else None
+        ) or headers.get("If-Modified-Since")
+        if etag:
+            headers["If-None-Match"] = etag
+        if last_modified:
+            headers["If-Modified-Since"] = last_modified
+
+        referer = headers.get("Referer") or headers.get("referer")
+        return ReplayRequest(
+            url=record.url,
+            etag=etag,
+            last_modified=last_modified,
+            referer=referer,
+            method=method,
+            body=dict(body) if isinstance(body, dict) else None,
+            headers=headers,
+        )
 
     def _note_source_failure(self, source_id: str) -> None:
         if not source_id:
@@ -381,6 +458,7 @@ class Crawler:
         content_type = _header(result, "content-type")
         body = result.body or b""
         sha = self.store.put(body)
+        self._note_page_content(record, sha, summary=summary, source_id=source_id)
         role = self._role(record, content_type=content_type, source_id=source_id, summary=summary)
 
         document = self._upsert_document(
@@ -443,6 +521,36 @@ class Crawler:
         )
         if source_id:
             self._source_failures[source_id] = 0
+
+    def _note_page_content(
+        self, record: Any, sha: str, *, summary: RunSummary, source_id: str
+    ) -> None:
+        """Flag consecutive pages of one source that are byte-identical.
+
+        A paginated POST source whose page parameter is dropped answers page 1
+        forever with HTTP 200. Counts look plausible and the data looks sparse;
+        this warning makes the repeat explicit in the run summary instead. It is
+        a warning, not a failure: a mirror that legitimately serves one body
+        under two URLs must not fail the run.
+        """
+        if not source_id:
+            return
+        previous_sha = self._last_ok_sha.get(source_id)
+        previous_url = self._last_ok_url.get(source_id)
+        if previous_sha == sha and previous_url != str(getattr(record, "url", "")):
+            entry = {
+                "url": getattr(record, "url", None),
+                "previous_url": previous_url,
+                "outcome": "warning",
+                "reason": PAGINATION_REPEAT,
+                "source_id": source_id,
+                "sha256": sha,
+            }
+            summary.bump(PAGINATION_REPEAT)
+            summary.outcomes.append(entry)
+            summary.metadata.setdefault("warnings", []).append(entry)
+        self._last_ok_sha[source_id] = sha
+        self._last_ok_url[source_id] = str(getattr(record, "url", ""))
 
     def _role(
         self,
@@ -521,6 +629,17 @@ class Crawler:
     ) -> DocumentRecord:
         robots = result.robots
         source_id = source_id or getattr(record, "source_id", None)
+        try:
+            shape = self._request_for(record)
+            http_method, http_body, request_headers = (
+                shape.method,
+                shape.body,
+                shape.headers,
+            )
+        except ValueError:  # malformed persisted method: never rewrite the row
+            http_method = getattr(record, "http_method", "GET")
+            http_body = getattr(record, "http_body", None)
+            request_headers = getattr(record, "request_headers", None)
         document = DocumentUpsert(
             url=record.url,
             domain=record.domain,
@@ -531,9 +650,9 @@ class Crawler:
             robots_decision=getattr(robots, "reason", None),
             robots_checked_at=utc() if robots is not None else None,
             http_status=status,
-            http_method=record.http_method,
-            http_body=record.http_body,
-            request_headers=record.request_headers,
+            http_method=http_method,
+            http_body=http_body,
+            request_headers=request_headers,
             source_id=source_id,
             extraction_family=getattr(record, "extraction_family", None),
             entity_id=getattr(record, "entity_id", None),

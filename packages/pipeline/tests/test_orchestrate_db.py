@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -18,12 +19,15 @@ from fmd.db.repositories import (
     EntitiesRepo,
     EntityCreate,
     PipelineRunsRepo,
+    SnapshotsRepo,
     SourcesRepo,
 )
 from fmd.discover.base import DocumentRef
 from fmd.extract.pipeline import build_router
 from fmd.frontier.queue import Frontier
 from fmd.orchestrate import JsonFileLedger, Orchestrator
+from fmd.orchestrate.crawl import Crawler
+from fmd.orchestrate.ledger import RunSummary
 from fmd.seed import seed_database
 from fmd.store import SnapshotStore
 
@@ -190,6 +194,63 @@ def test_crawl_extract_end_to_end_without_ref_metadata(fresh_database, tmp_path)
     assert crawl_run.counts["stored"] == 1
     assert crawl_run.finished_at is not None
     assert PipelineRunsRepo(fresh_database).list(stage="extract")[0].counts["claims"] >= 1
+
+
+def test_post_replay_survives_a_frontier_roundtrip(fresh_database, tmp_path) -> None:
+    """The persisted POST shape is replayable after a DB roundtrip, not just in RAM."""
+    url = "https://nabh.co/wp-admin/admin-ajax.php?action=get_hospitals&page=2"
+    body = {"action": "get_hospitals", "page": 2}
+    headers = {"Accept": "application/json"}
+    ref = DocumentRef(
+        url=url,
+        source_id="fixture_source",
+        metadata={
+            "request_method": "POST",
+            "request_body": body,
+            "request_headers": headers,
+        },
+    )
+    frontier = Frontier.from_database(fresh_database)
+    frontier.enqueue_ref(ref)
+
+    # A later discovery ref carrying only a URL must not erase the POST shape.
+    frontier.enqueue_ref(DocumentRef(url=url, source_id="fixture_source"))
+    stored = frontier.repo.get(url)
+    assert stored is not None
+    assert stored.http_method == "POST"
+    assert stored.http_body == body
+
+    documents = DocumentsRepo(fresh_database)
+    fetcher = FakeFetcher(
+        {
+            url: lambda request: response(
+                request.url,
+                body='{"rows":[{"id":2}]}',
+                headers={"content-type": "application/json"},
+            )
+        }
+    )
+    crawler = Crawler(
+        frontier=frontier,
+        fetcher=fetcher,
+        store=SnapshotStore(tmp_path / "snapshots"),
+        documents=documents,
+        snapshots=SnapshotsRepo(fresh_database),
+        adapter_factory=lambda _source: None,
+    )
+    summary = RunSummary(run_id="db-post", stage="crawl", started_at=datetime.now(UTC))
+
+    crawler.drain(summary=summary)
+
+    assert summary.counts["stored"] == 1
+    request = fetcher.requests[0]
+    assert request.method == "POST"
+    assert request.body == body
+    document = documents.get_by_url(url)
+    assert document is not None
+    assert document.http_method == "POST"
+    assert document.http_body == body
+    assert document.request_headers == headers
 
 
 def test_run_ledger_records_a_failed_run_as_failed(fresh_database, tmp_path) -> None:

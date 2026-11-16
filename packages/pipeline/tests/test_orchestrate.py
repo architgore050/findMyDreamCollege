@@ -26,6 +26,7 @@ from test_orchestrate_support import (
 from fmd.adapters.base import SourceUnavailable
 from fmd.db.repositories import (
     DocumentUpsert,
+    FrontierUpsert,
     ProgrammeRecord,
     ScoreCreate,
     SnapshotCreate,
@@ -34,6 +35,8 @@ from fmd.discover.base import DocumentRef
 from fmd.er import EntityCandidate, ERConfig
 from fmd.extract.pipeline import build_router
 from fmd.orchestrate import JsonFileLedger, Orchestrator
+from fmd.orchestrate.crawl import Crawler
+from fmd.orchestrate.ledger import RunSummary
 from fmd.plan import DocumentPlanner
 from fmd.store import SnapshotStore
 
@@ -188,6 +191,252 @@ def test_crawl_304_bumps_last_seen_without_snapshot(tmp_path, registry) -> None:
     assert record.attempts == 1
     # A 304 costs no crawl budget.
     assert harness.frontier.pages_today("college.ac.in") == 0
+
+
+POST_URL = "https://nabh.co/wp-admin/admin-ajax.php?action=get_hospitals&page=2"
+POST_BODY = {"action": "get_hospitals", "page": 2}
+POST_HEADERS = {"Accept": "application/json", "Referer": "https://nabh.co/"}
+
+
+def _post_ref(url: str = POST_URL, *, page: int = 2, source_id: str = "fixture") -> DocumentRef:
+    return DocumentRef(
+        url=url,
+        source_id=source_id,
+        metadata={
+            "request_method": "POST",
+            "request_body": {"action": "get_hospitals", "page": page},
+            "request_headers": dict(POST_HEADERS),
+        },
+    )
+
+
+def test_crawl_replays_persisted_post_method_body_and_headers(tmp_path, registry) -> None:
+    source = FakeSource(id="fixture")
+    harness = Harness(
+        tmp_path,
+        registry,
+        sources=[source],
+        adapters={source.id: FakeAdapter([_post_ref()])},
+        fetcher=FakeFetcher(
+            {
+                POST_URL: lambda request: response(
+                    request.url,
+                    body='{"rows":[{"id":2}]}',
+                    headers={"content-type": "application/json"},
+                )
+            }
+        ),
+    )
+
+    summary = harness.orchestrator.crawl(limit=5)
+
+    assert summary.counts["stored"] == 1
+    assert summary.metadata["request_methods"] == {"POST": 1}
+    request = harness.fetcher.requests[0]
+    assert request.method == "POST"
+    assert request.body == POST_BODY
+    assert request.headers["Accept"] == "application/json"
+    document = harness.documents.rows[POST_URL]
+    assert document.http_method == "POST"
+    assert document.http_body == POST_BODY
+    assert document.request_headers["Accept"] == "application/json"
+    row = frontier_rows(harness.frontier)[0]
+    assert row.http_method == "POST"
+    assert row.http_body == POST_BODY
+
+
+def test_crawl_304_preserves_the_post_shape_and_validators(tmp_path, registry) -> None:
+    clock = FakeClock()
+    frontier = make_frontier(clock=clock)
+    frontier.repo.enqueue(
+        FrontierUpsert.from_document_ref(
+            _post_ref(),
+            domain="nabh.co",
+            next_allowed_at=clock.now(),
+            state="queued",
+        )
+    )
+    documents = MemoryDocuments()
+    documents.upsert(
+        DocumentUpsert(
+            url=POST_URL,
+            domain="nabh.co",
+            etag='"v1"',
+            http_method="POST",
+            http_body=POST_BODY,
+            request_headers=dict(POST_HEADERS),
+        )
+    )
+    snapshots = MemorySnapshots()
+    fetcher = FakeFetcher({POST_URL: lambda request: response(request.url, status=304)})
+    crawler = Crawler(
+        frontier=frontier,
+        fetcher=fetcher,
+        store=None,
+        documents=documents,
+        snapshots=snapshots,
+        adapter_factory=lambda source: None,
+    )
+    summary = RunSummary(run_id="t", stage="crawl", started_at=datetime.now(UTC))
+
+    crawler.drain(summary=summary)
+
+    assert summary.counts["not_modified"] == 1
+    request = fetcher.requests[0]
+    assert request.method == "POST"
+    assert request.body == POST_BODY
+    assert request.headers["If-None-Match"] == '"v1"'
+    document = documents.rows[POST_URL]
+    assert document.http_method == "POST"
+    assert document.http_body == POST_BODY
+    assert document.request_headers["Accept"] == "application/json"
+    assert document.request_headers["If-None-Match"] == '"v1"'
+    assert snapshots.rows == []
+
+
+def test_crawl_retry_never_downgrades_post_to_get(tmp_path, registry) -> None:
+    clock = FakeClock()
+    frontier = make_frontier(clock=clock)
+    frontier.repo.enqueue(
+        FrontierUpsert.from_document_ref(
+            _post_ref(),
+            domain="nabh.co",
+            next_allowed_at=clock.now(),
+            state="queued",
+        )
+    )
+    statuses = iter([500, 200])
+    fetcher = FakeFetcher(
+        {
+            POST_URL: lambda request: response(
+                request.url,
+                status=next(statuses),
+                body='{"rows":[{"id":2}]}',
+                headers={"content-type": "application/json"},
+            )
+        }
+    )
+    crawler = Crawler(
+        frontier=frontier,
+        fetcher=fetcher,
+        store=SnapshotStore(tmp_path / "snapshots"),
+        documents=MemoryDocuments(),
+        snapshots=MemorySnapshots(),
+        adapter_factory=lambda source: None,
+    )
+    summary = RunSummary(run_id="t", stage="crawl", started_at=datetime.now(UTC))
+
+    crawler.drain(summary=summary)
+    assert summary.counts["failed"] == 1
+    clock.advance(120)
+    crawler.drain(summary=summary)
+
+    assert len(fetcher.requests) == 2
+    assert [request.method for request in fetcher.requests] == ["POST", "POST"]
+    assert [request.body for request in fetcher.requests] == [POST_BODY, POST_BODY]
+    assert summary.counts["stored"] == 1
+
+
+def test_paginated_post_pages_return_distinct_rows(tmp_path, registry) -> None:
+    """The failure mode is silent page-1 reuse, so compare row ids, not counts."""
+    page_one = "https://nabh.co/wp-admin/admin-ajax.php?action=get_hospitals&page=1"
+    page_two = POST_URL
+    source = FakeSource(id="fixture")
+
+    def page(request):
+        page_number = request.body["page"]
+        return response(
+            request.url,
+            body=json.dumps({"rows": [{"id": page_number * 10}]}),
+            headers={"content-type": "application/json"},
+        )
+
+    harness = Harness(
+        tmp_path,
+        registry,
+        sources=[source],
+        adapters={
+            source.id: FakeAdapter(
+                [
+                    _post_ref(page_one, page=1),
+                    _post_ref(page_two, page=2),
+                ]
+            )
+        },
+        fetcher=FakeFetcher({page_one: page, page_two: page}),
+    )
+
+    summary = harness.orchestrator.crawl(limit=5)
+
+    assert summary.counts["stored"] == 2
+    ids = {
+        json.loads(harness.store.get(snapshot.sha256))["rows"][0]["id"]
+        for snapshot in harness.snapshots.rows
+    }
+    assert ids == {10, 20}
+    assert summary.counts.get("pagination_repeat", 0) == 0
+
+
+def test_identical_consecutive_pages_raise_a_pagination_repeat_warning(tmp_path, registry) -> None:
+    page_one = "https://nabh.co/wp-admin/admin-ajax.php?action=get_hospitals&page=1"
+    page_two = POST_URL
+    source = FakeSource(id="fixture")
+    body = json.dumps({"rows": [{"id": 10}]})
+
+    def page(request):
+        return response(request.url, body=body, headers={"content-type": "application/json"})
+
+    harness = Harness(
+        tmp_path,
+        registry,
+        sources=[source],
+        adapters={
+            source.id: FakeAdapter([_post_ref(page_one, page=1), _post_ref(page_two, page=2)])
+        },
+        fetcher=FakeFetcher({page_one: page, page_two: page}),
+    )
+
+    summary = harness.orchestrator.crawl(limit=5)
+
+    assert summary.counts["pagination_repeat"] == 1
+    assert summary.counts["deduped"] == 1
+    warnings = [row for row in summary.outcomes if row.get("reason") == "pagination_repeat"]
+    assert len(warnings) == 1
+    assert warnings[0]["previous_url"] == page_one
+    assert warnings[0]["url"] == page_two
+    assert summary.metadata["warnings"][0]["reason"] == "pagination_repeat"
+    # A warning, not a failed run.
+    assert summary.failed is False
+
+
+def test_recrawl_does_not_downgrade_a_post_lead_to_get(tmp_path, registry) -> None:
+    source = FakeSource(id="fixture")
+    adapter = FakeAdapter([_post_ref()])
+    harness = Harness(
+        tmp_path,
+        registry,
+        sources=[source],
+        adapters={source.id: adapter},
+        fetcher=FakeFetcher(
+            {
+                POST_URL: response(
+                    POST_URL,
+                    body='{"rows":[{"id":2}]}',
+                    headers={"content-type": "application/json"},
+                )
+            }
+        ),
+    )
+    harness.orchestrator.crawl(limit=5)
+
+    # A later discovery pass that knows only the URL must not erase the shape.
+    adapter.refs = [DocumentRef(url=POST_URL, source_id="fixture")]
+    harness.orchestrator.crawl(limit=5)
+
+    row = frontier_rows(harness.frontier)[0]
+    assert row.http_method == "POST"
+    assert row.http_body == POST_BODY
+    assert row.request_headers["Accept"] == "application/json"
 
 
 def test_crawl_dedupes_identical_content_across_urls(tmp_path, registry) -> None:
