@@ -7,38 +7,115 @@
 
 sources:
   # ---------- inventory ----------
+  # Spec §4.1.1: the payload is a JSON XHR, not paginated HTML. The 200-status
+  # error shell for unknown paths is a trap (spec §1, §4.1.2).
   - id: ugc_university_list
-    name: UGC recognised universities (filterable)
-    base_url: https://www.ugc.gov.in/universitydetails/university
+    name: UGC recognised universities (JSON XHR)
+    base_url: https://www.ugc.gov.in/universitydetails/Getuniversity_details
     kind: inventory
-    format: html_paginated
+    format: api
     cadence_days: 30
     trust: high
     adapter: ugc
     enabled: true
-    notes: Tokenised query params; 460 state / 128 deemed / 56 central / 430 private at last snapshot.
+    params:
+      api_endpoint: https://www.ugc.gov.in/universitydetails/Getuniversity_details
+      unitype_param: unitypeID
+      unitype_ids: [0, 1, 2, 3, 4]
+      # Only these keys may enter a DocumentRef / normalised row. Contact and
+      # auth fields are dropped on ingest (spec §2.6, §4.1.1).
+      field_whitelist:
+        - ID
+        - uni_name
+        - uni_type
+        - status
+        - state
+        - address
+        - Zip
+        - url
+        - ESTD
+        - AIshe_code
+        - college
+        - Type
+        - uniportal_id
+    pii_fields:
+      - user_password
+      - user_username
+      - created_Ip
+      - created_Mac
+      - updated_Ip
+      - updated_Mac
+      - Nodal_Mob
+      - Nodal_Email
+      - Nodal_Phn
+      - NM_VC
+      - NM_REG
+      - NM_Nodal
+      - VCPNO
+      - VCPNOR
+      - VCFNO
+      - VCMOB
+      - VCE_ML
+      - RPNO
+      - RPNOR
+      - RFNO
+      - REMOB
+      - RE_ML
+      - UPNO
+      - UPNO1
+      - U_EMAIL
+      - Nodal_Dept
+      - Nodal_Desg
+    notes: >-
+      unitypeID=0 is the union (verified 1,304 rows); 1=57 central, 2=523 state,
+      3=560 private, 4=164 deemed at spec verification. Unknown paths return
+      HTTP 200 with a ~51 KB HTML error shell, so status is not evidence.
+      A university in this list is recognised as a university, never as running
+      an MLT programme.
 
+  # Spec §4.1.2: /oldpdf/ is a 200 error shell, not a listing. Disabled until a
+  # human supplies a real consolidated-list URL; the JSON source supersedes it.
   - id: ugc_consolidated_lists
-    name: UGC consolidated university PDFs
+    name: UGC consolidated university PDFs (disabled)
     base_url: https://www.ugc.gov.in/oldpdf/
     kind: inventory
     format: pdf
     cadence_days: 90
     trust: high
     adapter: ugc_pdf
-    enabled: true
-    notes: Annual snapshot; useful for diffing appearance/disappearance of institutions.
+    enabled: false
+    verify_first: true
+    notes: >-
+      Verified 2026-11-16: /oldpdf/ returns HTTP 200 with the 51,908-byte UGC
+      error shell, not a PDF index. Do not re-enable without a real URL and a
+      sha256 per annual edition.
 
+  # Spec §4.1.3: static xlsx path recorded, but NOT verified from this host
+  # (connection code 000 = DNS/TLS/egress, not 404). Keep disabled until a fetch
+  # succeeds; the adapter abstains with an explicit status rather than emitting
+  # an empty success.
   - id: aishe_reports
-    name: AISHE final reports + dashboard
-    base_url: https://aishe.gov.in/aishe-final-report
+    name: AISHE final reports (static xlsx, verify first)
+    base_url: https://aishe.gov.in/aishe-final-report/
     kind: inventory
     format: excel
     cadence_days: 365
     trust: high
     adapter: aishe
-    enabled: true
-    notes: Self-reported, voluntary, ~18-month lag. Gives discipline-level enrolment, not MLT seats.
+    enabled: false
+    verify_first: true
+    params:
+      listing_url: https://aishe.gov.in/aishe-final-report/
+      report_link_pattern: '#/report/([0-9]{4}-[0-9]{2})'
+      asset_url_template: https://he.nic.in/aishereport/assets/excel/{report_id}.xlsx
+      static_xlsx_url: https://he.nic.in/aishereport/assets/excel/2023-24.xlsx
+      verified: false
+    notes: >-
+      Spec §4.1.3 verified the 2023-24 / 2022-23 xlsx paths at he.nic.in, but a
+      fetch from the dev host returned connection code 000 (DNS/TLS/egress, not
+      404). Treat as unverified until a fetch succeeds. Self-reported, voluntary,
+      ~18-month lag; aggregate enrolment only, never seats.
+
 
   # ---------- regulator (drives hard filters) ----------
   - id: ncahp
@@ -62,7 +139,58 @@ sources:
     adapter: state_council
     enabled: true
     requires_manual_review: true
-    notes: No single portal; several states have no functioning council site. 6 UTs/states had none as of Sep 2026.
+    params:
+      # The NCAHP notification list is the only authoritative "this state has a
+      # council" source (spec §4.2.2). Council websites are added per state, each
+      # with the NCAHP notification URL that admits it.
+      listing_url: https://ncahp.abdm.gov.in/StateCouncil
+      notification_href_pattern: '(?i)/statecouncil/.*\.pdf$'
+      rules_href_pattern: '(?i)statecouncil/SAHC_Rules/'
+      notification_date_pattern: '(?P<date>\d{1,2}[.]\d{1,2}[.]\d{4})'
+      require_ncahp_host: true
+      ncahp_host_suffix: abdm.gov.in
+      statutory_host_suffixes: [gov.in, nic.in, ac.in]
+      # Words removed before deriving a state *token* from the notification
+      # filename. Tokens are hints; canonical state names belong to ER.
+      state_token_strip:
+        - notification
+        - notifications
+        - notifcation
+        - notificationcombined
+        - state
+        - statecouncil
+        - council
+        - allied
+        - healthcare
+        - health
+        - professional
+        - professionals
+        - sahc
+        - rules
+        - rule
+        - order
+        - govt
+        - government
+        - revised
+        - nominated
+        - members
+        - board
+        - latter
+        - letter
+        - merged
+        - compressed
+        - new
+        - pdf
+      # Human-approved statutory council sites. Only Kerala was verifiable on
+      # 2026-11-16 (spec §4.2.2); it publishes no institution register.
+      council_sites: []
+    notes: >-
+      No single portal; several states have no functioning council site. Discovery
+      is `ncahp_state_council_notifications`: NCAHP publishes the constituting
+      notification per state, not council URLs. A council site is admissible only
+      if it appears in an NCAHP notification, is on a *.gov.in/*.nic.in/*.ac.in
+      host, or a human adds it with the NCAHP source URL. Add a state only with
+      that source URL, never from a search result alone.
 
   # ---------- affiliating universities ----------
   - id: state_health_universities
@@ -80,18 +208,60 @@ sources:
       - https://www.tnmgrmu.ac.in
       - https://bfuhs.ac.in
       - https://www.knruhs.telangana.gov.in
+    params:
+      # One generic adapter, per-domain discovery mode (spec §4.1.4). A seed
+      # without a verified entry is skipped with a reason, never guessed at.
+      max_pages: 5
+      college_pattern: '(?i)college|institut'
+      pdf_href_pattern: '(?i)\.pdf($|\?)'
+      document_text_pattern: '(?i)college|affiliat|syllabus|seat|course|prospectus'
+      js_shell_markers: ['<div id="root"', '<script']
+      js_shell_min_anchors: 1
+      navigate_pattern: '(?i)affiliat|college|institution|courses?'
+      per_domain:
+        ruhsraj.org:
+          mode: html
+          verified: true
+          listing_url: https://ruhsraj.org/affiliated-colleges/
+        tnmgrmu.ac.in:
+          mode: sitemap
+          verified: true
+          sitemap_url: https://www.tnmgrmu.ac.in/wp-sitemap-posts-page-1.xml
+          sitemap_path_pattern: '(?i)affiliat|college|course'
+        wbuhs.ac.in:
+          mode: html
+          verified: false
+          note: college list not located on 2026-11-16 (spec §4.1.4)
+        bfuhs.ac.in:
+          mode: html
+          verified: false
+          note: content moved to bfuhs.ggsmch.org / examination.bfuhsonline.ac.in
+        knruhs.telangana.gov.in:
+          mode: nav
+          verified: false
+          note: programme pages seen via wp-json; college-list entry point unconfirmed
 
   # ---------- quality ----------
   - id: naac_results
     name: NAAC accreditation results
-    base_url: http://naac.gov.in/index.php/en/19-quick-links/62-accreditationresults
+    # Spec §4.3.1: http:// times out; only https:// works (incomplete cert chain,
+    # so the fetch layer must trust the missing intermediate, never disable TLS).
+    base_url: https://naac.gov.in/index.php/en/19-quick-links/62-accreditationresults
     kind: quality
     format: html
     cadence_days: 30
     trust: high
     adapter: naac
     enabled: true
-    notes: CGPA/grade/cycle/validity per institution. SSR/AQAR PDFs live on college sites, not here.
+    params:
+      listing_url: https://naac.gov.in/index.php/en/19-quick-links/62-accreditationresults
+      pdf_href_pattern: '/images/docs/AccreditationResults/'
+      link_text_pattern: '(?i)health scien|1st cycle|2nd cycle|CGPA'
+    notes: >-
+      Single Joomla page with ~1,539 PDF anchors (born-digital). Do not
+      pattern-match filenames; classify by anchor text + table context. The PDF
+      carries AISHE code, CGPA and grade (spec §4.3.1).
+
 
   - id: nirf_rankings
     name: NIRF rankings (institution-level proxy only)
@@ -102,7 +272,22 @@ sources:
     trust: high
     adapter: nirf
     enabled: true
-    notes: No paramedical category. Never treat NIRF as programme-level evidence.
+    params:
+      # Ranking pages verified 2026-11-16 (spec §4.3.2). No paramedical category
+      # exists, so every ref is institution-level only.
+      listing_urls:
+        - https://www.nirfindia.org/Rankings/2025/OverallRanking.html
+        - https://www.nirfindia.org/Rankings/2025/MedicalRanking.html
+        - https://www.nirfindia.org/Rankings/2025/UniversityRanking.html
+      pdf_href_pattern: '(?i)nirfpdfcdn/[0-9]{4}/pdf/.*\.pdf$'
+      year_pattern: '(?P<year>20[0-9]{2})/'
+      category_pattern: '(?i)/(?P<category>overall|medical|university)ranking\.html'
+      pdf_category_pattern: '(?i)/pdf/(?P<category>[^/]+)/'
+    notes: >-
+      Spec §4.3.2: default curl UA gets CloudFront 403; must go through the
+      escalated tier with a truthful UA. No paramedical category exists, so a
+      NIRF rank is institution-level only and must never be attributed to an
+      MLT programme. DCS remains login-walled and excluded.
 
   - id: ugc_autonomous_colleges
     name: UGC autonomous colleges
@@ -115,26 +300,33 @@ sources:
     enabled: true
 
   # ---------- clinical infrastructure (training-quality proxy) ----------
-  - id: nabl_labs
-    name: NABL accredited laboratories
-    base_url: https://nablwp.qci.org.in/laboratorysearchone
-    kind: clinical
-    format: html
-    cadence_days: 30
-    trust: high
-    adapter: nabl
-    enabled: true
-    notes: Form-post search; no documented API.
+  # NABL is NOT a source: robots.txt is `Disallow: /` (spec §4.4.1). It is
+  # recorded under `exclusions` below and no adapter is built.
 
   - id: nabh_hospitals
     name: NABH accredited hospitals
-    base_url: https://nabh.co.in/
+    # Spec §4.4.2: nabh.co.in is a parked domain; nabh.co is current.
+    base_url: https://nabh.co/
     kind: clinical
-    format: mixed_html_pdf
+    format: json
     cadence_days: 30
     trust: high
     adapter: nabh
     enabled: true
+    params:
+      listing_url: https://nabh.co/find-a-healthcare-organisation/
+      ajax_url: https://nabh.co/wp-admin/admin-ajax.php
+      request_method: POST
+      action_states: get_states
+      action_hospitals: get_hospitals
+      state_param: selectState
+      page_param: page
+      max_pages: 50
+    notes: >-
+      Directory is a WordPress admin-ajax POST (`action=get_hospitals`) returning
+      JSON with html/pagination/mapData; no nonce or CAPTCHA on this path.
+      Paginate conservatively (one page per 2 s when >100 KB).
+
 
   # ---------- admissions ----------
   - id: counselling_maharashtra
@@ -146,7 +338,17 @@ sources:
     trust: high
     adapter: state_counselling
     enabled: true
-    notes: Seat matrix + cutoffs + eligibility. Paramedical courses handled via state CET.
+    params:
+      listing_urls:
+        - https://cetcell.mahacet.org/notices/
+      pdf_href_pattern: '\.pdf$'
+      link_text_pattern: '(?i)seat matrix|cutoff|cut-off|last rank|brochure|prospectus|notification|schedule'
+      date_pattern: '(?P<date>\d{4}[-_]\d{2}[-_]\d{2})'
+    notes: >-
+      WordPress; ~70 PDF links/page, /notices/page/<n>/ pagination. robots is a
+      Googlebot/Bingbot allow-list with no `User-agent: *` group, so crawl
+      conservatively at 0.5 rps and record the parsing decision (spec §4.5).
+
 
   - id: counselling_karnataka
     name: KEA / KCET (Karnataka)
@@ -157,6 +359,15 @@ sources:
     trust: high
     adapter: state_counselling
     enabled: true
+    params:
+      listing_urls:
+        - https://cetonline.karnataka.gov.in/kea
+      pdf_href_pattern: '\.pdf$'
+      link_text_pattern: '(?i)seat matrix|cutoff|cut-off|last rank|brochure|prospectus|notification|schedule'
+    notes: >-
+      Spec §4.5: fresh-entry BSc MLT route not identified; only lateral entry
+      (`nursingltr2026`) and UGCET observed. Abstain on KA seat/cutoff until a
+      human confirms. 0.5 rps on karnataka.gov.in.
 
   - id: counselling_tamil_nadu
     name: TN Health / medical counselling (merit-based)
@@ -167,6 +378,12 @@ sources:
     trust: high
     adapter: state_counselling
     enabled: true
+    params:
+      listing_urls:
+        - https://www.tnhealth.tn.gov.in/notifications.php
+      pdf_href_pattern: '\.pdf$'
+      link_text_pattern: '(?i)seat matrix|cutoff|cut-off|last rank|brochure|prospectus|notification|schedule'
+    notes: '<ul id="ticker01"> of list items; links may be relative to /.'
 
   - id: counselling_kerala
     name: LBS Centre (Kerala)
@@ -177,6 +394,13 @@ sources:
     trust: high
     adapter: state_counselling
     enabled: true
+    params:
+      listing_urls:
+        - https://lbscentre.kerala.gov.in/orders
+        - https://lbscentre.kerala.gov.in/
+      pdf_href_pattern: '\.pdf$'
+      link_text_pattern: '(?i)seat matrix|cutoff|cut-off|last rank|brochure|prospectus|notification|schedule|allotment'
+    notes: 'Spec §4.5: /notifications is 404; crawl /orders + home, do not guess paths.'
 
   - id: counselling_west_bengal
     name: WBJEEB JENPAS-UG (West Bengal)
@@ -187,6 +411,12 @@ sources:
     trust: high
     adapter: state_counselling
     enabled: true
+    params:
+      listing_urls:
+        - https://wbjeeb.nic.in/jenpas-ug/
+      pdf_href_pattern: '\.pdf$'
+      link_text_pattern: '(?i)seat matrix|cutoff|cut-off|last rank|brochure|prospectus|notification|schedule'
+    notes: 'wp-json REST is disabled; parse HTML.'
 
   - id: counselling_punjab
     name: BFUHS (Punjab)
@@ -197,6 +427,13 @@ sources:
     trust: high
     adapter: state_counselling
     enabled: true
+    params:
+      listing_urls:
+        - https://bfuhs.ac.in/index1.aspx
+        - https://examination.bfuhsonline.ac.in/cos/noticesview.aspx
+      pdf_href_pattern: '\.pdf$'
+      link_text_pattern: '(?i)seat matrix|cutoff|cut-off|last rank|brochure|prospectus|notification|schedule'
+    notes: 'BFUHS is both a health university and Punjab''s paramedical counsellor; one budget.'
 
   - id: counselling_odisha
     name: OJEE (Odisha)
@@ -207,26 +444,52 @@ sources:
     trust: high
     adapter: state_counselling
     enabled: true
+    params:
+      listing_urls:
+        - https://ojee.nic.in/
+      pdf_href_pattern: '\.pdf$'
+      link_text_pattern: '(?i)seat matrix|cutoff|cut-off|last rank|brochure|prospectus|notification|schedule'
+    notes: 'PDFs live on the s3waas CDN; /category/notice/ is 404, use home/sitemap.'
 
   - id: counselling_madhya_pradesh
-    name: DME MP
-    base_url: null
+    name: MP paramedical counselling (MPOnline)
+    # Spec §3: DME MP links a dedicated paramedical counselling portal.
+    base_url: https://paramedical.mponline.gov.in/
     kind: admissions
     format: mixed_html_pdf
     cadence_days: 7
     trust: high
     adapter: state_counselling
     enabled: true
+    params:
+      listing_urls:
+        - https://paramedical.mponline.gov.in/
+      pdf_href_pattern: '\.pdf$'
+      link_text_pattern: '(?i)seat matrix|cutoff|cut-off|last rank|brochure|prospectus|notification|schedule'
+    notes: >-
+      Landing page verified (200 -> /Portal/services/Paramedical/home.aspx);
+      the notices section and whether a session cookie is required are NOT
+      identified. An empty parse is `unknown`, not "no seats" (spec §6).
 
   - id: counselling_uttar_pradesh
-    name: DGME UP
-    base_url: null
+    name: ABVMU CAHET (Uttar Pradesh)
+    # Spec §3: BMLT/BMLS admissions run through ABVMU/CAHET, not DGME/UPNEET
+    # (those cover MBBS/BDS only). The adapter must reject MBBS seat matrices.
+    base_url: https://abvmuup.edu.in/admission-paramedical.php
     kind: admissions
     format: mixed_html_pdf
     cadence_days: 7
     trust: high
     adapter: state_counselling
     enabled: true
+    params:
+      listing_urls:
+        - https://abvmuup.edu.in/admission-paramedical.php
+      pdf_href_pattern: '\.pdf$'
+      link_text_pattern: '(?i)BMLT|BMLS|seat matrix|cutoff|cut-off|last rank|brochure|prospectus|notification|schedule'
+    notes: >-
+      Corrects the old DGME UP mapping. ABVMU runs CAHET for BMLT/BMLS/BMRIT/BPT.
+      upneet.gov.in covers NEET-UG (MBBS/BDS) only and must not seed seat claims.
 
   - id: counselling_rajasthan
     name: RUHS (Rajasthan)
@@ -237,10 +500,17 @@ sources:
     trust: high
     adapter: state_counselling
     enabled: true
-    notes: Announced NEET-based paramedical admission for 2025-26; re-verify each cycle.
+    params:
+      listing_urls:
+        - https://ruhsraj.org/
+      pdf_href_pattern: '\.pdf$'
+      link_text_pattern: '(?i)seat matrix|cutoff|cut-off|last rank|brochure|prospectus|notification|schedule'
+    notes: >-
+      Announced NEET-based paramedical admission for 2025-26; re-verify each
+      cycle. Same registrable domain as state_health_universities: one budget.
 
-  - id: counselling_telangana_ap
-    name: KNRUHS / EAPCET (Telangana, Andhra Pradesh)
+  - id: counselling_telangana
+    name: KNRUHS (Telangana)
     base_url: https://www.knruhs.telangana.gov.in
     kind: admissions
     format: mixed_html_pdf
@@ -248,6 +518,28 @@ sources:
     trust: high
     adapter: state_counselling
     enabled: true
+    params:
+      listing_urls:
+        - https://www.knruhs.telangana.gov.in/admission-notification/
+      pdf_href_pattern: '\.pdf$'
+      link_text_pattern: '(?i)seat matrix|cutoff|cut-off|last rank|brochure|prospectus|notification|schedule'
+      date_pattern: '/notifications/(?P<date>\d{8})'
+    notes: 'Telangana only. AP is split into counselling_andhra_pradesh (spec §3).'
+
+  - id: counselling_andhra_pradesh
+    name: Dr. NTR UHS (Andhra Pradesh) — unverified
+    base_url: null
+    kind: admissions
+    format: mixed_html_pdf
+    cadence_days: 7
+    trust: high
+    adapter: state_counselling
+    enabled: false
+    verify_first: true
+    requires_manual_review: true
+    notes: >-
+      Spec §3/§9: split from the Telangana row; canonical AP paramedical URL was
+      not verified. Leave disabled and emit UNKNOWN until a human supplies it.
 
   # ---------- fees ----------
   - id: fee_regulators
@@ -259,20 +551,66 @@ sources:
     trust: high
     adapter: fee_regulator
     enabled: true
+    params:
+      order_href_pattern: '(?i)\.pdf($|\?)'
+      order_text_pattern: '(?i)fee|order|notification|gazette'
+      assume_scanned: true
+      scan_hint_pattern: '(?i)scan|gazette'
+      form_markers: ['<select', 'sub_type']
+      portals:
+        # Verified 2026-11-16 (spec §4.6.1): a search form whose sub_type list is
+        # populated by JS and whose vocabulary is unknown. No order PDF is
+        # reachable without a browser session, so this abstains loudly.
+        - id: maharashtra
+          listing_url: https://ay25-26.mahafraportal.org/ssi_prp_24/outer.php?q=fee_search_report
+          mode: form
+          verified: true
+        # No verified FRC order listing for these states on 2026-11-16.
+        - id: kerala
+          listing_url: null
+          mode: html
+          verified: false
+        - id: rajasthan
+          listing_url: null
+          mode: html
+          verified: false
+        - id: tamil_nadu
+          listing_url: null
+          mode: html
+          verified: false
+        - id: madhya_pradesh
+          listing_url: null
+          mode: html
+          verified: false
     notes: Scanned orders, inconsistent coverage, often only professional courses. Partial by design.
 
   # ---------- pay anchor ----------
   - id: seventh_cpc_pay_matrix
-    name: 7th CPC pay matrix (Level 5/6 anchor)
+    name: 7th CPC pay matrix (Level 4 — scanned)
     base_url: https://dcsem.gov.in/resources/uploads/rti_links/l4Paymatrix.pdf
     kind: payload
-    format: pdf
+    format: pdf_scan
     cadence_days: 3650
     trust: high
     adapter: pay_matrix
     enabled: true
+    verify_first: true
+    level: 4
+    scanned: true
+    params:
+      document_url: https://dcsem.gov.in/resources/uploads/rti_links/l4Paymatrix.pdf
+      # The Level 4 URL itself is verified (spec §4.7); Level 5/6 is not.
+      verified: true
+    notes: >-
+      Spec §4.7: the known URL is Level 4 (filename l4), 358,030 B, one page,
+      zero extractable characters => scanned, route to T2. l5/l6/level5/level6
+      all 404, so do not treat this as the Level 5/6 technologist anchor. DA/HRA
+      must remain separate or UNKNOWN.
 
   # ---------- financing ----------
+  # Spec §4.8: both financing hosts were unreachable/WAF-rejected from a
+  # datacentre IP. An unreachable financing source must surface as UNKNOWN
+  # funding data, not "no loans". Adapters attempt once, then abstain.
   - id: vidya_lakshmi
     name: Vidya Lakshmi (loan single window)
     base_url: https://www.vidyalakshmi.co.in/
@@ -282,7 +620,12 @@ sources:
     trust: high
     adapter: financing
     enabled: true
-    notes: Scheme comparison is public; application flow is behind login and out of scope.
+    abstain: true
+    expect_blocked: true
+    notes: >-
+      Observed 40 s TCP timeout twice (connection never established), not a 403
+      or CAPTCHA. Attempt once per run, then abstain; needs a human reachability
+      check from the deploy egress before re-enabling claims.
 
   - id: csis_subsidy
     name: CSIS interest subsidy scheme
@@ -293,7 +636,11 @@ sources:
     trust: high
     adapter: financing
     enabled: true
-    notes: Eligibility for BSc MLT as a "professional course" is lender-dependent. Mark conditional.
+    abstain: true
+    expect_blocked: true
+    notes: >-
+      Same host/timeout as Vidya Lakshmi. Eligibility for BSc MLT as a
+      "professional course" is lender-dependent; mark conditional when obtained.
 
   - id: pm_vidyalaxmi
     name: PM-Vidyalaxmi (2024)
@@ -304,7 +651,11 @@ sources:
     trust: high
     adapter: financing
     enabled: true
-    notes: Excludes foreign universities and NRI/management quota. QHEI list is downloadable.
+    abstain: true
+    expect_blocked: true
+    notes: >-
+      F5 WAF "Request Rejected" on every path (302 -> /Page_50x.aspx, 246 B).
+      Classify `waf_blocked`, abstain; never escalate to a browser to defeat it.
 
   # ---------- discovery only ----------
   - id: searxng
@@ -316,6 +667,12 @@ sources:
     trust: low
     adapter: searxng
     enabled: true
+    params:
+      # `{placeholder}` values are supplied at runtime; leads only, never evidence.
+      query_templates:
+        - "{institution} placement report"
+        - "{institution} BSc MLT"
+        - "{institution} seat matrix"
     notes: Query templates only; results are leads, never evidence.
 
   - id: common_crawl_index
@@ -327,7 +684,17 @@ sources:
     trust: low
     adapter: common_crawl
     enabled: true
-    notes: Bulk discovery of *.ac.in / *.gov.in PDFs. Never evidence.
+    params:
+      index_glob: https://data.commoncrawl.org/cc-index/table/cc-main/warc/crawl=*/subset=warc/*.parquet
+      # Bare eTLDs, no leading dot. The sweep is bounded to the enabled country.
+      domain_suffixes:
+        - ac.in
+        - gov.in
+      # SQL LIKE patterns applied to the indexed URL.
+      pdf_url_patterns:
+        - "%.pdf"
+        - "%.pdf?%"
+    notes: Bulk discovery of institutional PDFs. Never evidence.
 
   # ---------- institution sites (discovered at runtime) ----------
   - id: institution_sites
@@ -339,10 +706,52 @@ sources:
     trust: low
     adapter: institution_site
     enabled: true
+    params:
+      # Domains arrive at runtime from discovery (UGC websites, NIRF names).
+      # The crawl is bounded and stays on one registrable domain per seed.
+      domains: []
+      max_depth: 2
+      max_pages_per_domain: 200
+      yield_check_after: 25
+      min_yield_percent: 2
+      document_extensions: [.pdf]
+      page_extensions: [.html, .htm, .php, .aspx, .jsp]
+      document_filename_patterns:
+        - '(?i)(ssr|aqar|nirf|placement|annual[-_ ]?report|prospectus|self[-_ ]?study|iqac)'
+        - '(?i)(cycle[-_ ]?[12]|criteria[-_ ]?[1-7]|dcs|aishe|feedback)'
+      anchor_patterns:
+        - '(?i)(ssr|aqar|nirf|placement|annual report|prospectus|self study|iqac|dcs)'
+      navigate_patterns:
+        - '(?i)(naac|iqac|nirf|placement|downloads?|documents?|annual|report|about|academics)'
+      skip_patterns:
+        - '(?i)(login|sign[-_ ]?in|sign[-_ ]?up|wp-login|register|apply[-_ ]?online)'
     notes: Placement PDFs usually live in NAAC SSR/AQAR/NIRF DCS annexures. Self-reported, promotional; treat as low trust.
+
+# Confirmed impersonators (spec §4.2.2). A trust registered under the Indian
+# Trusts Act is NOT a statutory State Allied and Healthcare Council under the
+# NCAHP Act 2021. The loader rejects any registry URL on these hosts and
+# `validate_recognition_origin` rejects claims originating here. Statutory
+# authenticity may only come from the NCAHP list.
+denylisted_domains:
+  - domain: statealliedandhealthcarecouncil.com
+    reason: >-
+      Private trust ("State Allied And Healthcare Council Lucknow / of India")
+      claiming a registration number and Government of India recognition; not an
+      NCAHP-constituted statutory council. Never fetch, never cite.
+  - domain: sahstc.com
+    reason: >-
+      Private trust ("State Allied And Healthcare Skill And Training Council",
+      Section-64(A) Indian Trust Act 1882); not an NCAHP statutory council.
+      Never fetch, never cite.
 
 # Explicitly excluded, with reasons (append-only log).
 exclusions:
+  - id: nabl_labs
+    name: NABL accredited laboratories
+    reason: >-
+      robots.txt is `Disallow: /` (spec §4.4.1). Invariant 9 is absolute: do not
+      crawl. clinical_training falls back to NABH only; a human may request an
+      official data dump.
   - id: nirf_dcs
     name: NIRF Data Collection System (bulk)
     reason: Login-walled. Only public mirrors on college sites may be fetched.
