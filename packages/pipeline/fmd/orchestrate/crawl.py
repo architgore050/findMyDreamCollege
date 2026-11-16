@@ -33,7 +33,16 @@ from fmd.db.repositories import (
     SnapshotsRepo,
 )
 from fmd.discover.base import dedupe_refs
-from fmd.fetch.dedupe import near_duplicate, simhash64
+from fmd.fetch.dedupe import (
+    DEFAULT_SIMHASH_THRESHOLD,
+    DedupeSettings,
+    dedupe_settings,
+    effective_mode,
+    hamming,
+    row_identities,
+    simhash64,
+    similarity,
+)
 from fmd.fetch.politeness import registrable_domain
 from fmd.fetch.types import FetchRequest, FetchResult, TierUnavailable, http_date
 from fmd.frontier.queue import Frontier
@@ -49,7 +58,8 @@ logger = logging.getLogger(__name__)
 # A source that cannot answer this many times in one run is stopped, not retried
 # forever. A block/quarantine is handled per URL by the frontier as well.
 DEFAULT_SOURCE_FAILURE_BUDGET = 5
-SIMHASH_MAX_DISTANCE = 3
+#: Backwards-compatible alias; the effective value is read per source.
+SIMHASH_MAX_DISTANCE = DEFAULT_SIMHASH_THRESHOLD
 PAGINATION_REPEAT = "pagination_repeat"
 
 
@@ -137,13 +147,6 @@ def _http_datetime(value: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def _is_textual(content_type: str | None) -> bool:
-    if not content_type:
-        return False
-    lowered = content_type.lower()
-    return any(token in lowered for token in ("text/", "json", "xml", "html"))
-
-
 class Crawler:
     def __init__(
         self,
@@ -169,8 +172,12 @@ class Crawler:
         self.planner = planner
         self.sources_by_id = {str(getattr(source, "id", "")): source for source in sources or ()}
         self.max_source_failures = max_source_failures
-        self._seen_sha: set[str] = set()
-        self._fingerprints: list[int] = []
+        # sha256 -> (url, document_id); identities are scoped per source so a
+        # mirrored listing on another host cannot suppress a real page.
+        self._seen_sha: dict[str, tuple[str, int]] = {}
+        self._fingerprints: list[tuple[int, str, int, str]] = []
+        self._identities: dict[str, set[str]] = {}
+        self._identity_owner: dict[str, tuple[str, int, str]] = {}
         self._source_failures: dict[str, int] = {}
         self._stopped_sources: set[str] = set()
         # Consecutive successful pages per source, for pagination diagnostics.
@@ -472,27 +479,38 @@ class Crawler:
         )
         latest = self._latest(document)
         summary.bump(f"role.{role}")
-        fingerprint = simhash64(result.text) if _is_textual(content_type) else None
-        duplicate = False
-        reason = ""
-        if latest is not None and latest.sha256 == sha:
-            duplicate = True
-            reason = "unchanged_content"
-        elif sha in self._seen_sha:
-            duplicate = True
-            reason = "duplicate_sha256"
-        elif fingerprint is not None and any(
-            near_duplicate(fingerprint, other, max_distance=SIMHASH_MAX_DISTANCE)
-            for other in self._fingerprints
-        ):
-            duplicate = True
-            reason = "near_duplicate_simhash"
+        decision = self._dedupe_decision(
+            record,
+            result,
+            sha=sha,
+            content_type=content_type,
+            source_id=source_id,
+            latest=latest,
+        )
+        mode = decision["mode"]
+        duplicate = decision["duplicate"]
+        reason = decision["reason"]
 
         if duplicate:
             summary.bump("deduped")
-            summary.outcomes.append(
-                {"url": record.url, "outcome": "deduped", "reason": reason, "sha256": sha}
-            )
+            entry = {
+                "url": record.url,
+                "outcome": "deduped",
+                "reason": reason,
+                "sha256": sha,
+                "mode": mode,
+                "similarity": decision["similarity"],
+                "compared_document_id": decision["compared_document_id"],
+                "compared_url": decision["compared_url"],
+            }
+            if decision["hamming_distance"] is not None:
+                entry["hamming_distance"] = decision["hamming_distance"]
+            if source_id:
+                entry["source_id"] = source_id
+            summary.outcomes.append(entry)
+            # A near-duplicate must never look like "sparse data" in a run
+            # summary: keep the threshold, the compared document and the mode.
+            summary.metadata.setdefault("dedupe", []).append(dict(entry))
         else:
             self.snapshots.create(
                 SnapshotCreate(
@@ -506,9 +524,14 @@ class Crawler:
                 )
             )
             summary.bump("stored")
-            self._seen_sha.add(sha)
-            if fingerprint is not None:
-                self._fingerprints.append(fingerprint)
+            self._remember(
+                sha=sha,
+                url=record.url,
+                document_id=document.id,
+                fingerprint=decision["fingerprint"],
+                identities=decision["identities"],
+                source_id=source_id,
+            )
 
         self.frontier.complete(
             record.url,
@@ -521,6 +544,129 @@ class Crawler:
         )
         if source_id:
             self._source_failures[source_id] = 0
+
+    def _dedupe_decision(
+        self,
+        record: Any,
+        result: FetchResult,
+        *,
+        sha: str,
+        content_type: str | None,
+        source_id: str,
+        latest: SnapshotRecord | None,
+    ) -> dict[str, Any]:
+        """Decide whether this fetch is a duplicate, and say exactly why.
+
+        The policy is registry-driven. Structured payloads default to exact
+        matching because simhash on a paginated JSON wrapper compares
+        boilerplate, not rows. ``identity`` mode additionally compares row
+        identities so two pages of one listing stay distinct.
+        """
+        settings: DedupeSettings = dedupe_settings(self.sources_by_id.get(source_id))
+        text = result.text
+        mode = effective_mode(settings, content_type=content_type, text=text)
+        fingerprint = simhash64(text) if mode == "simhash" else None
+        identities = (
+            row_identities(text, settings.identity_fields) if mode == "identity" else frozenset()
+        )
+        decision: dict[str, Any] = {
+            "mode": mode,
+            "fingerprint": fingerprint,
+            "identities": identities,
+            "duplicate": False,
+            "reason": "",
+            "similarity": None,
+            "hamming_distance": None,
+            "compared_document_id": None,
+            "compared_url": None,
+        }
+
+        if latest is not None and latest.sha256 == sha:
+            decision.update(
+                {
+                    "duplicate": True,
+                    "reason": "unchanged_content",
+                    "similarity": 1.0,
+                    "compared_document_id": latest.document_id,
+                    "compared_url": record.url,
+                }
+            )
+            return decision
+
+        owner = self._seen_sha.get(sha)
+        if owner is not None:
+            decision.update(
+                {
+                    "duplicate": True,
+                    "reason": "duplicate_sha256",
+                    "similarity": 1.0,
+                    "compared_document_id": owner[1],
+                    "compared_url": owner[0],
+                }
+            )
+            return decision
+
+        if mode == "simhash" and fingerprint is not None:
+            closest = min(
+                self._fingerprints,
+                key=lambda row: hamming(fingerprint, row[0]),
+                default=None,
+            )
+            if closest is not None:
+                distance = hamming(fingerprint, closest[0])
+                if distance <= settings.simhash_threshold:
+                    decision.update(
+                        {
+                            "duplicate": True,
+                            "reason": "near_duplicate_simhash",
+                            "similarity": similarity(fingerprint, closest[0]),
+                            "hamming_distance": distance,
+                            "compared_document_id": closest[2],
+                            "compared_url": closest[1],
+                        }
+                    )
+            return decision
+
+        if mode == "identity" and identities:
+            key = source_id or ""
+            seen = self._identities.get(key, set())
+            if seen and identities <= seen:
+                sample = next(identity for identity in identities if identity in seen)
+                owner = self._identity_owner.get(f"{key}\x00{sample}")
+                decision.update(
+                    {
+                        "duplicate": True,
+                        "reason": "near_duplicate_identity",
+                        "similarity": len(identities & seen) / len(identities),
+                        "compared_document_id": owner[1] if owner else None,
+                        "compared_url": owner[0] if owner else None,
+                    }
+                )
+            return decision
+
+        return decision
+
+    def _remember(
+        self,
+        *,
+        sha: str,
+        url: str,
+        document_id: int,
+        fingerprint: int | None,
+        identities: frozenset[str],
+        source_id: str,
+    ) -> None:
+        """Record what a stored snapshot represents, for future comparisons."""
+        self._seen_sha.setdefault(sha, (url, document_id))
+        if fingerprint is not None:
+            self._fingerprints.append((fingerprint, url, document_id, source_id))
+        if identities:
+            key = source_id or ""
+            self._identities.setdefault(key, set()).update(identities)
+            for identity in identities:
+                self._identity_owner.setdefault(
+                    f"{key}\x00{identity}", (url, document_id, source_id)
+                )
 
     def _note_page_content(
         self, record: Any, sha: str, *, summary: RunSummary, source_id: str

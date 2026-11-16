@@ -359,6 +359,14 @@ sources:
       # `states` are used only when this flag is true; no state list lives in code.
       state_filter_supported: false
       states: []
+      # Dedupe policy (brief §7). A paginated directory is a structured listing,
+      # not a document: text simhash sees 25 rows of boilerplate and calls
+      # distinct pages duplicates. Exact sha256 remains the byte key; `identity`
+      # mode additionally keeps pages whose hospital identifiers are disjoint.
+      dedupe:
+        mode: identity
+        identity_fields: [acc_no, name]
+        simhash_threshold: 3
     notes: >-
       Directory is a WordPress admin-ajax POST (`action=get_hospitals`) returning
       JSON with html/pagination/mapData; no nonce, cookie or CAPTCHA on this path

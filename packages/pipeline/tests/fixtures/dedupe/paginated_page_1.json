@@ -1,0 +1,8 @@
+{
+  "pagination": {"current_page": 1, "total_pages": 2, "total_results": 4},
+  "html": "<div class=\"hp-head-row\"><div class=\"hs-col hs-col-1\">HCO Name</div><div class=\"hs-col hs-col-4\">Acc. No.</div></div><div class=\"card hp-body-row\"><div class=\"hs-col hs-col-1\">Alpha Hospital</div><div class=\"hs-col hs-col-4\">SHCO-2023-0001</div></div><div class=\"card hp-body-row\"><div class=\"hs-col hs-col-1\">Beta Hospital</div><div class=\"hs-col hs-col-4\">SHCO-2023-0002</div></div>",
+  "mapData": [
+    {"name": "Alpha Hospital", "acc_no": "SHCO-2023-0001", "address": "Pune", "lat": 18.52, "lng": 73.85},
+    {"name": "Beta Hospital", "acc_no": "SHCO-2023-0002", "address": "Pune", "lat": 18.53, "lng": 73.86}
+  ]
+}

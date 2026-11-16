@@ -1,0 +1,8 @@
+{
+  "pagination": {"current_page": 2, "total_pages": 2, "total_results": 4},
+  "html": "<div class=\"hp-head-row\"><div class=\"hs-col hs-col-1\">HCO Name</div><div class=\"hs-col hs-col-4\">Acc. No.</div></div><div class=\"card hp-body-row\"><div class=\"hs-col hs-col-1\">Gamma Hospital</div><div class=\"hs-col hs-col-4\">SHCO-2023-0003</div></div><div class=\"card hp-body-row\"><div class=\"hs-col hs-col-1\">Delta Hospital</div><div class=\"hs-col hs-col-4\">SHCO-2023-0004</div></div>",
+  "mapData": [
+    {"name": "Gamma Hospital", "acc_no": "SHCO-2023-0003", "address": "Mumbai", "lat": 19.07, "lng": 72.87},
+    {"name": "Delta Hospital", "acc_no": "SHCO-2023-0004", "address": "Mumbai", "lat": 19.08, "lng": 72.88}
+  ]
+}
