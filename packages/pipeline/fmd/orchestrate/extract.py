@@ -64,6 +64,9 @@ class Extractor:
         router: Any,
         tool_version: str = DEFAULT_TOOL_VERSION,
         pipeline_factory: Any = None,
+        verifier: Any | None = None,
+        verifier_factory: Any = None,
+        verify: bool = True,
     ) -> None:
         self.snapshots = snapshots
         self.documents = documents
@@ -74,6 +77,13 @@ class Extractor:
         self.router = router
         self.tool_version = tool_version
         self.pipeline_factory = pipeline_factory
+        self.verifier = verifier
+        self.verifier_factory = verifier_factory
+        self.verify = verify
+        self._verifier_ready = False
+        self._verifier_cost = 0.0
+        self._verifier_exhausted = False
+        self._verifier_error: str | None = None
 
     def _pipeline(self, *, force: bool) -> ExtractPipeline:
         cls = ForcedExtractPipeline if force else ExtractPipeline
@@ -101,6 +111,9 @@ class Extractor:
             limit if limit is not None else 500,
         )
         pipeline = self._pipeline(force=force)
+        verifier = self._get_verifier()
+        if verifier is not None:
+            verifier.start_run()
         for snapshot in pending:
             document = self.documents.get(snapshot.document_id)
             target, reason = self._target(snapshot, document)
@@ -147,6 +160,7 @@ class Extractor:
                 continue
 
             rejected = len(result.rejections)
+            verification = self._verify(result, verifier)
             summary.bump("extracted")
             summary.bump("claims", len(result.claims))
             summary.bump("rejected_claims", rejected)
@@ -161,9 +175,80 @@ class Extractor:
                 "claims": len(result.claims),
                 "rejected": rejected,
             }
+            if verification is not None:
+                counts = verification.counts()
+                summary.bump("verified", counts["supported"])
+                summary.bump("verification_rejected", counts["rejected"])
+                summary.bump("unverified", counts["unverified"])
+                summary.bump("verifier_calls", verification.calls)
+                summary.bump("verifier_repairs", verification.repairs)
+                self._verifier_cost += verification.estimated_cost_usd
+                self._verifier_exhausted = (
+                    self._verifier_exhausted or verification.budget_exhausted
+                )
+                self._verifier_error = self._verifier_error or verification.error
+                entry["verified"] = counts["supported"]
+                entry["verification_rejected"] = counts["rejected"]
+                entry["unverified"] = counts["unverified"]
+                entry["verifier_calls"] = verification.calls
+            elif verifier is not None and result.claims:
+                # A verifier that raised leaves every claim unverified; say so
+                # rather than letting a missing count look like a clean pass.
+                summary.bump("unverified", len(result.claims))
+                self._verifier_error = self._verifier_error or "verification_failed"
+                entry["unverified"] = len(result.claims)
             if rejected:
                 entry["reasons"] = [_rejection_reason(item) for item in result.rejections]
             summary.outcomes.append(entry)
+
+        if verifier is not None:
+            summary.metadata["verifier"] = {
+                "model": getattr(verifier, "model", None),
+                "prompt_version": getattr(getattr(verifier, "prompt", None), "ref", None),
+                "estimated_cost_usd": round(self._verifier_cost, 6),
+                "budget_exhausted": self._verifier_exhausted,
+                "error": self._verifier_error,
+            }
+
+    # ------------------------------------------------------------------ verification
+    def _get_verifier(self) -> Any | None:
+        """Build the second pass once per run, or return ``None`` if unavailable.
+
+        Verification is optional by design: a missing profile or prompt must not
+        fail extraction. Every claim simply stays ``unverified``, which is the
+        honest state.
+        """
+        if not self.verify:
+            return None
+        if self._verifier_ready:
+            return self.verifier
+        self._verifier_ready = True
+        if self.verifier is not None:
+            return self.verifier
+        try:
+            if self.verifier_factory is not None:
+                self.verifier = self.verifier_factory(self.router)
+            else:
+                models = getattr(self.router, "models", None)
+                if models is None or "verify" not in models.profiles:
+                    return None
+                from fmd.verify import Verifier
+
+                self.verifier = Verifier(self.router, claims=self.claims)
+        except Exception as exc:  # config/prompt absence degrades, never crashes
+            logger.warning("verification disabled for this run: %s", exc)
+            self.verifier = None
+        return self.verifier
+
+    def _verify(self, result: Any, verifier: Any | None) -> Any | None:
+        if verifier is None or not result.claims:
+            return None
+        text = result.doc.text if result.doc is not None else ""
+        try:
+            return verifier.verify_claims(result.claims, text=text)
+        except Exception as exc:  # one bad page must not lose the extracted claims
+            logger.warning("verification failed for extraction %s: %s", result.extraction_id, exc)
+            return None
 
     # ------------------------------------------------------------------ linkage
     def _target(self, snapshot: Any, document: Any) -> tuple[ExtractTarget | None, str | None]:

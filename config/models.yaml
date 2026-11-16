@@ -114,6 +114,35 @@ profiles:
     temperature: 0
     require_quoted_evidence: true
     required: false
+  verify:
+    # evidence: structurally different second pass over the bounded source
+    # window; it sees the existing quote, never the claimed value, and emits a
+    # judgement only (supported | contradicted | absent | wrong_field).
+    # Sampling/budget is deliberately config-driven: one profile, one prompt
+    # version, and a hard per-run cap. 0 price means the local default; a hosted
+    # verifier only needs an env override, never a code change.
+    provider: ${FMD_VERIFY_PROVIDER:-local}
+    model: ${FMD_VERIFY_MODEL:-Qwen3.5-9B-AWQ}
+    provider_env: FMD_VERIFY_PROVIDER
+    model_env: FMD_VERIFY_MODEL
+    model_example: Qwen3.5-9B-AWQ
+    temperature: 0
+    guided_json: true
+    max_tokens: 1024
+    context_tokens: 32768
+    quantization: int4
+    thinking: false
+    required: false            # claims stay unverified when this profile degrades
+    degrade_reason: verifier_unavailable
+    prompt_name: verify
+    prompt_version: v1
+    window_chars: 1200
+    bundle_fields_per_call: 8
+    max_claims_per_run: 500
+    max_usd_per_run: 0.05
+    repair_attempts_per_claim: 1
+    pricing: {input_per_mtok: 0.0, output_per_mtok: 0.0}
+    cost_model: {input_tokens_per_call: 900, output_tokens_per_call: 120}
   ocr_vlm:
     # evidence: best open Indic OCR <16GB
     provider: ${FMD_OCR_PROVIDER:-local}

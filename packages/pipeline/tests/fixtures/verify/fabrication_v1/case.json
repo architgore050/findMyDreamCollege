@@ -1,0 +1,102 @@
+{
+  "case_id": "fabrication_v1",
+  "text_file": "page.txt",
+  "notes": [
+    "Synthetic second-pass fixture. The page is the source of truth.",
+    "c01-c04 are genuinely supported by the page.",
+    "c05-c10 are plausible fields the page never states: the quote resolves,",
+    "but it is a real sentence about something else. These must be rejected as absent.",
+    "c11 reuses the median-salary quote for the highest-package column: a real",
+    "fact in the wrong column. It must be rejected as wrong_field."
+  ],
+  "claims": [
+    {
+      "key": "c01",
+      "predicate": "placement.eligible_count",
+      "quote": "Eligible students: 120",
+      "value": 120,
+      "unit": "count",
+      "expected": "correct"
+    },
+    {
+      "key": "c02",
+      "predicate": "placement.placed_count",
+      "quote": "Students placed: 96",
+      "value": 96,
+      "unit": "count",
+      "expected": "correct"
+    },
+    {
+      "key": "c03",
+      "predicate": "placement.rate",
+      "quote": "Placement rate: 80%",
+      "value": 0.8,
+      "unit": "ratio",
+      "expected": "correct"
+    },
+    {
+      "key": "c04",
+      "predicate": "salary.median",
+      "quote": "Median salary: INR 4,20,000 per annum",
+      "value": 420000,
+      "unit": "INR",
+      "expected": "correct"
+    },
+    {
+      "key": "c05",
+      "predicate": "curriculum.internship_hours",
+      "quote": "The department has a well-equipped laboratory and a qualified teaching faculty.",
+      "value": 1800,
+      "unit": "hours",
+      "expected": "fabricated"
+    },
+    {
+      "key": "c06",
+      "predicate": "fee.tuition_per_year",
+      "quote": "The department maintains partnerships with three teaching hospitals in the city.",
+      "value": 85000,
+      "unit": "INR",
+      "expected": "fabricated"
+    },
+    {
+      "key": "c07",
+      "predicate": "accreditation.naac_grade",
+      "quote": "The programme is affiliated to the state health university.",
+      "value": "A",
+      "unit": "grade",
+      "expected": "fabricated"
+    },
+    {
+      "key": "c08",
+      "predicate": "placement.cohort_year",
+      "quote": "Laboratory facilities are available to all enrolled students throughout the programme.",
+      "value": "2024-25",
+      "unit": null,
+      "expected": "fabricated"
+    },
+    {
+      "key": "c09",
+      "predicate": "placement.internship_counted_as_employment",
+      "quote": "Students complete a supervised internship in semesters seven and eight.",
+      "value": true,
+      "unit": "boolean",
+      "expected": "fabricated"
+    },
+    {
+      "key": "c10",
+      "predicate": "cost.hostel_per_month",
+      "quote": "Hostel accommodation is available on campus.",
+      "value": 6000,
+      "unit": "INR",
+      "expected": "fabricated"
+    },
+    {
+      "key": "c11",
+      "predicate": "salary.highest_package",
+      "quote": "Median salary: INR 4,20,000 per annum",
+      "value": 420000,
+      "unit": "INR",
+      "expected": "wrong_field"
+    }
+  ]
+}

@@ -69,7 +69,7 @@ def test_llm_doctor_reports_resolution(capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     profiles = {row["profile"]: row for row in payload["profiles"]}
     assert profiles["bulk_extract"]["usable"] is True
-    assert profiles["bulk_extract"]["model"] == "Qwen3-14B-AWQ"
+    assert profiles["bulk_extract"]["model"] == "Qwen3.5-9B-AWQ"
     assert "key_present" in profiles["bulk_extract"]
     assert payload["budgets"]["hard_stop"] is True
     assert payload["required_ok"] is True
@@ -106,3 +106,28 @@ def test_llm_ping_remains_a_doctor_alias(capsys) -> None:
     assert main(["--config-dir", str(CONFIG_DIR), "llm-ping", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["profiles"]
+
+
+def test_eval_with_verify_fixtures_surfaces_verification_metrics(capsys) -> None:
+    repo_root = CONFIG_DIR.parent
+    argv = [
+        "--config-dir",
+        str(CONFIG_DIR),
+        "eval",
+        "--golden",
+        str(repo_root / "data" / "golden"),
+        "--verify-fixtures",
+        str(
+            Path(__file__).parent
+            / "fixtures"
+            / "verify"
+            / "fabrication_v1"
+        ),
+    ]
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert "verification: verified_rate 1.0" in out
+    assert "fabrication_caught 7/7" in out
+    assert "correct_rejected 0" in out
+    # The provenance gate is unchanged by the verification block.
+    assert "gate provenance>=1.0: PASS" in out

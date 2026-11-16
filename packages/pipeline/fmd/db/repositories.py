@@ -297,9 +297,31 @@ class ClaimCreate(RowModel):
     method: Method = "extracted"
 
 
+VerificationStatus = Literal["unverified", "supported", "rejected"]
+
+
+class ClaimVerification(RowModel):
+    """The only claim columns a verifier may write (migration 0005).
+
+    ``status`` is the final disposition. The verifier's raw verdict
+    (``supported | contradicted | absent | wrong_field``), the prompt version,
+    whether a repair was attempted, and any ``corrected_quote`` live in
+    ``notes`` because they must stay reviewable without changing the claim.
+    """
+
+    status: VerificationStatus
+    verified_by: str | None = None
+    verified_at: datetime | None = None
+    notes: dict[str, Any] | None = None
+
+
 class ClaimRecord(ClaimCreate):
     id: int
     superseded_by: int | None = None
+    verification_status: VerificationStatus = "unverified"
+    verified_by: str | None = None
+    verified_at: datetime | None = None
+    verification_notes: dict[str, Any] | None = None
 
 
 class ClaimEvidence(ClaimRecord):
@@ -1858,6 +1880,71 @@ class ClaimsRepo:
             row = conn.execute("SELECT * FROM claims WHERE id = %s", (claim_id,)).fetchone()
         return _claim(row) if row else None
 
+    # -------------------------------------------------------------- verification
+    def record_verification(
+        self,
+        claim_id: int,
+        verification: ClaimVerification,
+    ) -> ClaimRecord:
+        """Write only the verification columns; claim content stays immutable.
+
+        Raises ``ValueError`` for a missing claim so a verifier cannot believe it
+        recorded a judgement that was never stored.
+        """
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE claims SET
+                    verification_status = %s,
+                    verified_by = %s,
+                    verified_at = COALESCE(%s, now()),
+                    verification_notes = %s
+                WHERE id = %s
+                RETURNING *
+                """,
+                (
+                    verification.status,
+                    verification.verified_by,
+                    verification.verified_at,
+                    _json(verification.notes),
+                    claim_id,
+                ),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"claim {claim_id} does not exist")
+        return _claim(row)
+
+    def record_verifications(
+        self, items: Iterable[tuple[int, ClaimVerification]]
+    ) -> list[ClaimRecord]:
+        """Persist a batch in the given order; one statement per claim."""
+        return [
+            self.record_verification(claim_id, verification)
+            for claim_id, verification in items
+        ]
+
+    def list_unverified(self, limit: int = 500) -> list[ClaimRecord]:
+        """Pending verification queue, oldest first (deterministic)."""
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM claims WHERE verification_status = 'unverified' "
+                "AND superseded_by IS NULL ORDER BY id LIMIT %s",
+                (limit,),
+            ).fetchall()
+        return [_claim(row) for row in rows]
+
+    def list_review_queue(self, limit: int = 100) -> list[ClaimRecord]:
+        """Claims a human should look at: rejected, then still-unverified."""
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM claims WHERE verification_status <> 'supported' "
+                "AND superseded_by IS NULL "
+                "ORDER BY CASE verification_status WHEN 'rejected' THEN 0 ELSE 1 END, id "
+                "LIMIT %s",
+                (limit,),
+            ).fetchall()
+        return [_claim(row) for row in rows]
+
     def list_for_entity(
         self,
         entity_id: int,
@@ -2895,6 +2982,10 @@ def _claim(row: dict[str, Any]) -> ClaimRecord:
         method=row["method"],
         superseded_by=row["superseded_by"],
         id=row["id"],
+        verification_status=row.get("verification_status") or "unverified",
+        verified_by=row.get("verified_by"),
+        verified_at=row.get("verified_at"),
+        verification_notes=row.get("verification_notes"),
     )
 
 

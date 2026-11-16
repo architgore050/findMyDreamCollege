@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -82,9 +83,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="re-extract snapshots already processed at this tool version",
     )
 
+    verify_parser = subparsers.add_parser(
+        "verify",
+        help="second pass: judge unverified claims against their source window",
+    )
+    verify_parser.add_argument(
+        "--limit", type=int, default=500, help="maximum pending claims (default 500)"
+    )
+    verify_parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="replay recorded verdicts instead of calling a provider (offline)",
+    )
+    verify_parser.add_argument(
+        "--fixtures",
+        default=None,
+        help="fixture directory for --mock (defaults to providers.mock.fixtures_dir)",
+    )
+
     worker_parser = subparsers.add_parser(
         "worker", help="long-running crawl -> extract -> score loop (WS-O glue)"
-    )
+    ) 
     worker_parser.add_argument(
         "--limit", type=int, default=None, help="maximum items per stage per tick"
     )
@@ -124,6 +143,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="hard gate: minimum provenance coverage (default 1.0)",
+    )
+    eval_parser.add_argument(
+        "--verify-fixtures",
+        default=None,
+        help=(
+            "optional committed verification case directory; adds verified_rate, "
+            "fabrication_caught and correct_rejected to the report (does not "
+            "change the provenance gate)"
+        ),
     )
 
     score_parser = subparsers.add_parser(
@@ -277,6 +305,47 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     return 1 if summary.failed else 0
 
 
+def _cmd_verify(args: argparse.Namespace) -> int:
+    from fmd.db.repositories import ClaimsRepo, ExtractionsRepo
+    from fmd.extract.pipeline import build_router
+    from fmd.orchestrate.ledger import RunSummary, utcnow
+    from fmd.verify import Verifier, VerifyPolicy
+    from fmd.verify.prompts import PromptNotFound
+    from fmd.verify.runner import record_summary, verify_pending
+    from fmd.verify.verifier import VerifierUnavailable
+
+    registry = load_registry(args.config_dir)
+    policy = VerifyPolicy.load(registry.models)
+    if policy is None:
+        print(
+            "fmd verify: no `verify` profile in config/models.yaml; nothing was judged. "
+            "Claims stay unverified.",
+            file=sys.stderr,
+        )
+        return 1
+    summary = RunSummary(run_id=uuid.uuid4().hex, stage="verify", started_at=utcnow())
+    database = _database(args)
+    try:
+        claims = ClaimsRepo(database)
+        router = build_router(registry.models, mock=args.mock, fixtures_dir=args.fixtures)
+        verifier = Verifier(router=router, claims=claims, policy=policy)
+        run = verify_pending(
+            claims=claims,
+            extractions=ExtractionsRepo(database),
+            verifier=verifier,
+            limit=args.limit,
+        )
+        record_summary(summary, run)
+    except (VerifierUnavailable, PromptNotFound) as exc:
+        print(f"fmd verify: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        database.close()
+    summary.finish()
+    print(summary.as_json())
+    return 1 if summary.failed else 0
+
+
 def _cmd_worker(args: argparse.Namespace) -> int:
     orchestrator, database = _orchestrator(args)
     summaries: list[Any] = []
@@ -308,12 +377,34 @@ def _cmd_eval(args: argparse.Namespace) -> int:
         print(f"fmd eval: {exc}", file=sys.stderr)
         return 1
     report = outcome.report
+    verification = None
+    if getattr(args, "verify_fixtures", None):
+        from fmd.verify.casefile import CaseError, evaluate_fixture_dir
+
+        try:
+            verification = evaluate_fixture_dir(
+                args.verify_fixtures, load_registry(args.config_dir)
+            )
+        except (CaseError, ConfigError) as exc:
+            print(f"fmd eval: verification fixture failed: {exc}", file=sys.stderr)
+            return 1
+        report["verification"] = verification
     failures = apply_gate(report, args.fail_under)
     report["ok"] = not failures
     report_path = None
     if args.report_out:
         report_path = write_report(report, args.report_out)
     print(render_summary(report, report_path=report_path))
+    if verification is not None:
+        print(
+            "  verification: verified_rate {rate} fabrication_caught "
+            "{caught}/{total} correct_rejected {correct}".format(
+                rate=verification.get("verified_rate"),
+                caught=verification.get("fabrication_caught", 0),
+                total=verification.get("fabricated_total", 0),
+                correct=verification.get("correct_rejected", 0),
+            )
+        )
     for failure in failures:
         print(f"fmd eval: FAIL {failure}", file=sys.stderr)
     return 1 if failures else 0
@@ -431,6 +522,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_crawl(args)
         if args.command == "extract":
             return _cmd_extract(args)
+        if args.command == "verify":
+            return _cmd_verify(args)
         if args.command == "worker":
             return _cmd_worker(args)
         if args.command == "eval":

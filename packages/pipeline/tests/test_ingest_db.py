@@ -74,7 +74,10 @@ def test_0004_adds_roles_and_the_institution_domain_queue(schema_database, tmp_p
         "0002_er_audit_and_replay",
         "0003_document_plans_and_pipeline_runs",
     ]
-    assert run_migrations(schema_database) == ["0004_document_roles_and_inventory_targets"]
+    assert run_migrations(schema_database) == [
+        "0004_document_roles_and_inventory_targets",
+        "0005_claim_verification",
+    ]
     assert run_migrations(schema_database) == []
 
     with schema_database.connection() as conn:
