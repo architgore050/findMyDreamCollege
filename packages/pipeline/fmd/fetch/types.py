@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import format_datetime
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 # Statuses that indicate an anti-bot / rate-limit block. These are the *only*
 # signals that may escalate to a stealth tier (brief §7).
@@ -45,6 +45,16 @@ class FetchError(RuntimeError):
     """Transport-level failure returned by a tier."""
 
 
+class UnsupportedReplay(RuntimeError):
+    """A tier cannot faithfully replay this request's method/body.
+
+    A tier must raise this instead of silently downgrading (for example, a
+    browser tier asked to replay a POST would otherwise send a GET and return a
+    plausible-looking page). The ladder records the refusal as its own outcome;
+    it is never treated as a successful fetch.
+    """
+
+
 @dataclass(frozen=True)
 class RobotsDecision:
     """The logged answer to "may this crawler fetch this URL?"."""
@@ -59,12 +69,22 @@ class RobotsDecision:
 
 @dataclass(frozen=True)
 class FetchRequest:
-    """A conditional GET request."""
+    """One request, usually a conditional GET.
+
+    ``method``/``body``/``headers`` are the replay shape persisted by the
+    frontier (migration 0001). Defaults preserve the conditional-GET behaviour
+    older call sites rely on. ``body`` accepts ``bytes``/``str`` verbatim, or a
+    mapping which is sent form-urlencoded; use ``json_body`` for JSON.
+    """
 
     url: str
     etag: str | None = None
     last_modified: str | None = None
     referer: str | None = None
+    method: str = "GET"
+    body: bytes | str | dict[str, Any] | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+    json_body: Any | None = None
 
     @classmethod
     def revalidate(
@@ -74,17 +94,26 @@ class FetchRequest:
         etag: str | None = None,
         last_modified: datetime | str | None = None,
         referer: str | None = None,
+        method: str = "GET",
+        body: bytes | str | dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        json_body: Any | None = None,
     ) -> FetchRequest:
-        """Build a conditional GET from stored validators (``documents`` row).
+        """Build a conditional request from stored validators (``documents`` row).
 
         A 304 answer means the caller must not write a snapshot but must still
-        bump ``documents.last_seen``.
+        bump ``documents.last_seen``. A POST keeps its body and headers: the
+        conditional headers are added, never substituted for the replay shape.
         """
         return cls(
             url=url,
             etag=etag,
             last_modified=http_date(last_modified),
             referer=referer,
+            method=method,
+            body=body,
+            headers=dict(headers or {}),
+            json_body=json_body,
         )
 
 
@@ -102,6 +131,8 @@ class FetchResult:
     headers: dict[str, str] = field(default_factory=dict)
     body: bytes = b""
     fetcher_tier: str = "none"
+    #: Effective HTTP method actually sent (never inferred from the URL).
+    method: str = "GET"
     elapsed_ms: float = 0.0
     robots: RobotsDecision | None = None
     error: str | None = None

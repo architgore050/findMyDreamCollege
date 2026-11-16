@@ -8,10 +8,12 @@ robots decision so the snapshot layer can record how a page was obtained.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
+from urllib.parse import urlencode
 
 from fmd.fetch.politeness import (
     PolitenessManager,
@@ -25,6 +27,7 @@ from fmd.fetch.types import (
     FetchResult,
     TierFetcher,
     TierUnavailable,
+    UnsupportedReplay,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +41,72 @@ TIER_ROBOTS = "robots"
 
 def _lower_headers(headers) -> dict[str, str]:
     return {str(key).lower(): str(value) for key, value in dict(headers).items()}
+
+
+def _set_header(headers: dict[str, str], name: str, value: str) -> None:
+    """Case-insensitive overwrite; caller casing is otherwise preserved."""
+    lowered = name.lower()
+    for key in [key for key in headers if key.lower() == lowered]:
+        del headers[key]
+    headers[name] = value
+
+
+def _merged_headers(request: FetchRequest) -> dict[str, str]:
+    """Caller headers plus conditional validators.
+
+    Conditional headers are *merged into* the replay shape: a POST's
+    ``Content-Type``/``Referer``/custom headers survive revalidation, and an
+    explicit validator already on the caller's headers is replaced by the
+    stored (newer) one only when the request carries one.
+    """
+    headers = {str(key): str(value) for key, value in dict(request.headers or {}).items()}
+    if request.etag:
+        _set_header(headers, "If-None-Match", request.etag)
+    if request.last_modified:
+        _set_header(headers, "If-Modified-Since", request.last_modified)
+    if request.referer:
+        _set_header(headers, "Referer", request.referer)
+    return headers
+
+
+def _method(request: FetchRequest) -> str:
+    return str(request.method or "GET").upper()
+
+
+def _payload(request: FetchRequest) -> tuple[bytes | None, str | None]:
+    """Encode a request body and its implied content type, if any.
+
+    ``json_body`` wins over ``body``. A mapping body is form-urlencoded (the
+    persisted NABH shape); bytes/str pass through untouched so a caller that
+    already encoded a payload is not re-encoded.
+    """
+    if request.json_body is not None:
+        return (
+            json.dumps(request.json_body, separators=(",", ":")).encode("utf-8"),
+            "application/json",
+        )
+    body = request.body
+    if body is None:
+        return None, None
+    if isinstance(body, (bytes, bytearray, memoryview)):
+        return bytes(body), None
+    if isinstance(body, str):
+        return body.encode("utf-8"), None
+    if isinstance(body, Mapping):
+        return urlencode(dict(body), doseq=True).encode("utf-8"), (
+            "application/x-www-form-urlencoded"
+        )
+    raise TypeError(f"unsupported request body type {type(body).__name__}")
+
+
+def _prepared(request: FetchRequest) -> tuple[str, dict[str, str], bytes | None]:
+    """Method, merged headers and encoded payload for a replaying tier."""
+    method = _method(request)
+    headers = _merged_headers(request)
+    payload, content_type = _payload(request)
+    if content_type is not None and not any(key.lower() == "content-type" for key in headers):
+        headers["Content-Type"] = content_type
+    return method, headers, payload
 
 
 class HttpxFetcher:
@@ -72,14 +141,13 @@ class HttpxFetcher:
         return self._client
 
     def fetch(self, request: FetchRequest) -> FetchResult:
-        headers: dict[str, str] = {}
-        if request.etag:
-            headers["If-None-Match"] = request.etag
-        if request.last_modified:
-            headers["If-Modified-Since"] = request.last_modified
-        if request.referer:
-            headers["Referer"] = request.referer
-        response = self._get_client().get(request.url, headers=headers)
+        method, headers, payload = _prepared(request)
+        response = self._get_client().request(
+            method,
+            request.url,
+            content=payload,
+            headers=headers,
+        )
         return FetchResult(
             url=request.url,
             final_url=str(response.url),
@@ -87,6 +155,7 @@ class HttpxFetcher:
             headers=_lower_headers(response.headers),
             body=response.content,
             fetcher_tier=self.name,
+            method=method,
         )
 
     def close(self) -> None:
@@ -114,15 +183,13 @@ class CurlCffiFetcher:
 
         from fmd.settings import get_settings
 
-        headers = {"User-Agent": get_settings().user_agent}
-        if request.etag:
-            headers["If-None-Match"] = request.etag
-        if request.last_modified:
-            headers["If-Modified-Since"] = request.last_modified
-        if request.referer:
-            headers["Referer"] = request.referer
-        response = curl_requests.get(
+        method, headers, payload = _prepared(request)
+        if not any(key.lower() == "user-agent" for key in headers):
+            headers["User-Agent"] = get_settings().user_agent
+        response = curl_requests.request(
+            method,
             request.url,
+            data=payload,
             headers=headers,
             impersonate=self.impersonate,
             timeout=self.timeout,
@@ -135,6 +202,7 @@ class CurlCffiFetcher:
             headers=_lower_headers(response.headers),
             body=response.content,
             fetcher_tier=self.name,
+            method=method,
         )
 
 
@@ -148,6 +216,17 @@ class PatchrightFetcher:
         self.timeout_ms = timeout_ms
 
     def fetch(self, request: FetchRequest) -> FetchResult:
+        method = _method(request)
+        if method != "GET":
+            # `page.goto` only issues GET. Faking a POST by submitting a form
+            # would execute the page's own JavaScript and render whatever it
+            # decides, not replay the persisted request/body. Downgrading would
+            # also be invisible to the caller (HTTP 200, wrong page), so refuse
+            # explicitly and let the ladder record `unsupported_replay`.
+            raise UnsupportedReplay(
+                f"patchright cannot faithfully replay {method} requests; a browser "
+                "navigation only issues GET. Refusing rather than downgrading."
+            )
         try:
             from patchright.sync_api import sync_playwright
         except ModuleNotFoundError as exc:  # pragma: no cover - depends on install
@@ -158,12 +237,16 @@ class PatchrightFetcher:
 
         from fmd.settings import get_settings
 
+        headers = _merged_headers(request)
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
                 headless=self.headless, args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
             try:
-                context = browser.new_context(user_agent=get_settings().user_agent)
+                context = browser.new_context(
+                    user_agent=get_settings().user_agent,
+                    extra_http_headers=headers or None,
+                )
                 page = context.new_page()
                 response = page.goto(
                     request.url, wait_until="domcontentloaded", timeout=self.timeout_ms
@@ -181,6 +264,7 @@ class PatchrightFetcher:
             headers=headers,
             body=body,
             fetcher_tier=self.name,
+            method=method,
         )
 
 
@@ -223,6 +307,7 @@ class FetchLadder:
         status: int = 0,
         quarantined: bool = False,
         start: float | None = None,
+        method: str = "GET",
     ) -> FetchResult:
         return FetchResult(
             url=url,
@@ -233,6 +318,7 @@ class FetchLadder:
             robots=robots,
             error=error,
             quarantined=quarantined,
+            method=method,
         )
 
     # -------------------------------------------------------------------- public
@@ -250,6 +336,7 @@ class FetchLadder:
             else FetchRequest(url=url, etag=etag, last_modified=last_modified, referer=referer)
         )
         url = request.url
+        method = _method(request)
 
         decision = self.robots.decision(url)
         if not decision.allowed:
@@ -259,6 +346,7 @@ class FetchLadder:
                 tier=TIER_ROBOTS,
                 error="robots_disallowed",
                 robots=decision,
+                method=method,
             )
         if decision.crawl_delay is not None:
             self.politeness.set_crawl_delay(url, decision.crawl_delay)
@@ -269,6 +357,7 @@ class FetchLadder:
                 error="domain_quarantined",
                 robots=decision,
                 quarantined=True,
+                method=method,
             )
 
         delay = self.politeness.note_request(url)
@@ -278,12 +367,19 @@ class FetchLadder:
         start = self.clock.monotonic()
         last_result: FetchResult | None = None
         unavailable: list[str] = []
+        unsupported: list[tuple[str, str]] = []
         for index, fetcher in enumerate(self.fetchers):
             try:
                 result = fetcher.fetch(request)
             except TierUnavailable as exc:
                 logger.info("tier %s unavailable for %s: %s", fetcher.name, url, exc)
                 unavailable.append(f"{fetcher.name}: {exc}")
+                continue
+            except UnsupportedReplay as exc:
+                # Never downgrade a POST to GET. Record the honest refusal and
+                # keep the ladder moving (a later tier may be able to replay).
+                logger.info("tier %s cannot replay %s for %s: %s", fetcher.name, method, url, exc)
+                unsupported.append((fetcher.name, str(exc)))
                 continue
             except Exception as exc:  # transport failure: do not escalate
                 logger.warning("tier %s failed for %s: %s", fetcher.name, url, exc)
@@ -293,6 +389,7 @@ class FetchLadder:
                     status=0,
                     fetcher_tier=fetcher.name,
                     error=f"{type(exc).__name__}: {exc}",
+                    method=method,
                 )
                 self.politeness.record_response(url, 0)
                 result.elapsed_ms = self._elapsed_ms(start)
@@ -301,6 +398,7 @@ class FetchLadder:
 
             result.fetcher_tier = fetcher.name
             result.robots = decision
+            result.method = method
             retry_after = parse_retry_after(result.headers.get("retry-after"), now=self.clock.now())
             self.politeness.record_response(url, result.status, retry_after=retry_after)
 
@@ -323,6 +421,16 @@ class FetchLadder:
 
         # Every tier was blocked (or no tier could answer).
         if last_result is None:
+            if unsupported and not unavailable:
+                tier, detail = unsupported[-1]
+                return self._refused(
+                    url,
+                    tier=tier,
+                    error=f"unsupported_replay: {detail}",
+                    robots=decision,
+                    start=start,
+                    method=method,
+                )
             if unavailable:
                 raise TierUnavailable(
                     f"no fetch tier could run for {url}. Missing tiers: " + "; ".join(unavailable)
@@ -333,6 +441,7 @@ class FetchLadder:
                 error="no_fetch_tiers",
                 robots=decision,
                 start=start,
+                method=method,
             )
         self.politeness.record_response(url, 0)
         if not self.politeness.is_quarantined(url):
@@ -350,6 +459,7 @@ class FetchLadder:
             robots=decision,
             error="all_tiers_blocked",
             quarantined=True,
+            method=method,
         )
 
 

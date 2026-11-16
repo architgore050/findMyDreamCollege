@@ -37,6 +37,7 @@ from fmd.fetch.types import (
     RobotsDecision,
     TierFetcher,
     TierUnavailable,
+    UnsupportedReplay,
     http_date,
 )
 
@@ -54,6 +55,7 @@ __all__ = [
     "RobotsDecision",
     "TierFetcher",
     "TierUnavailable",
+    "UnsupportedReplay",
     "fetch",
     "hamming",
     "http_date",
