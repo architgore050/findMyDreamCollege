@@ -1,0 +1,58 @@
+{
+  "m": "Data filled.",
+  "c": "success",
+  "List": [
+    {
+      "ID": 1,
+      "uni_name": "Alpha Institute of Medical Sciences",
+      "address": "1 Example Road",
+      "Zip": "110001",
+      "state": "Delhi ",
+      "status": "2(f) & 12B",
+      "uni_type": "Central",
+      "ESTD": "1956",
+      "url": "http://www.alpha-med.example.ac.in",
+      "college": 0,
+      "AIshe_code": "U-0001",
+      "user_password": "must-never-enter-ingest",
+      "user_username": "must-never-enter-ingest"
+    },
+    {
+      "ID": 2,
+      "uni_name": "Beta Health University",
+      "address": "2 Example Road",
+      "Zip": "400001",
+      "state": "Maharashtra",
+      "status": "2(f) & 12B",
+      "uni_type": "State",
+      "ESTD": "1980",
+      "url": "beta-health.example.ac.in/",
+      "college": 0,
+      "AIshe_code": "U-0002"
+    },
+    {
+      "ID": 3,
+      "uni_name": "Gamma Paramedical University",
+      "address": "3 Example Road",
+      "Zip": "600001",
+      "state": "Tamil Nadu",
+      "status": "2(f)",
+      "uni_type": "Deemed",
+      "ESTD": "1995",
+      "url": "mailto:registrar@example.ac.in",
+      "college": 0,
+      "AIshe_code": "U-0003"
+    },
+    {
+      "ID": 4,
+      "uni_name": "",
+      "address": "4 Example Road",
+      "Zip": "700001",
+      "state": "West Bengal",
+      "status": "2(f)",
+      "uni_type": "State",
+      "url": "https://nameless.example.ac.in",
+      "college": 0
+    }
+  ]
+}

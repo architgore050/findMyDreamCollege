@@ -17,6 +17,7 @@ from fmd.db.repositories import (
     ClaimRecord,
     DocumentRecord,
     DocumentUpsert,
+    EntityCreate,
     EntityRecord,
     ExtractionCreate,
     ExtractionRecord,
@@ -162,6 +163,7 @@ class MemoryDocuments:
         plan_state: str,
         plan_confidence: float | None = None,
         plan_reason: str | None = None,
+        role: str | None = None,
     ) -> DocumentRecord | None:
         record = self.get(document_id)
         if record is None:
@@ -175,14 +177,21 @@ class MemoryDocuments:
         }
         if source_id is not None:
             updates["source_id"] = source_id
+        if role is not None:
+            updates["role"] = role
         merged = record.model_copy(update=updates)
         self.rows[merged.url] = merged
         return merged
 
+    def list_by_role(self, role: str, *, limit: int = 100) -> list[DocumentRecord]:
+        return [row for row in self.rows.values() if (row.role or "evidence") == role][:limit]
+
     def count_unplanned(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for row in self.rows.values():
-            if row.extraction_family is None:
+            if (row.role or "evidence") != "evidence":
+                reason = "not_applicable"
+            elif row.extraction_family is None:
                 reason = "missing_family"
             elif row.plan_state == "needs_review":
                 reason = "needs_review"
@@ -191,6 +200,13 @@ class MemoryDocuments:
             else:
                 continue
             counts[reason] = counts.get(reason, 0) + 1
+        return counts
+
+    def counts_by_role(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in self.rows.values():
+            role = row.role or "evidence"
+            counts[role] = counts.get(role, 0) + 1
         return counts
 
 
@@ -290,12 +306,62 @@ class MemoryClaims:
 class MemoryEntities:
     def __init__(self, rows: Iterable[EntityRecord] | None = None) -> None:
         self.rows = list(rows or [])
+        self._next = max((row.id for row in self.rows), default=0) + 1
 
     def find(self, kind: str, canonical_name: str) -> EntityRecord | None:
         return next(
             (row for row in self.rows if row.kind == kind and row.canonical_name == canonical_name),
             None,
         )
+
+    def find_normalised(self, kind: str, normalised_name: str) -> EntityRecord | None:
+        return next(
+            (
+                row
+                for row in self.rows
+                if row.kind == kind and row.normalised_name == normalised_name
+            ),
+            None,
+        )
+
+    def get(self, entity_id: int) -> EntityRecord | None:
+        return next((row for row in self.rows if row.id == entity_id), None)
+
+    def create(self, create: EntityCreate) -> EntityRecord:
+        record = EntityRecord(**create.model_dump(), id=self._next)
+        self._next += 1
+        self.rows.append(record)
+        return record
+
+    def update_details(
+        self,
+        entity_id: int,
+        *,
+        state: str | None = None,
+        city: str | None = None,
+        institution_type: str | None = None,
+        website_url: str | None = None,
+        normalised_name: str | None = None,
+        blocking_key: str | None = None,
+    ) -> EntityRecord | None:
+        record = self.get(entity_id)
+        if record is None:
+            return None
+        updates = {
+            key: value
+            for key, value in {
+                "state": state,
+                "city": city,
+                "institution_type": institution_type,
+                "website_url": website_url,
+                "normalised_name": normalised_name or record.normalised_name,
+                "blocking_key": blocking_key or record.blocking_key,
+            }.items()
+            if value is not None
+        }
+        merged = record.model_copy(update=updates)
+        self.rows = [merged if row.id == entity_id else row for row in self.rows]
+        return merged
 
 
 class MemoryProgrammes:

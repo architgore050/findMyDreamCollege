@@ -356,6 +356,61 @@ def test_crawl_plans_family_and_entity_without_ref_metadata(tmp_path, registry) 
     assert {row.entity_id for row in harness.claims.rows} == {42}
 
 
+def test_domain_entity_hint_links_a_discovered_pdf_to_its_institution(tmp_path, registry) -> None:
+    from fmd.orchestrate.crawl import Crawler
+
+    crawler = Crawler(
+        frontier=make_frontier(),
+        fetcher=FakeFetcher({}),
+        store=None,
+        documents=MemoryDocuments(),
+        snapshots=MemorySnapshots(),
+        adapter_factory=lambda source: None,
+    )
+    refs = crawler._with_entity_hints(
+        [
+            DocumentRef(url="https://www.alpha.example.ac.in/files/aqar.pdf"),
+            DocumentRef(url="https://other.example.ac.in/files/aqar.pdf"),
+        ],
+        {"https://alpha.example.ac.in/": 7},
+    )
+
+    assert refs[0].metadata["entity_id"] == 7
+    assert "entity_id" not in refs[1].metadata
+
+
+def test_crawl_carries_an_anchor_family_hint_into_the_frontier(tmp_path, registry) -> None:
+    """A generic PDF filename is classified by the link text that found it."""
+    url = "https://college.ac.in/files/2024-25.pdf"
+    source = FakeSource(id="fixture")
+    harness = Harness(
+        tmp_path,
+        registry,
+        sources=[source],
+        adapters={
+            source.id: FakeAdapter(
+                [
+                    DocumentRef(
+                        url=url,
+                        source_id=source.id,
+                        metadata={"anchor_text": "Annual Report 2024-25"},
+                    )
+                ]
+            )
+        },
+        fetcher=FakeFetcher(
+            {url: response(url, body=b"%PDF-1.4", headers={"content-type": "application/pdf"})}
+        ),
+    )
+
+    summary = harness.orchestrator.crawl(limit=5)
+
+    assert summary.counts.get("role.evidence") == 1
+    document = harness.documents.rows[url]
+    assert document.role == "evidence"
+    assert document.extraction_family == "accreditation"
+
+
 def test_extract_resumes_and_is_idempotent(tmp_path, registry) -> None:
     text = (EXTRACT_FIXTURES / "placement_report.txt").read_text(encoding="utf-8")
     router = build_router(registry.models, mock=True, fixtures_dir=LLM_FIXTURES)
@@ -502,9 +557,12 @@ def test_worker_one_tick_then_shutdown(tmp_path, registry) -> None:
         limit=5, idle_seconds=0.0, max_ticks=1, sleep=lambda _seconds: None
     )
 
-    assert [summary.stage for summary in summaries] == ["crawl", "extract", "score"]
+    assert [summary.stage for summary in summaries] == ["crawl", "ingest", "extract", "score"]
+    ingest = summaries[1]
+    assert ingest.counts.get("skipped") == 1
+    assert ingest.metadata["reason"].startswith("ingest requires")
     heartbeat = json.loads(harness.ledger.heartbeat_path.read_text())
     assert heartbeat["state"] == "stopped"
     assert heartbeat["tick"] == 1
     assert heartbeat["process_id"] > 0
-    assert len(list(harness.ledger.runs_dir.glob("*.json"))) == 3
+    assert len(list(harness.ledger.runs_dir.glob("*.json"))) == 4

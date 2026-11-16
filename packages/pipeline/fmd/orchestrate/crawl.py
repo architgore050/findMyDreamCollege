@@ -39,6 +39,9 @@ from fmd.frontier.queue import Frontier
 from fmd.orchestrate.adapters import call_fetch
 from fmd.orchestrate.ledger import RunSummary
 from fmd.plan import persist_plan
+from fmd.plan.planner import declared_family
+from fmd.plan.roles import RoleConfigError, role_for
+from fmd.plan.rules import DEFAULT_RULES, detect_family
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,24 @@ def frontier_upsert(ref: Any, *, source_id: str | None) -> FrontierUpsert:
         next_allowed_at=utc(),
         source_id=source_id,
     )
+
+
+def _hostname(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    return (urlsplit(url).hostname or "").lower().removeprefix("www.")
+
+
+def _match_host(host: str, by_host: dict[str, int]) -> int | None:
+    """Exact host, or a subdomain of a seed host (``files.alpha.ac.in``)."""
+    if not host:
+        return None
+    if host in by_host:
+        return by_host[host]
+    for seed_host, entity_id in by_host.items():
+        if host.endswith("." + seed_host):
+            return entity_id
+    return None
 
 
 def _header(result: FetchResult, name: str) -> str | None:
@@ -138,6 +159,8 @@ class Crawler:
         summary: RunSummary,
         limit: int | None = None,
         dry_run: bool = False,
+        domains: dict[str, list[str]] | None = None,
+        entity_hints: dict[str, int] | None = None,
     ) -> None:
         remaining = limit
         for source in sources:
@@ -153,8 +176,13 @@ class Crawler:
             }
             try:
                 adapter = self.adapter_factory(source)
-                domains = list(getattr(source, "seeds", None) or ())
-                refs = call_fetch(adapter, domains=domains)
+                seeds = list(getattr(source, "seeds", None) or ())
+                discovered = list((domains or {}).get(source_id) or ())
+                # Discovered domains are appended after registry seeds; both are
+                # bounded by the adapter's own page budget.
+                refs = call_fetch(adapter, domains=[*seeds, *discovered])
+                if discovered:
+                    outcome["domains"] = discovered
             except Exception as exc:  # one bad source never aborts the run
                 reason = getattr(exc, "reason", None) or type(exc).__name__
                 detail = str(exc)
@@ -165,6 +193,8 @@ class Crawler:
                 continue
 
             unique = dedupe_refs(list(refs))
+            unique = self._with_family_hints(unique)
+            unique = self._with_entity_hints(unique, entity_hints or {})
             if remaining is not None:
                 unique = unique[:remaining]
             outcome["planned"] = len(unique)
@@ -179,6 +209,57 @@ class Crawler:
             summary.sources.append(outcome)
             if remaining is not None:
                 remaining -= len(unique)
+
+    def _with_family_hints(self, refs: list[Any]) -> list[Any]:
+        """Carry the discovery anchor's family signal through the frontier.
+
+        A PDF named ``2024-25.pdf`` is evidence when the link said "Annual
+        Report" and impossible to classify from the URL alone. The frontier has
+        no anchor column, but it already persists ``DocumentRef.metadata["family"]``
+        as ``extraction_family`` (migration 0003), so the hint is attached here —
+        detection, not invention: the same rule set the planner uses decides it.
+        """
+        for ref in refs:
+            metadata = getattr(ref, "metadata", None)
+            if not isinstance(metadata, dict) or metadata.get("family"):
+                continue
+            anchor = metadata.get("anchor_text")
+            if not anchor:
+                continue
+            family, _score, _signals, _reason = detect_family(
+                url=str(getattr(ref, "url", "")),
+                anchor_text=str(anchor),
+                rules=DEFAULT_RULES,
+            )
+            if family:
+                metadata["family"] = family
+        return refs
+
+    def _with_entity_hints(self, refs: list[Any], hints: dict[str, int]) -> list[Any]:
+        """Link a discovered document to the institution that owns the seed domain.
+
+        Inventory ingest establishes ``domain -> entity`` from a published
+        website. A placement PDF on that domain belongs to that institution; a
+        PDF tier cannot tell the planner this, because its text is only readable
+        after extraction. The link is *reference* provenance (registry/inventory),
+        never an ER guess, and it is only applied when the registrable domain
+        matches exactly.
+        """
+        if not hints:
+            return refs
+        by_host: dict[str, int] = {}
+        for seed, entity_id in hints.items():
+            host = _hostname(seed)
+            if host:
+                by_host[host] = entity_id
+        for ref in refs:
+            metadata = getattr(ref, "metadata", None)
+            if not isinstance(metadata, dict) or metadata.get("entity_id") is not None:
+                continue
+            entity_id = _match_host(_hostname(str(getattr(ref, "url", ""))), by_host)
+            if entity_id is not None:
+                metadata["entity_id"] = entity_id
+        return refs
 
     # --------------------------------------------------------------------- drain
     def drain(self, *, summary: RunSummary, limit: int | None = None) -> None:
@@ -229,8 +310,19 @@ class Crawler:
             self._handle_ok(record, result, summary=summary, source_id=source_id)
             return
         if result.terminal:
+            role = self._role(
+                record,
+                content_type=_header(result, "content-type"),
+                source_id=source_id,
+                summary=summary,
+            )
             self._upsert_document(
-                record, result, status=result.status, summary=summary, source_id=source_id
+                record,
+                result,
+                status=result.status,
+                summary=summary,
+                source_id=source_id,
+                role=role,
             )
             self.frontier.complete(record.url, valuable_pages=0, pages=1, tier=result.fetcher_tier)
             summary.bump("rejected")
@@ -289,6 +381,7 @@ class Crawler:
         content_type = _header(result, "content-type")
         body = result.body or b""
         sha = self.store.put(body)
+        role = self._role(record, content_type=content_type, source_id=source_id, summary=summary)
 
         document = self._upsert_document(
             record,
@@ -297,8 +390,10 @@ class Crawler:
             summary=summary,
             last_seen=utc(),
             source_id=source_id,
+            role=role,
         )
         latest = self._latest(document)
+        summary.bump(f"role.{role}")
         fingerprint = simhash64(result.text) if _is_textual(content_type) else None
         duplicate = False
         reason = ""
@@ -349,6 +444,39 @@ class Crawler:
         if source_id:
             self._source_failures[source_id] = 0
 
+    def _role(
+        self,
+        record: Any,
+        *,
+        content_type: str | None,
+        source_id: str,
+        summary: RunSummary,
+    ) -> str:
+        """Classify the fetched document (migration 0004).
+
+        A registry typo in ``params.document_role`` is surfaced as a recorded
+        outcome, never as a crashed run; the conservative fallback is evidence
+        so the planner still gets a chance to abstain honestly.
+        """
+        try:
+            source = self.sources_by_id.get(source_id)
+            return role_for(
+                url=str(getattr(record, "url", "")),
+                content_type=content_type,
+                source=source,
+                family=getattr(record, "extraction_family", None) or declared_family(source),
+            )
+        except RoleConfigError as exc:
+            summary.outcomes.append(
+                {
+                    "url": getattr(record, "url", None),
+                    "outcome": "role_config_error",
+                    "reason": str(exc),
+                }
+            )
+            logger.warning("role classification fell back to evidence: %s", exc)
+            return "evidence"
+
     def _plan(
         self,
         document: DocumentRecord,
@@ -371,6 +499,7 @@ class Crawler:
             family_hint=getattr(document, "extraction_family", None),
             entity_id_hint=getattr(document, "entity_id", None),
             text_sample=text_sample,
+            role=getattr(document, "role", None),
         )
         updated = persist_plan(self.documents, document, plan)
         if summary is not None:
@@ -388,6 +517,7 @@ class Crawler:
         summary: RunSummary,
         last_seen: datetime | None = None,
         source_id: str | None = None,
+        role: str | None = None,
     ) -> DocumentRecord:
         robots = result.robots
         source_id = source_id or getattr(record, "source_id", None)
@@ -407,6 +537,7 @@ class Crawler:
             source_id=source_id,
             extraction_family=getattr(record, "extraction_family", None),
             entity_id=getattr(record, "entity_id", None),
+            role=role,
         )
         return self.documents.upsert(document)
 

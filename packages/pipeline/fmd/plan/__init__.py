@@ -25,6 +25,15 @@ from fmd.plan.planner import (
     abstention_reason,
     persist_plan,
 )
+from fmd.plan.roles import (
+    ROLE_EVIDENCE,
+    ROLE_INVENTORY,
+    ROLE_NAVIGATION,
+    ROLES,
+    RoleRules,
+    classify_content,
+    role_for,
+)
 from fmd.plan.rules import (
     DEFAULT_RULES,
     FamilyRule,
@@ -40,9 +49,16 @@ __all__ = [
     "EntityCandidatePlan",
     "FamilyRule",
     "PlanRules",
+    "ROLE_EVIDENCE",
+    "ROLE_INVENTORY",
+    "ROLE_NAVIGATION",
+    "ROLES",
+    "RoleRules",
     "SignalWeights",
     "abstention_reason",
+    "classify_content",
     "collect_mentions",
     "detect_family",
     "persist_plan",
+    "role_for",
 ]

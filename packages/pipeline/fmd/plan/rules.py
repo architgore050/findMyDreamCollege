@@ -77,9 +77,20 @@ DEFAULT_RULES = PlanRules(
         ),
         FamilyRule(
             family="accreditation",
-            url_tokens=("naac", "accredit", "aqar"),
-            anchor_tokens=("naac", "accreditation", "grade", "cgpa"),
-            text_tokens=("naac", "accredited", "cgpa", "grade"),
+            url_tokens=("naac", "accredit", "aqar", "ssr", "nirf", "iqac"),
+            anchor_tokens=(
+                "naac",
+                "accreditation",
+                "grade",
+                "cgpa",
+                "aqar",
+                "ssr",
+                "nirf",
+                "iqac",
+                "annual report",
+                "self study",
+            ),
+            text_tokens=("naac", "accredited", "cgpa", "grade", "aqar", "ssr"),
             extensions=(),
         ),
         FamilyRule(

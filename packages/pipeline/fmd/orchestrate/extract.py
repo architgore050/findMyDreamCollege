@@ -172,7 +172,12 @@ class Extractor:
         return target_for_document(document, snapshot.id)
 
     def _count_unplanned(self, summary: RunSummary) -> None:
-        """Surface documents extraction will skip, with a reason per bucket."""
+        """Surface documents extraction will skip, with an honest reason per bucket.
+
+        ``not_applicable`` (inventory / navigation, migration 0004) is counted
+        separately and never as an extraction failure: those documents were
+        never candidates. Only the remaining buckets are extraction debt.
+        """
         counter = getattr(self.documents, "count_unplanned", None)
         if counter is None:
             return
@@ -181,6 +186,9 @@ class Extractor:
         except Exception as exc:  # observability must not fail a run
             logger.warning("could not count unplanned documents: %s", exc)
             return
+        not_applicable = int(reasons.pop("not_applicable", 0) or 0)
+        if not_applicable:
+            summary.bump("not_applicable", not_applicable)
         total = sum(reasons.values())
         if total:
             summary.bump("unplanned", total)

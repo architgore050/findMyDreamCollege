@@ -22,6 +22,26 @@ sources:
       api_endpoint: https://www.ugc.gov.in/universitydetails/Getuniversity_details
       unitype_param: unitypeID
       unitype_ids: [0, 1, 2, 3, 4]
+      # Role policy (migration 0004): the XHR is an inventory payload, an HTML
+      # shell is a navigation page, and a PDF is evidence. The URL itself marks
+      # the JSON payload even when a proxy mislabels the content type.
+      document_role:
+        structured: inventory
+        page: navigation
+        document: evidence
+      structured_url_patterns:
+        - '(?i)getuniversity_details'
+      # Inventory ingestion: field map + filters. The ingester reads only these
+      # columns and never guesses a name.
+      inventory:
+        list_key: List
+        country: IN
+        fields:
+          name: uni_name
+          state: state
+          type: uni_type
+          website: url
+          status: status
       # Only these keys may enter a DocumentRef / normalised row. Contact and
       # auth fields are dropped on ingest (spec §2.6, §4.1.1).
       field_whitelist:
@@ -218,6 +238,13 @@ sources:
       js_shell_markers: ['<div id="root"', '<script']
       js_shell_min_anchors: 1
       navigate_pattern: '(?i)affiliat|college|institution|courses?'
+      # The university's own college-list pages are inventory (they name
+      # institutions); the affiliation PDFs it links are evidence. Both are
+      # classified from the fetched bytes by fmd.plan.roles.
+      document_role:
+        page: inventory
+        document: evidence
+        structured: inventory
       per_domain:
         ruhsraj.org:
           mode: html
@@ -740,6 +767,7 @@ sources:
       domains: []
       max_depth: 2
       max_pages_per_domain: 200
+      max_documents_per_domain: 30
       yield_check_after: 25
       min_yield_percent: 2
       document_extensions: [.pdf]
@@ -753,6 +781,34 @@ sources:
         - '(?i)(naac|iqac|nirf|placement|downloads?|documents?|annual|report|about|academics)'
       skip_patterns:
         - '(?i)(login|sign[-_ ]?in|sign[-_ ]?up|wp-login|register|apply[-_ ]?online)'
+      # A navigation page that matches this is not worth a hop: news, events,
+      # galleries and admission-brochure pages are the budget sinks of a college
+      # site. Documents are only ranked last, never dropped.
+      deprioritise_patterns:
+        - '(?i)(news|events?|gallery|photo[-_ ]?gallery|press|media[-_ ]?release)'
+        - '(?i)(tender|recruitment|admission[-_ ]?brochure|admissions?[-_ ]?(page|open|form|process))'
+      # Link ordering only; the classification gate lives in fmd/adapters/links.py.
+      link_weights:
+        document: 10
+        filename_match: 5
+        anchor_match: 5
+        navigate: 5
+        navigate_anchor: 3
+        navigate_filename: 2
+        deprioritised: -50
+      # Evidence targeting: how many inventory-discovered domains one run may
+      # crawl, and how they are ranked. `naac_bonus` only applies when an
+      # accreditation claim already names the domain.
+      targeting:
+        max_domains_per_run: 25
+        base: 0
+        known_website_bonus: 15
+        naac_bonus: 25
+        type_weights:
+          central: 40
+          deemed: 30
+          state: 20
+          private: 5
     notes: Placement PDFs usually live in NAAC SSR/AQAR/NIRF DCS annexures. Self-reported, promotional; treat as low trust.
 
 # Confirmed impersonators (spec §4.2.2). A trust registered under the Indian

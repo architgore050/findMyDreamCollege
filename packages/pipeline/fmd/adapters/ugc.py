@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from fmd.adapters.base import BaseAdapter, SourceUnavailable, compact_record
 from fmd.discover.base import DocumentRef
+
+
+def _host(url: str) -> str:
+    value = url if "://" in url else f"https://{url.lstrip('/')}"
+    return (urlsplit(value).hostname or "").lower()
 
 
 class UgcErrorShell(SourceUnavailable):
@@ -74,7 +79,18 @@ class UgcAdapter(BaseAdapter):
             url = record.get("url")
             if not isinstance(url, str) or not url.strip():
                 continue
-            refs.append(self.ref(url.strip(), metadata={"ugc": record}))
+            refs.append(
+                self.ref(
+                    url.strip(),
+                    metadata={
+                        "ugc": record,
+                        # Role/domain emission: a UGC row names an institution,
+                        # it is not evidence (migration 0004).
+                        "document_role": "inventory",
+                        "domain": _host(url),
+                    },
+                )
+            )
         return refs
 
     # -------------------------------------------------------------------- fetch

@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -81,6 +82,11 @@ class EntityCreate(RowModel):
     status: str = "active"
     normalised_name: str | None = None
     blocking_key: str | None = None
+    # Inventory facts (migration 0004): the website the institution publishes
+    # and the type band the inventory source states. Both stay NULL when the
+    # source is silent — never guessed.
+    website_url: str | None = None
+    institution_type: str | None = None
 
 
 class EntityRecord(EntityCreate):
@@ -157,6 +163,9 @@ class UnmergeResult:
         yield self.audit
 
 
+DocumentRole = Literal["inventory", "navigation", "evidence"]
+
+
 class DocumentUpsert(RowModel):
     url: str
     domain: str
@@ -178,9 +187,14 @@ class DocumentUpsert(RowModel):
     source_id: str | None = None
     extraction_family: str | None = None
     entity_id: int | None = None
-    plan_state: Literal["planned", "linked", "needs_review", "abstained"] | None = None
+    plan_state: (
+        Literal["planned", "linked", "needs_review", "abstained", "not_applicable"] | None
+    ) = None
     plan_confidence: float | None = None
     plan_reason: str | None = None
+    # What this document *is* (migration 0004). ``None`` on an update means
+    # "leave the stored role alone"; a fresh insert becomes ``evidence``.
+    role: DocumentRole | None = None
 
     @classmethod
     def from_document_ref(cls, ref: Any, *, domain: str | None = None) -> DocumentUpsert:
@@ -215,6 +229,24 @@ class DocumentUpsert(RowModel):
 
 class DocumentRecord(DocumentUpsert):
     id: int
+
+
+class InstitutionDomainSeed(RowModel):
+    """A registrable domain discovered from an inventory website field."""
+
+    domain: str
+    seed_url: str
+    entity_id: int | None = None
+    discovered_by: str | None = None
+    priority: int = 0
+    reason: str | None = None
+
+
+class InstitutionDomainRecord(InstitutionDomainSeed):
+    state: Literal["pending", "queued", "planned", "skipped"] = "pending"
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
+    last_queued_at: datetime | None = None
 
 
 class SnapshotCreate(RowModel):
@@ -436,7 +468,7 @@ class PipelineRunCreate(RowModel):
     """One stage execution in the SQL run ledger (migration 0003)."""
 
     run_id: str
-    stage: Literal["crawl", "extract", "score", "worker"]
+    stage: Literal["crawl", "extract", "score", "worker", "ingest"]
     started_at: datetime
     finished_at: datetime | None = None
     counts: dict[str, int] = Field(default_factory=dict)
@@ -664,8 +696,8 @@ class EntitiesRepo:
                 """
                 INSERT INTO entities
                     (kind, canonical_name, country, state, city, status, normalised_name,
-                     blocking_key)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                     blocking_key, website_url, institution_type)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
                 (
@@ -677,6 +709,8 @@ class EntitiesRepo:
                     create.status,
                     create.normalised_name,
                     create.blocking_key,
+                    create.website_url,
+                    create.institution_type,
                 ),
             ).fetchone()
         assert row is not None
@@ -693,6 +727,59 @@ class EntitiesRepo:
                 "SELECT * FROM entities WHERE kind = %s AND canonical_name = %s "
                 "ORDER BY id LIMIT 1",
                 (kind, canonical_name),
+            ).fetchone()
+        return _entity(row) if row else None
+
+    def find_normalised(self, kind: str, normalised_name: str) -> EntityRecord | None:
+        """Idempotent inventory match on the ER-normalised name (migration 0002)."""
+        if not normalised_name:
+            return None
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM entities WHERE kind = %s AND normalised_name = %s "
+                "ORDER BY id LIMIT 1",
+                (kind, normalised_name),
+            ).fetchone()
+        return _entity(row) if row else None
+
+    def update_details(
+        self,
+        entity_id: int,
+        *,
+        state: str | None = None,
+        city: str | None = None,
+        institution_type: str | None = None,
+        website_url: str | None = None,
+        normalised_name: str | None = None,
+        blocking_key: str | None = None,
+    ) -> EntityRecord | None:
+        """Fill inventory facts without clearing what a human/source already set.
+
+        A supplied value wins (an inventory refresh is newer than the stored
+        row); an omitted value is left untouched. Never deletes evidence.
+        """
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE entities SET
+                    state = COALESCE(%s, state),
+                    city = COALESCE(%s, city),
+                    institution_type = COALESCE(%s, institution_type),
+                    website_url = COALESCE(%s, website_url),
+                    normalised_name = COALESCE(normalised_name, %s),
+                    blocking_key = COALESCE(blocking_key, %s)
+                WHERE id = %s
+                RETURNING *
+                """,
+                (
+                    state,
+                    city,
+                    institution_type,
+                    website_url,
+                    normalised_name,
+                    blocking_key,
+                    entity_id,
+                ),
             ).fetchone()
         return _entity(row) if row else None
 
@@ -1252,6 +1339,36 @@ class AliasesRepo:
             ).fetchall()
         return [AliasRecord.model_validate(row) for row in rows]
 
+    def create_if_missing(self, create: AliasCreate) -> AliasRecord | None:
+        """Idempotent alias write; returns ``None`` when the alias already exists."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO entity_aliases
+                    (entity_id, alias, alias_type, source_id, confidence, span_start,
+                     span_end, quote, source_document_id, source_extraction_id,
+                     confirmed_by, confirmed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (entity_id, alias, alias_type) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    create.entity_id,
+                    create.alias,
+                    create.alias_type,
+                    create.source_id,
+                    create.confidence,
+                    create.span_start,
+                    create.span_end,
+                    create.quote,
+                    create.source_document_id,
+                    create.source_extraction_id,
+                    create.confirmed_by,
+                    create.confirmed_at,
+                ),
+            ).fetchone()
+        return AliasRecord.model_validate(row) if row else None
+
     def list_manual_for_entity(self, entity_id: int) -> list[AliasRecord]:
         with self.db.connection() as conn:
             rows = conn.execute(
@@ -1274,9 +1391,9 @@ class DocumentsRepo:
                     (url, domain, kind, first_seen, last_seen, etag, last_modified,
                      robots_decision, robots_checked_at, http_status, http_method, http_body,
                      request_headers, source_id, extraction_family, entity_id, plan_state,
-                     plan_confidence, plan_reason)
+                     plan_confidence, plan_reason, role)
                 VALUES (%s, %s, %s, COALESCE(%s, now()), COALESCE(%s, now()), %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'evidence'))
                 ON CONFLICT (url) DO UPDATE SET
                     domain = EXCLUDED.domain,
                     kind = COALESCE(EXCLUDED.kind, documents.kind),
@@ -1301,7 +1418,8 @@ class DocumentsRepo:
                     plan_state = COALESCE(EXCLUDED.plan_state, documents.plan_state),
                     plan_confidence = COALESCE(EXCLUDED.plan_confidence,
                                                documents.plan_confidence),
-                    plan_reason = COALESCE(EXCLUDED.plan_reason, documents.plan_reason)
+                    plan_reason = COALESCE(EXCLUDED.plan_reason, documents.plan_reason),
+                    role = COALESCE(EXCLUDED.role, documents.role)
                 RETURNING *
                 """,
                 (
@@ -1324,6 +1442,7 @@ class DocumentsRepo:
                     document.plan_state,
                     document.plan_confidence,
                     document.plan_reason,
+                    document.role,
                 ),
             ).fetchone()
         assert row is not None
@@ -1339,12 +1458,15 @@ class DocumentsRepo:
         plan_state: str,
         plan_confidence: float | None = None,
         plan_reason: str | None = None,
+        role: str | None = None,
     ) -> DocumentRecord | None:
         """Persist a :class:`fmd.plan.DocumentPlan` on the document row.
 
         Deliberately an explicit UPDATE rather than ``upsert``: a plan is a
         decision about an existing document, and ``plan_state`` must be able to
         move backwards (e.g. ``linked`` → ``needs_review``) when evidence changes.
+        ``role`` is only written when the planner supplies it; omitting it keeps
+        the crawl-time classification.
         """
         with self.db.connection() as conn:
             row = conn.execute(
@@ -1355,7 +1477,8 @@ class DocumentsRepo:
                     entity_id = %s,
                     plan_state = %s,
                     plan_confidence = %s,
-                    plan_reason = %s
+                    plan_reason = %s,
+                    role = COALESCE(%s, role)
                 WHERE id = %s
                 RETURNING *
                 """,
@@ -1366,10 +1489,66 @@ class DocumentsRepo:
                     plan_state,
                     plan_confidence,
                     plan_reason,
+                    role,
                     document_id,
                 ),
             ).fetchone()
         return _document(row) if row else None
+
+    def set_role(self, document_id: int, role: str) -> DocumentRecord | None:
+        """Re-classify a document without touching its plan (migration 0004)."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "UPDATE documents SET role = %s WHERE id = %s RETURNING *",
+                (role, document_id),
+            ).fetchone()
+        return _document(row) if row else None
+
+    def count_unplanned(self) -> dict[str, int]:
+        """Documents extraction will not read, bucketed by *honest* reason.
+
+        Inventory and navigation documents were never extraction candidates, so
+        they are counted as ``not_applicable`` — not as a family-detection
+        failure. Only evidence documents can be ``missing_family``,
+        ``needs_review`` or ``unresolved_entity``.
+        """
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT role, plan_state, extraction_family, entity_id, count(*) AS n "
+                "FROM documents GROUP BY role, plan_state, extraction_family, entity_id"
+            ).fetchall()
+        counts: dict[str, int] = {}
+        for row in rows:
+            total = int(row["n"])
+            role = row["role"] or "evidence"
+            if role != "evidence":
+                reason = "not_applicable"
+            elif row["extraction_family"] is None:
+                reason = "missing_family"
+            elif row["plan_state"] == "needs_review":
+                reason = "needs_review"
+            elif row["entity_id"] is None:
+                reason = "unresolved_entity"
+            else:
+                continue
+            counts[reason] = counts.get(reason, 0) + total
+        return counts
+
+    def list_by_role(self, role: str, *, limit: int = 100, offset: int = 0) -> list[DocumentRecord]:
+        """Documents of one role, oldest first (inventory ingest queue)."""
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM documents WHERE role = %s ORDER BY id LIMIT %s OFFSET %s",
+                (role, limit, offset),
+            ).fetchall()
+        return [_document(row) for row in rows]
+
+    def counts_by_role(self) -> dict[str, int]:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT role, count(*) AS n FROM documents GROUP BY role ORDER BY role"
+            ).fetchall()
+        return {str(row["role"]): int(row["n"]) for row in rows}
 
     def list_needs_review(self, limit: int = 100) -> list[DocumentRecord]:
         """Ambiguous plans awaiting a human decision (WS-G review queue source)."""
@@ -1399,6 +1578,100 @@ class DocumentsRepo:
                 (domain, limit),
             ).fetchall()
         return [_document(row) for row in rows]
+
+
+class InstitutionDomainsRepo:
+    """The institution-site crawl queue (migration 0004).
+
+    Inventory ingest writes a row per discovered domain; TODO-free by design,
+    the state machine is explicitly ``pending -> queued -> planned -> skipped``.
+    A re-ingest never resets a domain that is already queued or planned, so an
+    idempotent run does not duplicate crawl work.
+    """
+
+    def __init__(self, database: Database) -> None:
+        self.db = database
+
+    def upsert(self, seed: InstitutionDomainSeed) -> InstitutionDomainRecord:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO institution_domains
+                    (domain, seed_url, entity_id, discovered_by, priority, reason, state,
+                     first_seen, last_seen)
+                VALUES (%s, %s, %s, %s, %s, %s, 'pending', now(), now())
+                ON CONFLICT (domain) DO UPDATE SET
+                    seed_url = EXCLUDED.seed_url,
+                    entity_id = COALESCE(EXCLUDED.entity_id, institution_domains.entity_id),
+                    discovered_by = COALESCE(EXCLUDED.discovered_by,
+                                             institution_domains.discovered_by),
+                    priority = EXCLUDED.priority,
+                    reason = COALESCE(EXCLUDED.reason, institution_domains.reason),
+                    last_seen = now()
+                RETURNING *
+                """,
+                (
+                    seed.domain,
+                    seed.seed_url,
+                    seed.entity_id,
+                    seed.discovered_by,
+                    seed.priority,
+                    seed.reason,
+                ),
+            ).fetchone()
+        assert row is not None
+        return _institution_domain(row)
+
+    def upsert_many(self, seeds: Iterable[InstitutionDomainSeed]) -> int:
+        return sum(1 for seed in seeds if self.upsert(seed) is not None)
+
+    def list_candidates(self, limit: int = 500) -> list[InstitutionDomainRecord]:
+        """Every domain still worth crawling, highest priority first."""
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM institution_domains WHERE state IN ('pending', 'queued') "
+                "ORDER BY priority DESC, domain LIMIT %s",
+                (limit,),
+            ).fetchall()
+        return [_institution_domain(row) for row in rows]
+
+    def list_by_state(self, state: str, limit: int = 500) -> list[InstitutionDomainRecord]:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM institution_domains WHERE state = %s "
+                "ORDER BY priority DESC, domain LIMIT %s",
+                (state, limit),
+            ).fetchall()
+        return [_institution_domain(row) for row in rows]
+
+    def mark(self, domains: Iterable[str], state: str, *, reason: str | None = None) -> int:
+        names = [domain for domain in dict.fromkeys(domains) if domain]
+        if not names:
+            return 0
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "UPDATE institution_domains SET state = %s, "
+                "reason = COALESCE(%s, reason), "
+                "last_queued_at = CASE WHEN %s = 'queued' THEN now() ELSE last_queued_at END "
+                "WHERE domain = ANY(%s)",
+                (state, reason, state, names),
+            )
+        return int(getattr(row, "rowcount", 0) or 0)
+
+    def set_priority(self, domain: str, priority: int, *, reason: str | None = None) -> None:
+        with self.db.connection() as conn:
+            conn.execute(
+                "UPDATE institution_domains SET priority = %s, "
+                "reason = COALESCE(%s, reason) WHERE domain = %s",
+                (priority, reason, domain),
+            )
+
+    def counts_by_state(self) -> dict[str, int]:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT state, count(*) AS n FROM institution_domains GROUP BY state ORDER BY state"
+            ).fetchall()
+        return {str(row["state"]): int(row["n"]) for row in rows}
 
 
 class SnapshotsRepo:
@@ -1486,7 +1759,8 @@ class SnapshotsRepo:
         sql = (
             "SELECT s.* FROM snapshots s"
             " JOIN documents d ON d.id = s.document_id"
-            " WHERE d.extraction_family IS NOT NULL AND d.entity_id IS NOT NULL"
+            " WHERE d.role = 'evidence'"
+            " AND d.extraction_family IS NOT NULL AND d.entity_id IS NOT NULL"
             " AND (d.plan_state IS NULL OR d.plan_state <> 'needs_review')"
         )
         params: list[Any] = []
@@ -2538,6 +2812,10 @@ def _source(row: dict[str, Any]) -> SourceRecord:
 
 def _entity(row: dict[str, Any]) -> EntityRecord:
     return EntityRecord.model_validate(row)
+
+
+def _institution_domain(row: dict[str, Any]) -> InstitutionDomainRecord:
+    return InstitutionDomainRecord.model_validate(row)
 
 
 def _document(row: dict[str, Any]) -> DocumentRecord:

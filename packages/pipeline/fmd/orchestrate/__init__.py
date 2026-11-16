@@ -9,6 +9,7 @@ Public surface:
 
 from __future__ import annotations
 
+from fmd.orchestrate.ingest import InventoryStage
 from fmd.orchestrate.ledger import (
     JsonFileLedger,
     NullLedger,
@@ -19,6 +20,7 @@ from fmd.orchestrate.ledger import (
 from fmd.orchestrate.orchestrator import OrchestrationError, Orchestrator
 
 __all__ = [
+    "InventoryStage",
     "JsonFileLedger",
     "NullLedger",
     "OrchestrationError",

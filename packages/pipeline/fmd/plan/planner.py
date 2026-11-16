@@ -23,9 +23,10 @@ from fmd.er.service import resolve
 from fmd.er.types import Alias, EntityCandidate, Mention, Resolution
 from fmd.extract.schemas import FAMILIES
 from fmd.plan.mentions import collect_mentions
+from fmd.plan.roles import ROLE_EVIDENCE, is_extractable_role, role_for
 from fmd.plan.rules import DEFAULT_RULES, PlanRules, detect_family, normalise
 
-PlanState = Literal["planned", "linked", "needs_review", "abstained"]
+PlanState = Literal["planned", "linked", "needs_review", "abstained", "not_applicable"]
 FamilySource = Literal["registry", "reference", "heuristic", "none"]
 
 #: Reasons are stable codes, never prose: the run ledger and review queue filter them.
@@ -62,6 +63,8 @@ class DocumentPlan(_PlanModel):
     confidence: float = 0.0
     abstain_reason: str | None = None
     state: PlanState = "abstained"
+    #: Migration 0004: a non-evidence role is ``not_applicable``, not a failure.
+    role: str = ROLE_EVIDENCE
     signals: dict[str, Any] = Field(default_factory=dict)
 
     @property
@@ -71,6 +74,10 @@ class DocumentPlan(_PlanModel):
     @property
     def extractable(self) -> bool:
         return self.family is not None and self.entity_id is not None and self.state == "linked"
+
+    @property
+    def not_applicable(self) -> bool:
+        return self.state == "not_applicable"
 
     def as_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
@@ -137,8 +144,25 @@ class DocumentPlanner:
         entity_id_hint: int | None = None,
         text_sample: str | None = None,
         anchor_text: str | None = None,
+        role: str | None = None,
     ) -> DocumentPlan:
         url = str(getattr(document, "url", "") or "")
+        resolved_role = role or role_for(
+            url=url,
+            source=source,
+            family=family_hint or declared_family(source),
+        )
+        if not is_extractable_role(resolved_role):
+            # Inventory and navigation were never extraction candidates. This is
+            # an answer, not an abstention: it must never be bucketed as
+            # ``family_undetected``.
+            return DocumentPlan(
+                role=resolved_role,
+                state="not_applicable",
+                confidence=0.0,
+                signals={"role": resolved_role},
+            )
+
         family, family_source, family_conf, signals, family_reason = self._family(
             url=url,
             source=source,
@@ -186,6 +210,7 @@ class DocumentPlanner:
             confidence=confidence,
             abstain_reason=reason,
             state=state,
+            role=resolved_role,
             signals=signals,
         )
 
@@ -368,4 +393,5 @@ def persist_plan(documents: Any, document: Any, plan: DocumentPlan) -> Any | Non
         plan_state=plan.state,
         plan_confidence=plan.confidence,
         plan_reason=plan.abstain_reason,
+        role=plan.role,
     )

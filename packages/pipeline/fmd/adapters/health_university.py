@@ -30,6 +30,10 @@ from fmd.adapters.links import js_shell_signals, same_site
 from fmd.discover.base import DocumentRef
 
 
+def _host(url: str) -> str:
+    return (urlsplit(url).hostname or "").lower()
+
+
 class _OptionParser(HTMLParser):
     """Collect ``<option value="...">text</option>`` without a DOM dependency."""
 
@@ -130,7 +134,20 @@ class HealthUniversityAdapter(BaseAdapter):
             if url in seen or not same_site(base_url, url):
                 continue
             seen.add(url)
-            refs.append(self.ref(url, metadata={"kind": kind, "anchor_text": label}))
+            refs.append(
+                self.ref(
+                    url,
+                    metadata={
+                        "kind": kind,
+                        "anchor_text": label,
+                        # Role/domain emission only: the crawler re-classifies
+                        # from the fetched bytes, but a ledger can already show
+                        # that this ref is an affiliation document (evidence).
+                        "document_role": "evidence",
+                        "domain": _host(url),
+                    },
+                )
+            )
         return refs
 
     def parse_listing(self, text: str, *, base_url: str | None = None) -> list[DocumentRef]:
@@ -146,6 +163,10 @@ class HealthUniversityAdapter(BaseAdapter):
                         "kind": "affiliated_college_list",
                         "college_count": len(colleges),
                         "college_names_sample": colleges[:10],
+                        # A college list is inventory: it names institutions and
+                        # is ingested, never extracted (migration 0004).
+                        "document_role": "inventory",
+                        "domain": _host(base),
                     },
                     priority=1,
                 )

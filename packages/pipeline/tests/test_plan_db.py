@@ -101,7 +101,10 @@ def test_0003_applies_over_0001_and_0002_and_is_idempotent(schema_database, tmp_
         migration.version: migration.checksum for migration in discover_migrations(legacy)
     }
 
-    assert run_migrations(schema_database) == ["0003_document_plans_and_pipeline_runs"]
+    assert run_migrations(schema_database) == [
+        "0003_document_plans_and_pipeline_runs",
+        "0004_document_roles_and_inventory_targets",
+    ]
     assert run_migrations(schema_database) == []
     assert applied_migrations(schema_database) == {
         migration.version: migration.checksum for migration in discover_migrations()

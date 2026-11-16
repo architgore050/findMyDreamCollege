@@ -104,3 +104,36 @@ def test_yield_stop_rule_bounds_a_dry_crawl(registry) -> None:
     assert refs
     # With max_depth=2 the crawl may visit nav pages, but the page budget is hard.
     assert len(ladder.calls) <= 1 + int(source.params.max_pages_per_domain)
+
+
+def test_link_scoring_prefers_placement_and_aqar_over_news(adapter) -> None:
+    html = (
+        '<a href="/news/annual-report-2025.pdf">Annual report</a>'
+        '<a href="/files/aqar-2024.pdf">AQAR 2024</a>'
+        '<a href="/files/placement-report-2025.pdf">Placement Report</a>'
+    )
+    refs = adapter.parse_listing(html, base_url="https://example.ac.in/")
+
+    urls = [ref.url for ref in refs]
+    assert urls[-1].endswith("annual-report-2025.pdf")
+    assert {url.rsplit("/", 1)[-1] for url in urls[:2]} == {
+        "aqar-2024.pdf",
+        "placement-report-2025.pdf",
+    }
+    assert refs[0].metadata["link_score"] >= refs[-1].metadata["link_score"]
+    # The weights are registry data, not constants in this module.
+    assert "link_weights" in adapter.source.params.model_dump(exclude_none=True)
+
+
+def test_navigation_skips_news_events_and_gallery_pages(adapter) -> None:
+    html = (
+        '<a href="/about/gallery">Photo Gallery</a>'
+        '<a href="/about/news">News</a>'
+        '<a href="/about/events">Events</a>'
+        '<a href="/naac/ssr">NAAC SSR</a>'
+        '<a href="/downloads">Downloads</a>'
+    )
+    nav = adapter.parse_navigation(html, base_url="https://example.ac.in/")
+
+    assert not any(token in url for url in nav for token in ("gallery", "news", "events"))
+    assert nav[0].endswith("/naac/ssr")  # evidence-adjacent sections come first

@@ -14,7 +14,8 @@ abstention, never an empty success.
 
 from __future__ import annotations
 
-from collections import deque
+import heapq
+import re
 from collections.abc import Iterable
 
 from fmd.adapters.base import BaseAdapter, SourceUnavailable, anchors, resolve
@@ -27,11 +28,95 @@ from fmd.adapters.links import (
 )
 from fmd.discover.base import DocumentRef
 
+#: Default ordering weights. They exist only to order a crawl queue, and every
+#: one of them is overridable from ``params.link_weights`` (invariant 7).
+DEFAULT_LINK_WEIGHTS: dict[str, int] = {
+    "document": 10,
+    "filename_match": 5,
+    "anchor_match": 5,
+    "navigate": 5,
+    "navigate_anchor": 3,
+    "navigate_filename": 2,
+    "deprioritised": -50,
+}
+
 
 class InstitutionSiteAdapter(BaseAdapter):
     name = "institution_site"
 
     # ------------------------------------------------------------------ params
+    def _weights(self) -> dict[str, int]:
+        raw = self.param("link_weights") or {}
+        weights = dict(DEFAULT_LINK_WEIGHTS)
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                try:
+                    weights[str(key)] = int(value)
+                except (TypeError, ValueError):
+                    continue
+        return weights
+
+    def _deprioritise_patterns(self) -> list[re.Pattern[str]]:
+        values = self.param("deprioritise_patterns") or ()
+        if isinstance(values, str):
+            values = (values,)
+        return [re.compile(value) for value in values if value]
+
+    @staticmethod
+    def _matches(patterns: Iterable[re.Pattern[str]], value: str) -> bool:
+        return any(pattern.search(value) for pattern in patterns)
+
+    def _score(self, decision: LinkDecision) -> int:
+        """Config-weighted score for one classified link.
+
+        The classification gate (document vs navigation) is shared with the
+        other adapters; this method only decides *order*. A news/events/gallery
+        page is pushed to the back of the queue and can never outrank a
+        placement/AQAR/SSR/annual-report link.
+        """
+        weights = self._weights()
+        filename_patterns = [
+            re.compile(pattern) for pattern in (self.param("document_filename_patterns") or ())
+        ]
+        anchor_patterns = [re.compile(p) for p in (self.param("anchor_patterns") or ())]
+        filename_match = self._matches(filename_patterns, decision.url.lower())
+        anchor_match = self._matches(anchor_patterns, decision.text)
+        if decision.kind == "document":
+            score = weights["document"]
+            score += weights["filename_match"] if filename_match else 0
+            score += weights["anchor_match"] if anchor_match else 0
+        else:
+            score = weights["navigate"]
+            score += weights["navigate_anchor"] if anchor_match else 0
+            score += weights["navigate_filename"] if filename_match else 0
+        if self._matches(self._deprioritise_patterns(), f"{decision.url} {decision.text}"):
+            score += weights["deprioritised"]
+        return score
+
+    def _decisions(self, text: str, *, base_url: str) -> list[LinkDecision]:
+        decisions: list[LinkDecision] = []
+        seen: set[str] = set()
+        for href, label in anchors(text):
+            decision = self._classify(href, label)
+            if decision is None:
+                continue
+            url = resolve(base_url, decision.url)
+            if url in seen or not same_site(base_url, url):
+                continue
+            seen.add(url)
+            score = self._score(decision)
+            if decision.kind == "navigate" and self._matches(
+                self._deprioritise_patterns(), f"{url} {decision.text}"
+            ):
+                # Do not spend a navigation hop on news/events/gallery/admission
+                # brochure pages. A document is never dropped here: a potential
+                # evidence PDF is only ranked last.
+                continue
+            decisions.append(
+                LinkDecision(url, decision.text, decision.kind, score, decision.reason)
+            )
+        return rank_decisions(decisions)
+
     def _seeds(self, domains: Iterable[str] | None = None) -> list[str]:
         candidates: list[str] = list(domains or [])
         if not candidates:
@@ -78,19 +163,6 @@ class InstitutionSiteAdapter(BaseAdapter):
     def parse_listing(self, text: str, *, base_url: str | None = None) -> list[DocumentRef]:
         """Return only document refs, best-scoring first (pure, offline-testable)."""
         base = base_url or (self._seeds() or [""])[0]
-        decisions: list[LinkDecision] = []
-        seen: set[str] = set()
-        for href, label in anchors(text):
-            decision = self._classify(href, label)
-            if decision is None or decision.kind != "document":
-                continue
-            url = resolve(base, decision.url)
-            if url in seen or not same_site(base, url):
-                continue
-            seen.add(url)
-            decisions.append(
-                LinkDecision(url, decision.text, decision.kind, decision.score, decision.reason)
-            )
         return [
             self.ref(
                 decision.url,
@@ -102,46 +174,44 @@ class InstitutionSiteAdapter(BaseAdapter):
                 },
                 priority=decision.score,
             )
-            for decision in rank_decisions(decisions)
+            for decision in self._decisions(text, base_url=base)
+            if decision.kind == "document"
         ]
 
     def parse_navigation(self, text: str, *, base_url: str) -> list[str]:
         """Return bounded-crawl candidates on the same registrable domain."""
-        decisions: list[LinkDecision] = []
-        seen: set[str] = set()
-        for href, label in anchors(text):
-            decision = self._classify(href, label)
-            if decision is None or decision.kind != "navigate":
-                continue
-            url = resolve(base_url, decision.url)
-            if url in seen or not same_site(base_url, url):
-                continue
-            seen.add(url)
-            decisions.append(
-                LinkDecision(url, decision.text, decision.kind, decision.score, decision.reason)
-            )
-        return [decision.url for decision in rank_decisions(decisions)]
+        return [decision.url for decision in self._navigation_decisions(text, base_url=base_url)]
+
+    def _navigation_decisions(self, text: str, *, base_url: str) -> list[LinkDecision]:
+        return [
+            decision
+            for decision in self._decisions(text, base_url=base_url)
+            if decision.kind == "navigate"
+        ]
 
     # ------------------------------------------------------------------ crawl
     def _crawl(self, seed: str) -> tuple[list[DocumentRef], str | None]:
         max_depth = self._bounded_int("max_depth", 2)
         max_pages = self._bounded_int("max_pages_per_domain", 200)
+        max_documents = self._bounded_int("max_documents_per_domain", 0)
         yield_check_after = self._bounded_int("yield_check_after", 25)
         try:
             min_yield = float(self.param("min_yield_percent", 2.0) or 2.0)
         except (TypeError, ValueError):
             min_yield = 2.0
 
-        queue: deque[tuple[str, int]] = deque([(seed, 0)])
+        # A priority queue, not FIFO: the best-scoring navigation target is
+        # visited first, so a bounded page budget is spent on NAAC/IQAC/NIRF/
+        # placement/downloads sections before news or galleries.
+        queue: list[tuple[int, int, str]] = [(0, 0, seed)]
         visited: set[str] = {seed}
-        refs: list[DocumentRef] = []
-        seen_docs: set[str] = set()
+        docs: dict[str, DocumentRef] = {}
         pages = 0
         first_error: str | None = None
         fetched_any = False
 
         while queue and pages < max_pages:
-            url, depth = queue.popleft()
+            _score, depth, url = heapq.heappop(queue)
             try:
                 text = self.fetch_text(url)
             except SourceUnavailable as exc:
@@ -151,26 +221,31 @@ class InstitutionSiteAdapter(BaseAdapter):
             fetched_any = True
             pages += 1
 
+            # Collect every document the page links, then keep the best N at the
+            # end. Stopping at N *during* the BFS would let a generic homepage
+            # PDF end the crawl before the NAAC/IQAC page is ever visited.
             for ref in self.parse_listing(text, base_url=url):
-                if ref.url in seen_docs:
+                if ref.url in docs:
                     continue
-                seen_docs.add(ref.url)
-                refs.append(ref)
+                docs[ref.url] = ref
 
             if depth < max_depth:
-                for candidate in self.parse_navigation(text, base_url=url):
-                    if candidate in visited:
+                for decision in self._navigation_decisions(text, base_url=url):
+                    if decision.url in visited:
                         continue
-                    visited.add(candidate)
-                    queue.append((candidate, depth + 1))
+                    visited.add(decision.url)
+                    heapq.heappush(queue, (-decision.score, depth + 1, decision.url))
 
             # Yield stop rule: a domain that returns almost no documents after a
             # fair sample is not worth the remaining budget (spec §4.9).
             if pages >= yield_check_after and min_yield > 0:
-                yield_percent = 100.0 * len(refs) / pages
+                yield_percent = 100.0 * len(docs) / pages
                 if yield_percent < min_yield:
                     break
 
+        refs = sorted(docs.values(), key=lambda ref: (-ref.priority, ref.url))
+        if max_documents:
+            refs = refs[:max_documents]
         if not fetched_any:
             return [], first_error or "unreachable"
         return refs, None
@@ -206,4 +281,3 @@ class InstitutionSiteAdapter(BaseAdapter):
             # Nothing was readable: "no documents" would be a lie.
             raise SourceUnavailable(first_reason, detail="no institution page could be read")
         return refs
-

@@ -24,6 +24,7 @@ from fmd.db.repositories import (
     DocumentsRepo,
     EntitiesRepo,
     ExtractionsRepo,
+    InstitutionDomainsRepo,
     ProgrammesRepo,
     ScoresRepo,
     SnapshotsRepo,
@@ -33,6 +34,7 @@ from fmd.frontier.queue import Frontier
 from fmd.orchestrate.adapters import build_adapter
 from fmd.orchestrate.crawl import DEFAULT_SOURCE_FAILURE_BUDGET, Crawler
 from fmd.orchestrate.extract import DEFAULT_TOOL_VERSION, Extractor, build_extract_router
+from fmd.orchestrate.ingest import INSTITUTION_ADAPTER, InventoryStage
 from fmd.orchestrate.ledger import JsonFileLedger, RunLedger, RunSummary, SqlLedger, utcnow
 from fmd.orchestrate.score import score_programmes
 from fmd.paths import resolve_snapshot_dir
@@ -61,6 +63,8 @@ class Orchestrator:
         programmes: Any | None = None,
         scores: Any | None = None,
         entities: Any | None = None,
+        aliases: Any | None = None,
+        institution_domains: Any | None = None,
         sources: Iterable[Any] | None = None,
         adapter_factory: Callable[[Any], Any] | None = None,
         fetcher: Any | None = None,
@@ -96,6 +100,12 @@ class Orchestrator:
         )
         self.scores = scores if scores is not None else self._require_database(ScoresRepo)
         self.entities = entities if entities is not None else self._optional(EntitiesRepo)
+        self.aliases = aliases if aliases is not None else self._optional(AliasesRepo)
+        self.institution_domains = (
+            institution_domains
+            if institution_domains is not None
+            else self._optional(InstitutionDomainsRepo)
+        )
         if frontier is None:
             if database is None:
                 raise OrchestrationError("crawl requires a database or an injected frontier")
@@ -116,7 +126,7 @@ class Orchestrator:
             if planner is not None
             else DocumentPlanner(
                 entities=self.entities,
-                aliases=AliasesRepo(database) if database is not None else None,
+                aliases=self.aliases,
                 er_config=registry.er,
             )
         )
@@ -200,6 +210,7 @@ class Orchestrator:
         summary = self._summary("crawl", dry_run=dry_run)
         selected = self._selected_sources(sources)
         summary.metadata["sources"] = [str(getattr(source, "id", "")) for source in selected]
+        queued = {} if dry_run else self._queued_domains(selected)
         crawler = Crawler(
             frontier=self.frontier,
             fetcher=self.fetcher,
@@ -212,9 +223,24 @@ class Orchestrator:
             planner=None if dry_run else self.planner,
             sources=selected,
         )
-        crawler.plan(selected, summary=summary, limit=limit, dry_run=dry_run)
+        crawler.plan(
+            selected,
+            summary=summary,
+            limit=limit,
+            dry_run=dry_run,
+            domains={
+                source_id: [row.seed_url for row in rows] for source_id, rows in queued.items()
+            },
+            entity_hints={
+                row.seed_url: row.entity_id
+                for rows in queued.values()
+                for row in rows
+                if row.entity_id is not None
+            },
+        )
         if not dry_run:
             crawler.drain(summary=summary, limit=limit)
+            self._mark_domains_planned(queued)
 
         if dry_run:
             summary.failed = bool(summary.failures) and summary.counts.get("planned", 0) == 0
@@ -228,7 +254,66 @@ class Orchestrator:
             summary.failed = bool(summary.failures) and effective == 0
         if not dry_run:
             summary.metadata["frontier"] = self._frontier_counts()
+            summary.metadata["roles"] = self._document_roles()
         return self._record(summary, dry_run=dry_run)
+
+    def _queued_domains(self, selected: Iterable[Any]) -> dict[str, list[Any]]:
+        """Domains selected by ``ingest`` mapped to their institution-site source."""
+        if self.institution_domains is None:
+            return {}
+        source_ids = [
+            str(getattr(source, "id", ""))
+            for source in selected
+            if getattr(source, "adapter", None) == INSTITUTION_ADAPTER
+        ]
+        if not source_ids:
+            return {}
+        try:
+            rows = self.institution_domains.list_by_state("queued", limit=500)
+        except Exception as exc:  # observability must not abort a crawl
+            logger.warning("could not read queued institution domains: %s", exc)
+            return {}
+        return {source_id: list(rows) for source_id in source_ids} if rows else {}
+
+    def _mark_domains_planned(self, queued: dict[str, list[Any]]) -> None:
+        domains = [row.domain for rows in queued.values() for row in rows]
+        if not domains or self.institution_domains is None:
+            return
+        try:
+            self.institution_domains.mark(domains, "planned", reason="adapter_planned")
+        except Exception as exc:  # pragma: no cover - queue bookkeeping only
+            logger.warning("could not mark institution domains planned: %s", exc)
+
+    def _document_roles(self) -> dict[str, int]:
+        counter = getattr(self.documents, "counts_by_role", None)
+        if counter is None:
+            return {}
+        try:
+            return dict(counter())
+        except Exception:  # pragma: no cover - stats must never fail a crawl
+            return {}
+
+    # --------------------------------------------------------------------- ingest
+    def ingest(self, limit: int | None = None) -> RunSummary:
+        """Inventory documents -> entities -> prioritised institution domains."""
+        summary = self._summary("ingest")
+        if self.entities is None or self.institution_domains is None:
+            summary.bump("skipped")
+            summary.metadata["reason"] = "ingest requires a database or injected repositories"
+            return self._record(summary, dry_run=False)
+        stage = InventoryStage(
+            documents=self.documents,
+            snapshots=self.snapshots,
+            store=self._store(),
+            entities=self.entities,
+            aliases=self.aliases,
+            domains=self.institution_domains,
+            sources=self._all_sources(),
+            registry=self.registry,
+        )
+        stage.run(summary=summary, limit=limit)
+        summary.failed = bool(summary.failures)
+        return self._record(summary, dry_run=False)
 
     def _frontier_counts(self) -> dict[str, int]:
         try:
@@ -327,6 +412,14 @@ class Orchestrator:
                 crawl_summary = self.crawl(limit=limit)
                 emit(crawl_summary)
                 self._heartbeat(ticks, crawl_summary)
+                if stop.is_set():
+                    break
+                # Inventory -> entities -> queued institution domains. The next
+                # tick's crawl consumes the queue; running it here keeps the
+                # pipeline's missing link inside one worker loop.
+                ingest_summary = self.ingest(limit=limit)
+                emit(ingest_summary)
+                self._heartbeat(ticks, ingest_summary)
                 if stop.is_set():
                     break
                 extract_summary = self.extract(limit=limit)
