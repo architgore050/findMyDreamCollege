@@ -272,6 +272,15 @@ def test_every_profile_provider_and_model_are_env_switchable() -> None:
     assert models.profiles["embed"].model == "embed-test"
     # OCR is an acquisition stage, not a router profile: `ocr_vlm` was retired on
     # 2026-11-16 and must not come back as a doctor-visible capability.
+    assert set(models.profiles) == {
+        "bulk_extract",
+        "hard_pdf",
+        "adjudicate",
+        "entity_adjudication",
+        "nlp_rubric",
+        "verify",
+        "embed",
+    }
     assert "ocr_vlm" not in models.profiles
 
 
@@ -298,7 +307,7 @@ def _diagnostic_models() -> ModelsConfig:
                 "hard_pdf": {
                     "provider": "api",
                     "model": None,
-                    "model_env": "FMD_HARD_PDF_MODEL",
+                    "model_env": "FMD_API_MODEL",
                     "required": False,
                     "degrade_reason": "vision_unavailable",
                 },
@@ -316,7 +325,7 @@ def test_doctor_remediation_names_the_exact_missing_variables() -> None:
     assert "FMD_EXTRACT_MODEL is empty" in bulk
     assert "FMD_API_LLM_URL is empty" in bulk
     assert "FMD_API_LLM_KEY is empty" in bulk
-    assert "FMD_HARD_PDF_MODEL is empty" in "; ".join(rows["hard_pdf"]["remediation"])
+    assert "FMD_API_MODEL is empty" in "; ".join(rows["hard_pdf"]["remediation"])
 
 
 def test_doctor_exit_semantics_follow_required_profiles() -> None:
@@ -344,7 +353,7 @@ def test_optional_profile_degrades_to_vision_unavailable(tmp_path: Path) -> None
     with pytest.raises(ProviderError) as excinfo:
         router.call("hard_pdf", Answer, "s", "u", "ref")
     assert excinfo.value.reason == "vision_unavailable"
-    assert "FMD_HARD_PDF_MODEL" in str(excinfo.value)
+    assert "FMD_API_MODEL" in str(excinfo.value)
     assert "run continues without it" in str(excinfo.value)
 
 

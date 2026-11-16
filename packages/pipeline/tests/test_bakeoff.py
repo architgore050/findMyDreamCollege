@@ -294,9 +294,20 @@ def test_models_config_defaults_and_every_profile_is_env_overridable() -> None:
     # OCR has no router profile: the `ocr_vlm` profile was retired 2026-11-16 and
     # OCR now lives in config/acquire.yaml (T2/T2b backends, an HTTP stage).
     assert "ocr_vlm" not in defaults.profiles
-    # Unset FMD_API_MODEL interpolates to "" (not None): the optional hard-PDF
-    # profile is simply unconfigured and degrades per document.
-    assert not defaults.profiles["hard_pdf"].model
+    assert set(defaults.profiles) == {
+        "bulk_extract",
+        "hard_pdf",
+        "adjudicate",
+        "entity_adjudication",
+        "nlp_rubric",
+        "verify",
+        "embed",
+    }
+    # `hard_pdf` is the hosted fallback: provider `api` plus the shared
+    # FMD_API_MODEL. Unset interpolates to None, so it degrades per document.
+    assert defaults.profiles["hard_pdf"].provider == "api"
+    assert defaults.profiles["hard_pdf"].model is None
+    assert defaults.profiles["hard_pdf"].model_env == "FMD_API_MODEL"
     assert defaults.profiles["adjudicate"].provider == "gemini"
     assert defaults.profiles["adjudicate"].model == "gemini-2.5-flash"
     assert defaults.profiles["nlp_rubric"].model == "gemini-2.5-flash"

@@ -26,6 +26,20 @@ def test_valid_registry_loads(registry) -> None:
     assert abs(sum(registry.weights.weights.values()) - 100.0) < 1e-9
     assert registry.weights.filters
     assert registry.models.profiles["bulk_extract"].provider == "local"
+    # The live profile set. OCR is an acquisition stage, never a router profile;
+    # `hard_pdf` is the hosted fallback and reads the shared FMD_API_MODEL.
+    assert set(registry.models.profiles) == {
+        "bulk_extract",
+        "hard_pdf",
+        "adjudicate",
+        "entity_adjudication",
+        "nlp_rubric",
+        "verify",
+        "embed",
+    }
+    assert registry.models.profiles["hard_pdf"].provider == "api"
+    assert registry.models.profiles["hard_pdf"].model is None
+    assert registry.models.profiles["hard_pdf"].model_env == "FMD_API_MODEL"
     assert registry.exams.exams
     assert registry.cost_rules.cost_categories
     assert registry.scorer_version and registry.weights_version
