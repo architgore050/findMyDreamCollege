@@ -64,20 +64,45 @@ def test_score_dry_run_on_empty_database(empty_database, capsys) -> None:
     assert "programmes 0" in out
 
 
-def test_llm_ping_reports_resolution(capsys) -> None:
-    assert main(["--config-dir", str(CONFIG_DIR), "llm-ping", "--json"]) == 0
+def test_llm_doctor_reports_resolution(capsys) -> None:
+    assert main(["--config-dir", str(CONFIG_DIR), "llm", "doctor", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     profiles = {row["profile"]: row for row in payload["profiles"]}
-    assert profiles["bulk_extract"]["resolved"] is True
+    assert profiles["bulk_extract"]["usable"] is True
+    assert profiles["bulk_extract"]["model"] == "Qwen3-14B-AWQ"
     assert "key_present" in profiles["bulk_extract"]
     assert payload["budgets"]["hard_stop"] is True
-    # No secret material may appear in the report.
-    assert "api_key" not in json.dumps(payload)
+    assert payload["required_ok"] is True
+    # Only the env-var name is published, never a key value.
+    assert '"api_key":' not in json.dumps(payload)
+    assert "secret" not in json.dumps(payload).lower()
 
 
-def test_llm_ping_table_never_prints_key_values(capsys) -> None:
-    assert main(["--config-dir", str(CONFIG_DIR), "llm-ping"]) == 0
+def test_llm_doctor_table_never_prints_key_values(capsys) -> None:
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("FMD_API_LLM_KEY", "sk-must-not-appear")
+    try:
+        assert main(["--config-dir", str(CONFIG_DIR), "llm", "doctor"]) == 0
+    finally:
+        monkeypatch.undo()
     out = capsys.readouterr().out
-    assert "profiles in" in out
-    assert "key=" in out
+    assert "model profiles in" in out
+    assert "BASE_URL" in out and "MODEL" in out
+    assert "key_present" not in out
+    assert "sk-must-not-appear" not in out
     assert "hard_stop=True" in out
+
+
+def test_llm_doctor_exits_non_zero_when_required_profile_is_unusable(
+    capsys, monkeypatch
+) -> None:
+    monkeypatch.setenv("FMD_EXTRACT_MODEL", "")
+    assert main(["--config-dir", str(CONFIG_DIR), "llm", "doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "FMD_EXTRACT_MODEL is empty" in out
+
+
+def test_llm_ping_remains_a_doctor_alias(capsys) -> None:
+    assert main(["--config-dir", str(CONFIG_DIR), "llm-ping", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["profiles"]

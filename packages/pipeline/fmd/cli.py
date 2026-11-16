@@ -15,7 +15,6 @@ from typing import Any
 from fmd import __version__
 from fmd.config import ConfigError, load_registry
 from fmd.db import Database, DatabaseError, MigrationError, run_migrations
-from fmd.llm import ModelRouter
 from fmd.seed import SeedError, seed_database
 
 
@@ -145,8 +144,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="write even when the latest score is identical"
     )
 
+    llm_parser = subparsers.add_parser(
+        "llm", help="inspect model configuration (never prints secrets)"
+    )
+    llm_sub = llm_parser.add_subparsers(dest="llm_command", required=True)
+    doctor_parser = llm_sub.add_parser(
+        "doctor",
+        help="per-profile resolution table with exact env-var remediation",
+    )
+    doctor_parser.add_argument(
+        "--live",
+        action="store_true",
+        help="also probe reachability with a cheap /models call (network; off by default)",
+    )
+    doctor_parser.add_argument(
+        "--json", action="store_true", help="machine-readable output (default: table)"
+    )
+    llm_ping = llm_sub.add_parser(
+        "ping", help="alias for `doctor` without --live"
+    )
+    llm_ping.add_argument("--json", action="store_true", help="machine-readable output")
+
+    # Backwards-compatible top-level alias; prefer `fmd llm doctor`.
     ping = subparsers.add_parser(
-        "llm-ping", help="report model profile resolution without printing secrets"
+        "llm-ping", help="alias for `fmd llm doctor` (never prints secrets)"
     )
     ping.add_argument(
         "--json", action="store_true", help="machine-readable output (default: table)"
@@ -298,44 +319,83 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
-def _cmd_llm_ping(args: argparse.Namespace) -> int:
+def _cmd_llm_doctor(args: argparse.Namespace) -> int:
+    from fmd.llm.doctor import doctor_report
+
     registry = load_registry(args.config_dir)
-    router = ModelRouter(registry.models)
-    report = router.ping()
-    if args.json:
+    live = bool(getattr(args, "live", False))
+    report = doctor_report(registry.models, live=live)
+    if getattr(args, "json", False):
         print(
             json.dumps(
                 {
-                    "profiles": report,
+                    "profiles": report["profiles"],
                     "budgets": registry.models.budgets.model_dump(),
+                    "required_ok": report["required_ok"],
+                    "ok": report["ok"],
+                    "live": report["live"],
+                    "remediation": report["remediation"],
                 },
                 indent=2,
                 sort_keys=True,
             )
         )
-        return 0
+        return 0 if report["required_ok"] else 1
 
-    print(f"profiles in {Path(registry.config_dir) / 'models.yaml'}:")
-    for row in report:
-        status = "resolved" if row["resolved"] else "UNRESOLVED"
-        key = (
-            "n/a"
-            if row["key_present"] is None
-            else ("present" if row["key_present"] else "MISSING")
-        )
+    print(f"model profiles in {Path(registry.config_dir) / 'models.yaml'}:")
+    header = (
+        f"{'PROFILE':<20} {'PROVIDER':<10} {'KIND':<18} {'BASE_URL':<34} "
+        f"{'KEY':<12} {'MODEL':<26} {'GUIDED':<13} {'REQ':<4} {'REACHABLE'}"
+    )
+    print(header)
+    for row in report["profiles"]:
+        if row["base_url_resolved"]:
+            base = row["base_url"]
+        else:
+            base = f"MISSING ({row['base_url_env'] or 'base_url'})"
+        if row["key_present"]:
+            key = "present"
+        elif row["key_required"]:
+            key = "MISSING"
+        else:
+            key = "not-required"
+        model = row["model"] or f"MISSING ({row['model_env'] or 'model'})"
+        guided = "yes" if row["guided_json_expected"] else "json-instruct"
+        if row["reachable"] is None:
+            reachable = "not-checked"
+        elif row["reachable"]:
+            reachable = "ok"
+        else:
+            reachable = f"FAIL: {row['reachability_note']}"
         print(
-            f"  {row['profile']:<14} {status:<11} provider={row['provider']:<6} "
-            f"model={row['model'] or '-'} key={key}"
+            f"{row['profile']:<20} {row['provider']:<10} {row['kind']:<18} "
+            f"{base:<34} {key:<12} {model:<26} {guided:<13} "
+            f"{'yes' if row['required'] else 'no':<4} {reachable}"
         )
-        if not row["resolved"]:
-            print(f"      reason: {row['reason']}")
+        if not row["usable"] and row["degrade_reason"]:
+            print(
+                f"    degrades to {row['degrade_reason']} per document; "
+                "text extraction still runs."
+            )
+    if report["remediation"]:
+        print("remediation:")
+        for line in report["remediation"]:
+            print(f"  {line}")
+    else:
+        print("all required profiles resolved.")
     budgets = registry.models.budgets
     print(
         f"budgets: daily=${budgets.daily_usd:.2f} per_run=${budgets.per_run_usd:.2f} "
         f"hard_stop={budgets.hard_stop} cache={budgets.cache}"
     )
+    if not live:
+        print("reachability not checked; re-run with --live for a cheap /models probe.")
     print("secrets are never printed; only presence is reported.")
-    return 0
+    return 0 if report["required_ok"] else 1
+
+
+def _cmd_llm_ping(args: argparse.Namespace) -> int:
+    return _cmd_llm_doctor(args)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -375,6 +435,11 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_worker(args)
         if args.command == "eval":
             return _cmd_eval(args)
+        if args.command == "llm":
+            command = getattr(args, "llm_command", None)
+            if command in {"doctor", "ping"}:
+                return _cmd_llm_doctor(args)
+            parser.error("llm: choose `doctor` or `ping`")
         if args.command == "llm-ping":
             return _cmd_llm_ping(args)
     except (ConfigError, DatabaseError, MigrationError, SeedError) as exc:

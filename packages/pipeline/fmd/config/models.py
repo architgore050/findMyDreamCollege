@@ -262,10 +262,18 @@ class WeightsConfig(ConfigModel):
 
 
 class ProviderConfig(ConfigModel):
-    kind: Literal["openai_compatible", "replay"]
+    kind: Literal["openai_compatible", "anthropic", "gemini", "replay"]
     base_url: str | None = None
     api_key: str | None = None
     fixtures_dir: str | None = None
+
+    # Self-documenting diagnostics. ``fmd llm doctor`` names these exact
+    # variables instead of guessing which ``${...}`` produced a value.
+    base_url_env: str | None = None
+    api_key_env: str | None = None
+    requires_api_key: bool = False
+    supports_guided_json: bool = True
+    base_url_example: str | None = None
 
 
 class Pricing(ConfigModel):
@@ -287,6 +295,14 @@ class ProfileConfig(ConfigModel):
     guided_json: bool = False
     max_tokens: int = 4096
     pricing: Pricing | None = None
+
+    # Diagnostics: the env vars this profile resolves from, and whether a
+    # missing/broken profile blocks a run or degrades to ``degrade_reason``.
+    provider_env: str | None = None
+    model_env: str | None = None
+    model_example: str | None = None
+    required: bool = True
+    degrade_reason: str | None = None
 
     @property
     def resolved(self) -> bool:

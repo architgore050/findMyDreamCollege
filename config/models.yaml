@@ -1,58 +1,120 @@
 # Provider-agnostic model routing. Nothing in the pipeline may hardcode a provider.
+# Everything below is env-switchable: change a provider or model without editing
+# this file, e.g. FMD_EXTRACT_PROVIDER=anthropic FMD_EXTRACT_MODEL=claude-3-5-sonnet.
 # `local` assumes vLLM/SGLang exposing an OpenAI-compatible endpoint.
 # Hardware budget: 16 GB VRAM => <=14B at int4. Do not plan on a 70B local model.
+# Run `fmd llm doctor` to see what resolved and which env var is missing.
 
 providers:
   local:
     base_url: ${FMD_LOCAL_LLM_URL:-http://host.docker.internal:8000/v1}
     api_key: ${FMD_LOCAL_LLM_KEY:-not-needed}
     kind: openai_compatible
+    base_url_env: FMD_LOCAL_LLM_URL
+    api_key_env: FMD_LOCAL_LLM_KEY
+    requires_api_key: false
+    supports_guided_json: true
+    base_url_example: http://localhost:8000/v1
   api:
     base_url: ${FMD_API_LLM_URL}
     api_key: ${FMD_API_LLM_KEY}
     kind: openai_compatible
+    base_url_env: FMD_API_LLM_URL
+    api_key_env: FMD_API_LLM_KEY
+    requires_api_key: true
+    supports_guided_json: true
+    base_url_example: https://api.openai.com/v1
+  anthropic:
+    base_url: ${FMD_ANTHROPIC_URL:-https://api.anthropic.com/v1}
+    api_key: ${FMD_ANTHROPIC_KEY}
+    kind: anthropic
+    base_url_env: FMD_ANTHROPIC_URL
+    api_key_env: FMD_ANTHROPIC_KEY
+    requires_api_key: true
+    supports_guided_json: true
+    base_url_example: https://api.anthropic.com/v1
+  gemini:
+    base_url: ${FMD_GEMINI_URL:-https://generativelanguage.googleapis.com/v1beta}
+    api_key: ${FMD_GEMINI_KEY}
+    kind: gemini
+    base_url_env: FMD_GEMINI_URL
+    api_key_env: FMD_GEMINI_KEY
+    requires_api_key: true
+    supports_guided_json: true
+    base_url_example: https://generativelanguage.googleapis.com/v1beta
   mock:
     kind: replay
     fixtures_dir: packages/pipeline/tests/fixtures/llm
 
 profiles:
   bulk_extract:
-    provider: local
-    model: ${FMD_LOCAL_EXTRACT_MODEL:-Qwen3-14B-AWQ}
+    provider: ${FMD_EXTRACT_PROVIDER:-local}
+    model: ${FMD_EXTRACT_MODEL:-Qwen3-14B-AWQ}
+    provider_env: FMD_EXTRACT_PROVIDER
+    model_env: FMD_EXTRACT_MODEL
+    model_example: Qwen3-14B-AWQ
     temperature: 0
     guided_json: true          # xgrammar; must allow null
     max_tokens: 4096
+    required: true             # text PDFs cannot be extracted without this
   hard_pdf:
-    provider: api
-    model: ${FMD_API_HARD_PDF_MODEL}
+    provider: ${FMD_HARD_PDF_PROVIDER:-api}
+    model: ${FMD_HARD_PDF_MODEL}
+    provider_env: FMD_HARD_PDF_PROVIDER
+    model_env: FMD_HARD_PDF_MODEL
+    model_example: gpt-4o-mini
     temperature: 0
     guided_json: true
     max_tokens: 8192
+    required: false            # scanned/hard PDFs degrade per document
+    degrade_reason: vision_unavailable
   adjudicate:
-    provider: api
-    model: ${FMD_API_ADJUDICATE_MODEL}
+    provider: ${FMD_ADJUDICATE_PROVIDER:-api}
+    model: ${FMD_ADJUDICATE_MODEL}
+    provider_env: FMD_ADJUDICATE_PROVIDER
+    model_env: FMD_ADJUDICATE_MODEL
+    model_example: gpt-4o-mini
     temperature: 0
     guided_json: true
     bundle_pairs_per_call: 20
+    required: false
   entity_adjudication:
-    provider: local
-    model: ${FMD_LOCAL_ADJUDICATE_MODEL:-Qwen3-14B-AWQ}
+    provider: ${FMD_ENTITY_ADJUDICATE_PROVIDER:-local}
+    model: ${FMD_ENTITY_ADJUDICATE_MODEL:-Qwen3-14B-AWQ}
+    provider_env: FMD_ENTITY_ADJUDICATE_PROVIDER
+    model_env: FMD_ENTITY_ADJUDICATE_MODEL
+    model_example: Qwen3-14B-AWQ
     temperature: 0
     guided_json: true
     bundle_pairs_per_call: 20
+    required: false
   nlp_rubric:
-    provider: api
-    model: ${FMD_API_NLP_MODEL}
+    provider: ${FMD_NLP_PROVIDER:-api}
+    model: ${FMD_NLP_MODEL}
+    provider_env: FMD_NLP_PROVIDER
+    model_env: FMD_NLP_MODEL
+    model_example: gpt-4o-mini
     temperature: 0
     require_quoted_evidence: true
+    required: false
   ocr_vlm:
-    provider: local
-    model: ${FMD_LOCAL_OCR_MODEL:-Qwen2.5-VL-7B-Instruct}
+    provider: ${FMD_OCR_PROVIDER:-local}
+    model: ${FMD_OCR_MODEL:-Qwen2.5-VL-7B-Instruct}
+    provider_env: FMD_OCR_PROVIDER
+    model_env: FMD_OCR_MODEL
+    model_example: Qwen2.5-VL-7B-Instruct
     temperature: 0
+    guided_json: true         # xgrammar/tools/responseSchema; JSON-instruct if unsupported
+    required: false            # T3 adjudication degrades, text extraction continues
+    degrade_reason: vision_unavailable
   embed:
-    provider: local
+    provider: ${FMD_EMBED_PROVIDER:-local}
     model: ${FMD_EMBED_MODEL:-BAAI/bge-m3}
+    provider_env: FMD_EMBED_PROVIDER
+    model_env: FMD_EMBED_MODEL
+    model_example: BAAI/bge-m3
     dim: 1024
+    required: false
 
 budgets:
   daily_usd: 5.00
@@ -73,4 +135,6 @@ routing_rules:
 # (True), which silently corrupts the key before pydantic ever sees it.
 fallbacks:
   - {"from": local, "to": api, "on": [connection_error, timeout, json_schema_violation]}
+  - {"from": anthropic, "to": api, "on": [connection_error, timeout, json_schema_violation]}
+  - {"from": gemini, "to": api, "on": [connection_error, timeout, json_schema_violation]}
   - {"from": api, "to": mock, "on": [budget_exhausted]}

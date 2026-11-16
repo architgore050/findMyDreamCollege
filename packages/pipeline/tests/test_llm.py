@@ -1,22 +1,31 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from pydantic import BaseModel
 
-from fmd.config.models import ModelsConfig
+from fmd.config import load_registry
+from fmd.config.models import ModelsConfig, ProfileConfig, ProviderConfig
 from fmd.db.repositories import LLMCallLog
 from fmd.llm import (
+    AnthropicProvider,
     BudgetExhausted,
     FixtureMissing,
+    GeminiProvider,
     ModelRouter,
+    OpenAICompatibleProvider,
     ProfileUnresolved,
     ProviderError,
     prompt_hash,
 )
+from fmd.llm.doctor import doctor_report
+
+CONFIG_DIR = Path(__file__).resolve().parents[3] / "config"
 
 
 class Answer(BaseModel):
@@ -228,3 +237,307 @@ def test_ping_never_prints_secrets(tmp_path: Path) -> None:
     assert by_profile["hard_pdf"]["resolved"] is True
     assert by_profile["hard_pdf"]["key_present"] is True
     assert by_profile["bulk_extract"]["key_present"] is None
+
+
+# --------------------------------------------------------------------- env switching
+
+
+def test_every_profile_provider_and_model_are_env_switchable() -> None:
+    env = {
+        "FMD_EXTRACT_PROVIDER": "anthropic",
+        "FMD_EXTRACT_MODEL": "claude-test",
+        "FMD_HARD_PDF_PROVIDER": "gemini",
+        "FMD_HARD_PDF_MODEL": "gemini-test",
+        "FMD_ADJUDICATE_PROVIDER": "api",
+        "FMD_ADJUDICATE_MODEL": "gpt-test",
+        "FMD_ENTITY_ADJUDICATE_MODEL": "entity-test",
+        "FMD_NLP_MODEL": "nlp-test",
+        "FMD_OCR_MODEL": "ocr-test",
+        "FMD_EMBED_MODEL": "embed-test",
+        "FMD_EMBED_PROVIDER": "mock",
+    }
+    models = load_registry(CONFIG_DIR, env=env).models
+
+    assert models.profiles["bulk_extract"].provider == "anthropic"
+    assert models.profiles["bulk_extract"].model == "claude-test"
+    assert models.profiles["hard_pdf"].provider == "gemini"
+    assert models.profiles["hard_pdf"].model == "gemini-test"
+    assert models.profiles["adjudicate"].model == "gpt-test"
+    assert models.profiles["entity_adjudication"].model == "entity-test"
+    assert models.profiles["nlp_rubric"].model == "nlp-test"
+    assert models.profiles["ocr_vlm"].model == "ocr-test"
+    assert models.profiles["embed"].provider == "mock"
+    assert models.profiles["embed"].model == "embed-test"
+
+
+def _diagnostic_models() -> ModelsConfig:
+    return ModelsConfig.model_validate(
+        {
+            "providers": {
+                "api": {
+                    "kind": "openai_compatible",
+                    "base_url": None,
+                    "api_key": None,
+                    "base_url_env": "FMD_API_LLM_URL",
+                    "api_key_env": "FMD_API_LLM_KEY",
+                    "requires_api_key": True,
+                }
+            },
+            "profiles": {
+                "bulk_extract": {
+                    "provider": "api",
+                    "model": None,
+                    "model_env": "FMD_EXTRACT_MODEL",
+                    "required": True,
+                },
+                "hard_pdf": {
+                    "provider": "api",
+                    "model": None,
+                    "model_env": "FMD_HARD_PDF_MODEL",
+                    "required": False,
+                    "degrade_reason": "vision_unavailable",
+                },
+            },
+            "budgets": {"daily_usd": 1, "per_run_usd": 1, "hard_stop": True, "cache": True},
+        }
+    )
+
+
+def test_doctor_remediation_names_the_exact_missing_variables() -> None:
+    report = doctor_report(_diagnostic_models())
+    rows = {row["profile"]: row for row in report["profiles"]}
+
+    bulk = "; ".join(rows["bulk_extract"]["remediation"])
+    assert "FMD_EXTRACT_MODEL is empty" in bulk
+    assert "FMD_API_LLM_URL is empty" in bulk
+    assert "FMD_API_LLM_KEY is empty" in bulk
+    assert "FMD_HARD_PDF_MODEL is empty" in "; ".join(rows["hard_pdf"]["remediation"])
+
+
+def test_doctor_exit_semantics_follow_required_profiles() -> None:
+    models = _diagnostic_models()
+    assert doctor_report(models)["required_ok"] is False
+
+    # Fix the required profile; the optional hard-PDF profile stays broken.
+    models.providers["api"].base_url = "https://api.example/v1"
+    models.providers["api"].api_key = "token"
+    models.profiles["bulk_extract"].model = "text-model"
+    report = doctor_report(models)
+    assert report["required_ok"] is True
+    assert report["profiles"][0]["usable"] is True
+    by_profile = {row["profile"]: row for row in report["profiles"]}
+    assert by_profile["hard_pdf"]["usable"] is False
+    assert by_profile["hard_pdf"]["degrade_reason"] == "vision_unavailable"
+
+
+def test_optional_profile_degrades_to_vision_unavailable(tmp_path: Path) -> None:
+    models = _diagnostic_models()
+    models.providers["api"].base_url = "https://api.example/v1"
+    models.providers["api"].api_key = "token"
+    models.profiles["bulk_extract"].model = "text-model"
+    router = ModelRouter(models)
+    with pytest.raises(ProviderError) as excinfo:
+        router.call("hard_pdf", Answer, "s", "u", "ref")
+    assert excinfo.value.reason == "vision_unavailable"
+    assert "FMD_HARD_PDF_MODEL" in str(excinfo.value)
+    assert "run continues without it" in str(excinfo.value)
+
+
+def test_required_profile_failure_names_its_env_var() -> None:
+    router = ModelRouter(_diagnostic_models())
+    with pytest.raises(ProfileUnresolved) as excinfo:
+        router.call("bulk_extract", Answer, "s", "u", "ref")
+    message = str(excinfo.value)
+    assert "FMD_EXTRACT_MODEL" in message
+    assert "FMD_API_LLM_KEY" in message
+
+
+# --------------------------------------------------------------------- provider shapes
+
+
+def _anthropic_profile() -> ProfileConfig:
+    return ProfileConfig(provider="anthropic", model="claude-test", guided_json=True)
+
+
+def _gemini_profile() -> ProfileConfig:
+    return ProfileConfig(provider="gemini", model="gemini-test", guided_json=True)
+
+
+def test_anthropic_request_shape_uses_messages_and_a_tool() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "claude-test",
+                "content": [{"type": "tool_use", "name": "respond", "input": {"value": 42}}],
+                "usage": {"input_tokens": 11, "output_tokens": 7},
+            },
+        )
+
+    provider = AnthropicProvider(
+        "anthropic",
+        ProviderConfig(
+            kind="anthropic", base_url="https://anthropic.test/v1", api_key="secret-anthropic"
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    result = provider.complete(
+        model="claude-test",
+        system="system",
+        user="user",
+        schema=Answer,
+        profile=_anthropic_profile(),
+        prompt_sha256="x",
+        purpose="bulk_extract",
+    )
+
+    assert captured["url"] == "https://anthropic.test/v1/messages"
+    assert captured["headers"]["x-api-key"] == "secret-anthropic"
+    payload = captured["payload"]
+    assert payload["system"] == "system"
+    assert payload["messages"] == [{"role": "user", "content": "user"}]
+    assert payload["tools"][0]["input_schema"]["properties"]["value"]["type"] == "integer"
+    assert payload["tool_choice"] == {"type": "tool", "name": "respond"}
+    assert "secret-anthropic" not in json.dumps(payload)
+    assert result.content == {"value": 42}
+    assert (result.tokens_in, result.tokens_out) == (11, 7)
+
+
+def test_gemini_request_shape_uses_generate_content_and_response_schema() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "modelVersion": "gemini-test",
+                "candidates": [{"content": {"parts": [{"text": '{"value": 9}'}]}}],
+                "usageMetadata": {"promptTokenCount": 13, "candidatesTokenCount": 4},
+            },
+        )
+
+    provider = GeminiProvider(
+        "gemini",
+        ProviderConfig(
+            kind="gemini", base_url="https://gemini.test/v1beta", api_key="secret-gemini"
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    result = provider.complete(
+        model="gemini-test",
+        system="system",
+        user="user",
+        schema=Answer,
+        profile=_gemini_profile(),
+        prompt_sha256="x",
+        purpose="bulk_extract",
+    )
+
+    assert captured["url"] == "https://gemini.test/v1beta/models/gemini-test:generateContent"
+    assert captured["headers"]["x-goog-api-key"] == "secret-gemini"
+    assert "secret-gemini" not in captured["url"]
+    payload = captured["payload"]
+    assert payload["systemInstruction"]["parts"][0]["text"] == "system"
+    generation = payload["generationConfig"]
+    assert generation["responseMimeType"] == "application/json"
+    assert generation["responseSchema"]["properties"]["value"]["type"] == "integer"
+    assert "additionalProperties" not in json.dumps(generation)
+    assert result.content == {"value": 9}
+    assert (result.tokens_in, result.tokens_out) == (13, 4)
+
+
+def test_guided_json_falls_back_to_json_instruct_and_validation() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "text-model",
+                "choices": [{"message": {"content": '{"value": 5}'}}],
+                "usage": {},
+            },
+        )
+
+    models = ModelsConfig.model_validate(
+        {
+            "providers": {
+                "local": {
+                    "kind": "openai_compatible",
+                    "base_url": "https://local.test/v1",
+                    "api_key": "not-needed",
+                    "supports_guided_json": False,
+                }
+            },
+            "profiles": {
+                "bulk_extract": {
+                    "provider": "local",
+                    "model": "text-model",
+                    "guided_json": True,
+                }
+            },
+            "budgets": {"daily_usd": 1, "per_run_usd": 1, "hard_stop": True, "cache": False},
+        }
+    )
+    provider = OpenAICompatibleProvider(
+        "local", models.providers["local"], transport=httpx.MockTransport(handler)
+    )
+    router = ModelRouter(models, providers={"local": provider})
+
+    result = router.call("bulk_extract", Answer, "system", "user", "ref")
+
+    assert result.value == 5
+    payload = captured["payload"]
+    assert "response_format" not in payload
+    assert "JSON Schema" in payload["messages"][0]["content"]
+
+
+# --------------------------------------------------------------------- secret hygiene
+
+
+def test_doctor_never_prints_or_logs_secret_values(caplog) -> None:
+    models = _diagnostic_models()
+    models.providers["api"].base_url = "https://api.example/v1"
+    models.providers["api"].api_key = "sk-do-not-print"
+    models.profiles["bulk_extract"].model = "text-model"
+
+    with caplog.at_level(logging.DEBUG):
+        report = doctor_report(models, live=False)
+
+    serialised = json.dumps(report)
+    assert "sk-do-not-print" not in serialised
+    assert "sk-do-not-print" not in caplog.text
+
+
+def test_provider_http_errors_never_echo_the_key() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "invalid key"})
+
+    provider = OpenAICompatibleProvider(
+        "api",
+        ProviderConfig(
+            kind="openai_compatible", base_url="https://api.example/v1", api_key="sk-secret"
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    profile = ProfileConfig(provider="api", model="m", guided_json=True)
+    with pytest.raises(ProviderError) as excinfo:
+        provider.complete(
+            model="m",
+            system="s",
+            user="u",
+            schema=Answer,
+            profile=profile,
+            prompt_sha256="x",
+            purpose="bulk_extract",
+        )
+    assert "sk-secret" not in str(excinfo.value)

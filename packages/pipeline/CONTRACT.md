@@ -154,12 +154,28 @@ Review (WS-G) is the **only** 501 surface: `GET /api/review/queue`,
 `POST /api/review/claims/{id}` return `not_implemented` with `workstream: WS-G`.
 Missing DB ⇒ 503 `database_unavailable`; invalid weights/living/ids ⇒ 422.
 
-## Model router — WS-A (`fmd/llm/router.py`)
+## Model router — WS-A (`fmd/llm/router.py`, `fmd/llm/providers.py`, `fmd/llm/doctor.py`)
 `ModelRouter(models=None, *, registry=None, sink=None, daily_spent_usd=0.0, providers=None)`;
-`.call(purpose, schema, system, user, input_ref) -> BaseModel`; `.ping() -> list[dict]`.
-Cache key `(purpose, prompt_sha256, input_sha256, model)`. CI uses `MockProvider` /
-`ReplayProvider` (or `fmd.extract.pipeline.build_router(mock=True)`); no network or paid model.
-`llm-ping` reports key *presence* only, never secret values.
+`.call(purpose, schema, system, user, input_ref) -> BaseModel`; `.ping() -> list[dict]`;
+`.doctor(live=False, transport=None) -> dict` (per-profile diagnostics).
+Cache key `(purpose, prompt_sha256, input_sha256, model)`. Providers are selected by
+`kind`: `openai_compatible` (chat completions + `json_schema`), `anthropic` (Messages
+API, guided JSON via a single `respond` tool), `gemini` (`generateContent` with
+`responseSchema`), and `replay` (offline fixtures). `build_provider(name, config,
+transport=...)` is the factory; tests inject `httpx.MockTransport`, never a network.
+Profiles and providers are env-switchable in `config/models.yaml`; each declares
+`provider_env`/`model_env` (providers also `base_url_env`/`api_key_env`,
+`requires_api_key`, `supports_guided_json`) so diagnostics name exact variables.
+`required: true` profiles block a run; optional ones (`hard_pdf`, `ocr_vlm`) raise
+`ProviderError(reason="vision_unavailable")` per document, so text PDFs still extract.
+Guided-JSON fallback: when `profile.guided_json` is false or the provider does not
+support it, the router drops native schema enforcement, appends `json_instruction(schema)`
+to the system prompt, and still validates the parsed object against `schema`.
+CI uses `MockProvider` / `ReplayProvider` (or `fmd.extract.pipeline.build_router(mock=True)`);
+no network or paid model. `fmd llm doctor [--live] [--json]` prints provider, base-URL
+resolution, key *presence* (never values), model, guided-JSON expectation, reachability
+(only with `--live`) and an exact remediation line; exit 0 iff every required profile is
+usable. `fmd llm-ping` / `fmd llm ping` remain aliases without `--live`.
 
 ## Repositories — WS-A (`fmd/db/repositories.py`) (each takes `Database`)
 Countries `upsert,get,list` · Sources `upsert,get,list` · SourceExclusions `upsert` ·

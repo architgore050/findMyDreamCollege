@@ -23,17 +23,17 @@ from pydantic import BaseModel, ValidationError
 from fmd.config import Registry, get_registry
 from fmd.config.models import ModelsConfig, Pricing, ProfileConfig
 from fmd.db.repositories import LLMCallLog
+from fmd.llm.doctor import doctor_report, profile_blockers, profile_remediation
 from fmd.llm.providers import (
     BudgetExhausted,
     FixtureMissing,
     LLMError,
-    MockProvider,
-    OpenAICompatibleProvider,
     ProfileUnresolved,
     Provider,
     ProviderError,
     ProviderResult,
-    ReplayProvider,
+    build_provider,
+    json_instruction,
 )
 
 
@@ -95,11 +95,14 @@ class ModelRouter:
     ) -> BaseModel:
         """Call the configured profile and return a validated ``schema`` instance."""
         profile = self._profile(purpose)
-        if not profile.model:
-            raise ProfileUnresolved(
-                f"model profile {purpose!r} is unresolved: its model name comes from an "
-                "environment variable that is not set. Run `fmd llm-ping` or use the mock "
-                "provider for offline work."
+        _provider_cfg, blockers = profile_blockers(self.models, profile)
+        if blockers:
+            message = profile_remediation(self.models, purpose)
+            if profile.required:
+                raise ProfileUnresolved(message)
+            raise ProviderError(
+                profile.degrade_reason or "profile_unavailable",
+                message + ". This profile is optional; the run continues without it.",
             )
 
         p_hash = prompt_hash(system, user)
@@ -132,13 +135,16 @@ class ModelRouter:
                 if self._budget_exhausted():
                     raise BudgetExhausted(self._budget_message(provider_name))
                 provider = self._get_provider(provider_name)
+                effective_profile, effective_system = self._guided_profile(
+                    provider, profile, schema, system
+                )
                 started = time.perf_counter()
                 result = provider.complete(
                     model=profile.model,
-                    system=system,
+                    system=effective_system,
                     user=user,
                     schema=schema,
-                    profile=profile,
+                    profile=effective_profile,
                     prompt_sha256=p_hash,
                     purpose=purpose,
                 )
@@ -175,33 +181,28 @@ class ModelRouter:
         raise LLMError(f"no provider could satisfy profile {purpose!r}")
 
     def ping(self) -> list[dict[str, Any]]:
-        """Report profile resolution without printing secrets."""
+        """Report profile resolution without printing secrets.
+
+        Kept for compatibility; ``fmd llm doctor`` is the richer surface.
+        """
         report: list[dict[str, Any]] = []
-        for name, profile in sorted(self.models.profiles.items()):
-            provider = self.models.providers.get(profile.provider)
-            kind = provider.kind if provider else "unknown"
-            base_url_present = bool(provider and provider.base_url)
-            fixtures = self._fixtures_dir(name, provider)
-            resolved = bool(profile.model) and (
-                (kind == "replay" and fixtures is not None)
-                or (kind == "openai_compatible" and base_url_present)
-            )
-            key_present = (
-                bool(provider and provider.api_key) if kind == "openai_compatible" else None
-            )
+        for row in self.doctor()["profiles"]:
+            provider = self.models.providers.get(row["provider"])
+            fixtures = self._fixtures_dir(row["profile"], provider)
             report.append(
                 {
-                    "profile": name,
-                    "provider": profile.provider,
-                    "kind": kind,
-                    "model": profile.model,
-                    "resolved": resolved,
-                    "key_present": key_present,
-                    "base_url": provider.base_url if provider else None,
+                    "profile": row["profile"],
+                    "provider": row["provider"],
+                    "kind": row["kind"],
+                    "model": row["model"],
+                    "resolved": row["usable"],
+                    "key_present": None if row["kind"] == "replay" else row["key_present"],
+                    "base_url": row["base_url"],
                     "fixtures_dir": str(fixtures) if fixtures is not None else None,
-                    "reason": None
-                    if resolved
-                    else "missing model/base_url/fixtures_dir environment value",
+                    "reason": None if row["usable"] else "; ".join(row["blockers"]),
+                    "remediation": row["remediation"],
+                    "guided_json_expected": row["guided_json_expected"],
+                    "required": row["required"],
                 }
             )
         return report
@@ -248,14 +249,36 @@ class ModelRouter:
             raise ProviderError(
                 "unresolved_provider", f"provider {name!r} is not declared in models.yaml"
             )
-        if config.kind == "replay":
-            instance: Provider = (
-                MockProvider(name, config) if name == "mock" else ReplayProvider(name, config)
-            )
-        else:
-            instance = OpenAICompatibleProvider(name, config)
+        instance = build_provider(name, config)
         self._provider_instances[name] = instance
         return instance
+
+    def _guided_profile(
+        self,
+        provider: Provider,
+        profile: ProfileConfig,
+        schema: type[BaseModel],
+        system: str,
+    ) -> tuple[ProfileConfig, str]:
+        """Degrade guided JSON to JSON-instruct + validation when unsupported.
+
+        Replay providers keep the original prompt so fixture hashes stay stable.
+        """
+        if provider.kind == "replay":
+            return profile, system
+        supports = bool(getattr(provider, "supports_guided_json", True)) and bool(
+            getattr(getattr(provider, "config", None), "supports_guided_json", True)
+        )
+        if profile.guided_json and supports:
+            return profile, system
+        effective = profile.model_copy(update={"guided_json": False})
+        return effective, system + "\n\n" + json_instruction(schema)
+
+    def doctor(
+        self, *, live: bool = False, transport: Any | None = None
+    ) -> dict[str, Any]:
+        """Per-profile diagnostics; secrets are never included."""
+        return doctor_report(self.models, live=live, transport=transport)
 
     def _fallback_for(self, provider_name: str, reason: str) -> str | None:
         for rule in self.models.fallbacks:
