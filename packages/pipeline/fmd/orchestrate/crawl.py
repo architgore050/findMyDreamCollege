@@ -747,17 +747,24 @@ class Crawler:
         """
         if self.planner is None:
             return document
+        # HTTP text is readable immediately (HTML/plain). A PDF's HTTP body is
+        # not its text: that document stays deferred until the acquisition stage
+        # can read it, instead of being abstained on from the URL alone.
+        phase = "b" if text_sample and text_sample.strip() else "a"
         plan = self.planner.plan(
             document,
             source=self.sources_by_id.get(source_id),
             family_hint=getattr(document, "extraction_family", None),
             entity_id_hint=getattr(document, "entity_id", None),
-            text_sample=text_sample,
+            text_sample=text_sample if phase == "b" else None,
             role=getattr(document, "role", None),
+            phase=phase,
         )
         updated = persist_plan(self.documents, document, plan)
         if summary is not None:
             summary.bump(f"plan.{plan.state}")
+            if plan.deferred:
+                summary.bump("plan.deferred")
             if plan.abstain_reason:
                 summary.bump(f"plan.reason.{plan.abstain_reason}")
         return updated if updated is not None else document

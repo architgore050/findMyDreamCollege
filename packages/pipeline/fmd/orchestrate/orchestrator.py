@@ -36,6 +36,7 @@ from fmd.orchestrate.crawl import DEFAULT_SOURCE_FAILURE_BUDGET, Crawler
 from fmd.orchestrate.extract import DEFAULT_TOOL_VERSION, Extractor, build_extract_router
 from fmd.orchestrate.ingest import INSTITUTION_ADAPTER, InventoryStage
 from fmd.orchestrate.ledger import JsonFileLedger, RunLedger, RunSummary, SqlLedger, utcnow
+from fmd.orchestrate.plan import PlanStage
 from fmd.orchestrate.score import score_programmes
 from fmd.paths import resolve_snapshot_dir
 from fmd.plan import DocumentPlanner
@@ -128,6 +129,7 @@ class Orchestrator:
                 entities=self.entities,
                 aliases=self.aliases,
                 er_config=registry.er,
+                plan_config=registry.plan,
             )
         )
 
@@ -326,6 +328,18 @@ class Orchestrator:
         summary = self._summary("extract")
         if self.router is None:
             raise OrchestrationError("extract requires a model router")
+        # Evidence documents that Phase A deferred must reach text acquisition
+        # before the extract queue is read. This is the only place the sample is
+        # bought; the stage's cache makes a re-run idempotent.
+        stage = PlanStage(
+            planner=self.planner,
+            documents=self.documents,
+            snapshots=self.snapshots,
+            store=self._store(),
+            sources=self._all_sources(),
+            text_sample_chars=self.registry.plan.phase_b.text_sample_chars,
+        )
+        stage.run(summary=summary, limit=limit)
         extractor = Extractor(
             snapshots=self.snapshots,
             documents=self.documents,

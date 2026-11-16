@@ -59,13 +59,22 @@ DEFAULT_RULES = PlanRules(
             url_tokens=("placement", "placements", "career", "recruit"),
             anchor_tokens=("placement report", "placement", "career", "recruit"),
             text_tokens=("placement rate", "students placed", "median salary", "recruiters"),
-            extensions=("pdf",),
+            extensions=(),
         ),
         FamilyRule(
             family="fee_structure",
             url_tokens=("fee", "fees", "tuition", "fee-order"),
             anchor_tokens=("fee structure", "tuition fee", "fee order", "fee notification"),
-            text_tokens=("tuition fee", "fee structure", "hostel fee", "per annum"),
+            text_tokens=(
+                "tuition fee",
+                "fee structure",
+                "hostel fee",
+                "per annum",
+                "fee details",
+                "annual fee",
+                "fee & other details",
+                "fee and other details",
+            ),
             extensions=(),
         ),
         FamilyRule(
@@ -102,7 +111,16 @@ DEFAULT_RULES = PlanRules(
         ),
         FamilyRule(
             family="exam_notification",
-            url_tokens=("notification", "notifications", "examination", "entrance"),
+            # A bare "notification" is a generic administrative heading (a fee
+            # circular and a Ph.D. affiliation notice both carry it). Only an
+            # exam-shaped URL defers/accepted on URL evidence.
+            url_tokens=(
+                "examination",
+                "entrance",
+                "exam-notification",
+                "admission-notification",
+                "exam-schedule",
+            ),
             anchor_tokens=("notification", "entrance", "exam", "schedule"),
             text_tokens=("entrance test", "last date", "application form", "examination"),
             extensions=(),
@@ -174,13 +192,21 @@ def detect_family(
     anchor_text: str | None = None,
     text_sample: str | None = None,
     rules: PlanRules = DEFAULT_RULES,
+    min_score: float | None = None,
+    margin: float | None = None,
 ) -> tuple[str | None, float, dict[str, int], str | None]:
     """Return ``(family, confidence, signals, abstain_reason)``.
 
     Resolution order is explicit: registry-declared family is handled by the
     planner, so this function only answers the heuristic question. A tie or a
     thin margin is ``ambiguous_family``; no winner is ``family_undetected``.
+
+    ``min_score`` / ``margin`` let :mod:`fmd.plan.planner` apply the registry's
+    per-phase thresholds without forking the rule set. They default to the
+    rule weights so standalone callers (tests, fixtures) stay deterministic.
     """
+    floor = rules.weights.min_score if min_score is None else min_score
+    separation = rules.weights.margin if margin is None else margin
     ranked = [
         item
         for item in score_families(
@@ -193,8 +219,8 @@ def detect_family(
 
     best = ranked[0]
     runner_up = ranked[1].score if len(ranked) > 1 else 0.0
-    if best.score < rules.weights.min_score:
+    if best.score < floor:
         return None, best.score, dict(best.signals), "family_undetected"
-    if len(ranked) > 1 and best.score - runner_up < rules.weights.margin:
+    if len(ranked) > 1 and best.score - runner_up < separation:
         return None, round(best.score, 6), dict(best.signals), "ambiguous_family"
     return best.family, best.score, dict(best.signals), None

@@ -19,9 +19,12 @@ from __future__ import annotations
 
 from fmd.plan.mentions import collect_mentions
 from fmd.plan.planner import (
+    DEFER_CODE,
+    PERSISTED_PLAN_STATES,
     DocumentPlan,
     DocumentPlanner,
     EntityCandidatePlan,
+    PhaseThresholds,
     abstention_reason,
     persist_plan,
 )
@@ -44,10 +47,13 @@ from fmd.plan.rules import (
 
 __all__ = [
     "DEFAULT_RULES",
+    "DEFER_CODE",
     "DocumentPlan",
     "DocumentPlanner",
     "EntityCandidatePlan",
     "FamilyRule",
+    "PERSISTED_PLAN_STATES",
+    "PhaseThresholds",
     "PlanRules",
     "ROLE_EVIDENCE",
     "ROLE_INVENTORY",

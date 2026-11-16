@@ -28,6 +28,7 @@ from fmd.config.models import (
     ErConfig,
     ExamsConfig,
     ModelsConfig,
+    PlanConfig,
     SourcesConfig,
     WeightsConfig,
 )
@@ -43,6 +44,7 @@ CONFIG_FILES: dict[str, str] = {
     "cost_rules": "cost_rules.yaml",
     "er": "er.yaml",
     "acquire": "acquire.yaml",
+    "plan": "plan.yaml",
 }
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -111,6 +113,7 @@ class Registry:
     cost_rules: CostRulesConfig
     er: ErConfig
     acquire: AcquireConfig
+    plan: PlanConfig
     config_dir: Path
 
     @property
@@ -447,6 +450,25 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
     if acquire.bbox.page_epsilon < 0:
         errors.append("acquire.yaml: bbox.page_epsilon must be >= 0")
 
+    # ---------------------------------------------------------------- planning
+    plan = registry.plan
+    if not plan.version.strip():
+        errors.append("plan.yaml: version must be non-empty")
+    for phase in ("phase_a", "phase_b"):
+        block = getattr(plan, phase)
+        if not 0.0 <= block.min_score <= 1.0:
+            errors.append(f"plan.yaml: {phase}.min_score must be within [0, 1]")
+        if not 0.0 <= block.margin <= 1.0:
+            errors.append(f"plan.yaml: {phase}.margin must be within [0, 1]")
+    if not 0.0 <= plan.phase_a.acquire_floor <= 1.0:
+        errors.append("plan.yaml: phase_a.acquire_floor must be within [0, 1]")
+    if plan.phase_a.acquire_floor > plan.phase_a.min_score:
+        errors.append("plan.yaml: phase_a.acquire_floor must be <= phase_a.min_score")
+    if plan.phase_b.text_sample_chars <= 0:
+        errors.append("plan.yaml: phase_b.text_sample_chars must be > 0")
+    if plan.phase_b.max_headings < 0:
+        errors.append("plan.yaml: phase_b.max_headings must be >= 0")
+
 
 def load_registry(
     config_dir: str | Path | None = None,
@@ -480,6 +502,7 @@ def load_registry(
         "cost_rules": CostRulesConfig,
         "er": ErConfig,
         "acquire": AcquireConfig,
+        "plan": PlanConfig,
     }
     for key, model in model_for.items():
         filename = CONFIG_FILES[key]
@@ -505,6 +528,7 @@ def load_registry(
         cost_rules=parsed["cost_rules"],
         er=parsed["er"],
         acquire=parsed["acquire"],
+        plan=parsed["plan"],
         config_dir=directory.resolve(),
     )
     _validate_cross_references(registry, errors)

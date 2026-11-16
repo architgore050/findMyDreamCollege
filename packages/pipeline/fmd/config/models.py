@@ -386,6 +386,34 @@ class AcquireConfig(ConfigModel):
     bbox: AcquireBBoxPolicy
 
 
+# --------------------------------------------------------------------------- planning
+
+
+class PlanPhaseAConfig(ConfigModel):
+    """Pre-fetch acceptance/abstention thresholds (URL/anchor/extension only)."""
+
+    min_score: float
+    margin: float
+    acquire_floor: float
+
+
+class PlanPhaseBConfig(ConfigModel):
+    """Post-acquisition text sampling and acceptance thresholds."""
+
+    text_sample_chars: int
+    max_headings: int
+    min_score: float
+    margin: float
+
+
+class PlanConfig(ConfigModel):
+    """Typed view of ``config/plan.yaml`` (two-phase planning)."""
+
+    version: str
+    phase_a: PlanPhaseAConfig
+    phase_b: PlanPhaseBConfig
+
+
 # --------------------------------------------------------------------------- exams
 
 

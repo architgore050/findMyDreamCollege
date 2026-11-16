@@ -13,6 +13,7 @@ not declare a family; their signals are the data in :mod:`fmd.plan.rules`.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,10 +25,19 @@ from fmd.er.types import Alias, EntityCandidate, Mention, Resolution
 from fmd.extract.schemas import FAMILIES
 from fmd.plan.mentions import collect_mentions
 from fmd.plan.roles import ROLE_EVIDENCE, is_extractable_role, role_for
-from fmd.plan.rules import DEFAULT_RULES, PlanRules, detect_family, normalise
+from fmd.plan.rules import DEFAULT_RULES, PlanRules, detect_family, normalise, score_families
 
-PlanState = Literal["planned", "linked", "needs_review", "abstained", "not_applicable"]
+PlanState = Literal[
+    "planned", "linked", "needs_review", "abstained", "not_applicable", "defer_for_text"
+]
 FamilySource = Literal["registry", "reference", "heuristic", "none"]
+Phase = Literal["a", "b"]
+
+#: Migration 0003's ``documents.plan_state`` is a closed set that predates the
+#: two-phase planner (``defer_for_text``). Migrations are out of this
+#: workstream's scope, so the precise state is carried in ``plan_reason`` and the
+#: row keeps the DB-safe value. Phase B overwrites both when text arrives.
+PERSISTED_PLAN_STATES = {"defer_for_text": "planned"}
 
 #: Reasons are stable codes, never prose: the run ledger and review queue filter them.
 ABSTAIN_CODES = (
@@ -37,6 +47,46 @@ ABSTAIN_CODES = (
     "entity_unresolved",
     "entity_ambiguous",
 )
+
+DEFER_CODE = "defer_for_text"
+
+
+@dataclass(frozen=True)
+class PhaseThresholds:
+    """The configured cutoffs for one planning run (values from ``plan.yaml``)."""
+
+    phase_a_min_score: float
+    phase_a_margin: float
+    acquire_floor: float
+    phase_b_min_score: float
+    phase_b_margin: float
+    text_sample_chars: int
+    max_headings: int
+
+    @classmethod
+    def from_config(cls, config: Any | None, rules: PlanRules) -> PhaseThresholds:
+        weights = rules.weights
+        if config is None:
+            return cls(
+                phase_a_min_score=weights.min_score,
+                phase_a_margin=weights.margin,
+                acquire_floor=weights.min_score / 3,
+                phase_b_min_score=weights.min_score,
+                phase_b_margin=weights.margin,
+                text_sample_chars=4000,
+                max_headings=8,
+            )
+        phase_a = config.phase_a
+        phase_b = config.phase_b
+        return cls(
+            phase_a_min_score=float(phase_a.min_score),
+            phase_a_margin=float(phase_a.margin),
+            acquire_floor=float(phase_a.acquire_floor),
+            phase_b_min_score=float(phase_b.min_score),
+            phase_b_margin=float(phase_b.margin),
+            text_sample_chars=int(phase_b.text_sample_chars),
+            max_headings=int(phase_b.max_headings),
+        )
 
 
 class _PlanModel(BaseModel):
@@ -62,6 +112,9 @@ class DocumentPlan(_PlanModel):
     entity_candidates: list[EntityCandidatePlan] = Field(default_factory=list)
     confidence: float = 0.0
     abstain_reason: str | None = None
+    #: Why a Phase A document needs text before it can be accepted. ``None`` on
+    #: every non-deferred state.
+    defer_reason: str | None = None
     state: PlanState = "abstained"
     #: Migration 0004: a non-evidence role is ``not_applicable``, not a failure.
     role: str = ROLE_EVIDENCE
@@ -72,8 +125,23 @@ class DocumentPlan(_PlanModel):
         return self.state == "needs_review"
 
     @property
+    def deferred(self) -> bool:
+        return self.state == "defer_for_text"
+
+    @property
     def extractable(self) -> bool:
         return self.family is not None and self.entity_id is not None and self.state == "linked"
+
+    @property
+    def persisted_state(self) -> str:
+        """The value safe for ``documents.plan_state`` (migration 0003)."""
+        return PERSISTED_PLAN_STATES.get(self.state, self.state)
+
+    @property
+    def persisted_reason(self) -> str | None:
+        if self.deferred:
+            return DEFER_CODE
+        return self.abstain_reason or self.defer_reason
 
     @property
     def not_applicable(self) -> bool:
@@ -117,10 +185,13 @@ class DocumentPlanner:
         max_mentions: int = 8,
         use_embeddings: bool = False,
         candidates_provider: Callable[[], Sequence[EntityCandidate]] | None = None,
+        plan_config: Any | None = None,
     ) -> None:
         self.entities = entities
         self.aliases = aliases
         self.rules = rules
+        self.plan_config = plan_config
+        self.thresholds = PhaseThresholds.from_config(plan_config, rules)
         self.router = router
         self.candidate_limit = candidate_limit
         self.max_mentions = max_mentions
@@ -145,8 +216,10 @@ class DocumentPlanner:
         text_sample: str | None = None,
         anchor_text: str | None = None,
         role: str | None = None,
+        phase: Phase | None = None,
     ) -> DocumentPlan:
         url = str(getattr(document, "url", "") or "")
+        resolved_phase: Phase = phase or ("b" if text_sample is not None else "a")
         resolved_role = role or role_for(
             url=url,
             source=source,
@@ -163,13 +236,19 @@ class DocumentPlanner:
                 signals={"role": resolved_role},
             )
 
+        sample = None
+        if resolved_phase == "b":
+            sample = (text_sample or "")[: self.thresholds.text_sample_chars]
+
         family, family_source, family_conf, signals, family_reason = self._family(
             url=url,
             source=source,
             family_hint=family_hint,
-            text_sample=text_sample,
+            text_sample=sample,
             anchor_text=anchor_text,
+            phase=resolved_phase,
         )
+        signals["phase"] = resolved_phase
 
         candidates = self._candidate_universe()
         candidate_plans: list[EntityCandidatePlan] = []
@@ -183,24 +262,72 @@ class DocumentPlanner:
             signals["entity_source"] = "reference"
         else:
             entity_id, entity_score, candidate_plans, entity_reason = self._resolve_entity(
-                document, candidates, text_sample=text_sample, anchor_text=anchor_text
+                document,
+                candidates,
+                text_sample=sample if resolved_phase == "b" else None,
+                anchor_text=anchor_text,
+                max_mentions=self.thresholds.max_headings
+                if resolved_phase == "b"
+                else self.max_mentions,
             )
 
-        reason = family_reason or entity_reason
-        if family is None:
-            state: PlanState = (
-                "needs_review" if family_reason == "ambiguous_family" else "abstained"
-            )
-            confidence = 0.0
-        elif entity_id is not None:
-            state = "linked"
-            confidence = round(min(family_conf, entity_score), 6)
-        elif entity_reason == "entity_ambiguous":
-            state = "needs_review"
-            confidence = round(family_conf * 0.5, 6)
+        best_score = float(signals.get("best_score", family_conf))
+        if resolved_phase == "a":
+            if family is None:
+                # A plausible-but-unclear URL is exactly what text acquisition
+                # is for. Below the floor it is noise: abstain and spend nothing.
+                if best_score > 0.0 and best_score >= self.thresholds.acquire_floor:
+                    state: PlanState = "defer_for_text"
+                    defer_reason = family_reason or "family_undetected"
+                    abstain_reason = defer_reason
+                    confidence = round(best_score, 6)
+                else:
+                    state = (
+                        "needs_review" if family_reason == "ambiguous_family" else "abstained"
+                    )
+                    defer_reason = None
+                    abstain_reason = family_reason
+                    confidence = round(best_score, 6)
+            elif entity_id is not None:
+                state = "linked"
+                defer_reason = None
+                abstain_reason = None
+                confidence = round(min(family_conf, entity_score), 6)
+            else:
+                # Family known from registry/URL, entity only readable in text.
+                state = "defer_for_text"
+                defer_reason = entity_reason or "entity_undetected"
+                abstain_reason = defer_reason
+                confidence = round(family_conf, 6)
+                if family_source not in ("registry", "reference"):
+                    # A heuristic family must not be replayed as if discovery had
+                    # declared it: Phase B text is allowed to outrank it.
+                    signals["tentative_family"] = family
+                    family = None
+                    family_source = "none"
         else:
-            state = "abstained"
-            confidence = round(family_conf * 0.5, 6)
+            if family is None:
+                state = (
+                    "needs_review" if family_reason == "ambiguous_family" else "abstained"
+                )
+                defer_reason = None
+                abstain_reason = family_reason
+                confidence = round(best_score, 6)
+            elif entity_id is not None:
+                state = "linked"
+                defer_reason = None
+                abstain_reason = None
+                confidence = round(min(family_conf, entity_score), 6)
+            elif entity_reason == "entity_ambiguous":
+                state = "needs_review"
+                defer_reason = None
+                abstain_reason = entity_reason
+                confidence = round(family_conf * 0.5, 6)
+            else:
+                state = "abstained"
+                defer_reason = None
+                abstain_reason = entity_reason or "entity_undetected"
+                confidence = round(family_conf * 0.5, 6)
 
         return DocumentPlan(
             family=family,
@@ -208,7 +335,8 @@ class DocumentPlanner:
             entity_id=entity_id,
             entity_candidates=candidate_plans,
             confidence=confidence,
-            abstain_reason=reason,
+            abstain_reason=abstain_reason,
+            defer_reason=defer_reason,
             state=state,
             role=resolved_role,
             signals=signals,
@@ -223,6 +351,7 @@ class DocumentPlanner:
         family_hint: str | None,
         text_sample: str | None,
         anchor_text: str | None,
+        phase: Phase,
     ) -> tuple[str | None, FamilySource, float, dict[str, Any], str | None]:
         declared = declared_family(source)
         if declared is None and family_hint:
@@ -236,14 +365,52 @@ class DocumentPlanner:
                 # A registry/ref typo must fail loudly: extracting against an
                 # unknown schema would either crash or fabricate a family.
                 return None, family_source, 0.0, {}, f"unsupported_family:{declared}"
+            # Precedence invariant: a declared family is never reconsidered,
+            # downgraded or replaced by later text evidence.
             return declared, family_source, 1.0, {"declared": declared}, None
+
+        if phase == "b":
+            # Phase B reads text only. The URL was Phase A's evidence; letting it
+            # vote again would let a stale URL token outrank the document text.
+            family, score, signals, reason = detect_family(
+                url="",
+                anchor_text=None,
+                text_sample=text_sample,
+                rules=self.rules,
+                min_score=self.thresholds.phase_b_min_score,
+                margin=self.thresholds.phase_b_margin,
+            )
+            signals = {**signals, "phase_b_score": score}
+            if family is not None:
+                return family, "heuristic", score, signals, None
+            # Text found nothing: Phase A URL evidence is the weaker fallback.
+            url_family, url_score, url_signals, url_reason = detect_family(
+                url=url,
+                anchor_text=anchor_text,
+                rules=self.rules,
+                min_score=self.thresholds.phase_a_min_score,
+                margin=self.thresholds.phase_a_margin,
+            )
+            signals = {**signals, **{f"phase_a_{k}": v for k, v in url_signals.items()}}
+            if url_family is not None:
+                signals["fallback"] = "phase_a_url"
+                return url_family, "heuristic", url_score, signals, None
+            signals["best_score"] = score
+            return None, "none", score, signals, reason or url_reason
 
         family, score, signals, reason = detect_family(
             url=url,
             anchor_text=anchor_text,
-            text_sample=text_sample,
             rules=self.rules,
+            min_score=self.thresholds.phase_a_min_score,
+            margin=self.thresholds.phase_a_margin,
         )
+        # The raw score survives even when detection abstains, because the
+        # acquisition floor is a different question from acceptance.
+        best = score_families(
+            url=url, anchor_text=anchor_text, rules=self.rules
+        )
+        signals["best_score"] = best[0].score if best else 0.0
         return family, "heuristic" if family else "none", score, signals, reason
 
     def _candidate_universe(self) -> list[EntityCandidate]:
@@ -292,13 +459,14 @@ class DocumentPlanner:
         *,
         text_sample: str | None,
         anchor_text: str | None,
+        max_mentions: int | None = None,
     ) -> tuple[int | None, float, list[EntityCandidatePlan], str | None]:
         mentions = collect_mentions(
             document,
             text_sample=text_sample,
             anchor_text=anchor_text,
             lexicon=self.er_config.lexicon,
-            max_mentions=self.max_mentions,
+            max_mentions=max_mentions or self.max_mentions,
             normalise=lambda value: normalise(value),
         )
         if not mentions:
@@ -390,8 +558,8 @@ def persist_plan(documents: Any, document: Any, plan: DocumentPlan) -> Any | Non
         source_id=getattr(document, "source_id", None),
         extraction_family=plan.family,
         entity_id=plan.entity_id,
-        plan_state=plan.state,
+        plan_state=plan.persisted_state,
         plan_confidence=plan.confidence,
-        plan_reason=plan.abstain_reason,
+        plan_reason=plan.persisted_reason,
         role=plan.role,
     )

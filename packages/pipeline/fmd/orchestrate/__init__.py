@@ -18,6 +18,7 @@ from fmd.orchestrate.ledger import (
     SqlLedger,
 )
 from fmd.orchestrate.orchestrator import OrchestrationError, Orchestrator
+from fmd.orchestrate.plan import PlanStage
 
 __all__ = [
     "InventoryStage",
@@ -25,6 +26,7 @@ __all__ = [
     "NullLedger",
     "OrchestrationError",
     "Orchestrator",
+    "PlanStage",
     "RunLedger",
     "RunSummary",
     "SqlLedger",

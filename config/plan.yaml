@@ -1,0 +1,34 @@
+# Two-phase document planning (brief §9, §10).
+#
+# Phase A is cheap: URL, anchor text and file extension only. It either:
+#   * resolves a family above `min_score` with a `margin` over the runner-up, or
+#   * defers for text (`defer_for_text`) when the score is plausible but not
+#     confident, or
+#   * abstains without acquiring text when the score is below `acquire_floor`.
+# Every threshold is data; fmd/plan/rules.py owns the token vocabulary.
+#
+# Phase B runs only on documents Phase A deferred. It reads a bounded sample of
+# the acquired text (first `text_sample_chars`, plus heading-shaped lines) and
+# re-classifies the family and entity. Phase B is lexical/er only: no model call.
+#
+# Precedence is fixed in code and not configurable: registry-declared family >
+# Phase B text evidence > Phase A URL evidence. Phase B never downgrades a
+# confident registry family.
+
+version: "1"
+
+phase_a:
+  # Minimum winning score for a family to be accepted from URL/anchor alone.
+  min_score: 0.45
+  # Minimum separation from the runner-up; a thinner lead defers for text.
+  margin: 0.10
+  # Below this score the document is obvious noise: abstain, acquire nothing.
+  acquire_floor: 0.15
+
+phase_b:
+  # Bounded sample: Phase B reads the cover page, never the whole PDF.
+  text_sample_chars: 4000
+  max_headings: 8
+  # Same acceptance rule as Phase A, applied to the text signals.
+  min_score: 0.45
+  margin: 0.10
