@@ -1,5 +1,9 @@
 name: findmydreamcollege
 
+# Everything is overridable from a `.env` file, but none is required:
+#   cp .env.example .env    # optional; defaults below match .env.example
+# Credentials here are local-development defaults, not secrets. Never commit .env.
+
 services:
   db:
     image: pgvector/pgvector:pg17
@@ -15,6 +19,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+      start_period: 5s
 
   # Optional meta-search for discovery. Never evidence; leads only.
   searxng:
@@ -24,51 +29,99 @@ services:
     environment:
       SEARXNG_BASE_URL: http://localhost:${SEARXNG_PORT:-8888}/
     volumes:
-      - ../infra/searxng:/etc/searxng:rw
+      - ./searxng:/etc/searxng:rw
+    restart: unless-stopped
 
   api:
     build:
       context: ..
       dockerfile: infra/Dockerfile.pipeline
+      args:
+        VCS_REF: ${VCS_REF:-unknown}
+    image: findmydreamcollege/pipeline:${FMD_IMAGE_TAG:-local}
     command: ["uvicorn", "fmd.api:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
       - path: ../.env
         required: false
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-fmd}:${POSTGRES_PASSWORD:-fmd}@db:5432/${POSTGRES_DB:-fmd}
+      FMD_CONFIG_DIR: /config
+      FMD_MIGRATIONS_DIR: /db/migrations
+      FMD_SNAPSHOT_DIR: /data/snapshots
+      # Opt-in: `make seed` is the explicit path; set to 1 for auto-seed on boot.
+      FMD_AUTO_SEED: ${FMD_AUTO_SEED:-0}
     ports: ["${API_PORT:-8000}:8000"]
+    # Docker copies the host's resolv.conf; on hosts using systemd-resolved the
+    # 127.0.0.53 stub is unreachable from the container and every fetch fails
+    # with "Temporary failure in name resolution". Override per host if needed.
+    dns: ["${FMD_DNS_1:-1.1.1.1}", "${FMD_DNS_2:-8.8.8.8}"]
     volumes:
+      # Live source edits; the image is complete without this mount.
       - ../packages/pipeline:/app
       - ../config:/config:ro
+      # Migrations must match the checkout; a stale baked copy silently blocks
+      # newly added columns while reporting "up to date".
+      - ../db:/db:ro
       - snapshots:/data/snapshots
     depends_on:
       db: {condition: service_healthy}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,urllib.request,sys; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)); sys.exit(0 if d.get('status')=='ok' else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
 
   worker:
     build:
       context: ..
       dockerfile: infra/Dockerfile.pipeline
+      args:
+        VCS_REF: ${VCS_REF:-unknown}
+    image: findmydreamcollege/pipeline:${FMD_IMAGE_TAG:-local}
     command: ["python", "-m", "fmd.cli", "worker"]
     env_file:
       - path: ../.env
         required: false
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-fmd}:${POSTGRES_PASSWORD:-fmd}@db:5432/${POSTGRES_DB:-fmd}
+      FMD_CONFIG_DIR: /config
+      FMD_MIGRATIONS_DIR: /db/migrations
+      FMD_SNAPSHOT_DIR: /data/snapshots
+      FMD_AUTO_SEED: "0"
+    dns: ["${FMD_DNS_1:-1.1.1.1}", "${FMD_DNS_2:-8.8.8.8}"]
     volumes:
       - ../packages/pipeline:/app
       - ../config:/config:ro
+      - ../db:/db:ro
       - snapshots:/data/snapshots
     depends_on:
-      db: {condition: service_healthy}
+      # Migrations + seed are done by api's entrypoint before it reports healthy.
+      api: {condition: service_healthy}
+    restart: unless-stopped
 
   web:
     build:
       context: ../apps/web
-      dockerfile: Dockerfile
+      # Thin wrapper adding the NEXT_PUBLIC_API_URL build ARG; see the header
+      # of infra/Dockerfile.web for why apps/web/Dockerfile is not used directly.
+      dockerfile: ../../infra/Dockerfile.web
+      # Next inlines NEXT_PUBLIC_* at build time, so this must be a build arg.
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     ports: ["${WEB_PORT:-3000}:3000"]
-    depends_on: [api]
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
 
 volumes:
   dbdata:

@@ -6,6 +6,9 @@ COMPOSE := docker compose -f infra/docker-compose.yml
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
+build: ## build the pipeline (all extra) and web images
+	$(COMPOSE) build
+
 up: ## start db + api + web
 	$(COMPOSE) up -d --build
 
@@ -25,14 +28,14 @@ migrate: ## apply SQL migrations
 seed: ## load config registry into the DB
 	$(COMPOSE) run --rm api python -m fmd.cli seed
 
-crawl: ## run the frontier within configured budgets
-	$(COMPOSE) run --rm api python -m fmd.cli crawl
+crawl: ## run the frontier within configured budgets (ARGS=--dry-run --limit 5)
+	$(COMPOSE) run --rm api python -m fmd.cli crawl $(ARGS)
 
-extract: ## snapshots -> extractions -> claims
-	$(COMPOSE) run --rm api python -m fmd.cli extract
+extract: ## snapshots -> extractions -> claims (ARGS=--limit 5)
+	$(COMPOSE) run --rm api python -m fmd.cli extract $(ARGS)
 
-score: ## claims -> scores + insight sets
-	$(COMPOSE) run --rm api python -m fmd.cli score
+score: ## claims -> scores + insight sets (ARGS=--dry-run)
+	$(COMPOSE) run --rm api python -m fmd.cli score $(ARGS)
 
 eval: ## golden set, provenance gate, drift (offline; no DB, no network)
 	cd packages/pipeline && uv run python -m fmd.cli eval --golden ../../data/golden --report-out ../../reports/eval.json
@@ -53,4 +56,4 @@ fmt: ## auto-format
 	cd packages/pipeline && uv sync --all-extras --quiet && uv run ruff format . && uv run ruff check --fix .
 	cd apps/web && pnpm format
 
-.PHONY: help up down reset discovery migrate seed crawl extract score eval dev test lint fmt
+.PHONY: help build up down reset discovery migrate seed crawl extract score eval dev test lint fmt

@@ -1,0 +1,36 @@
+# Build context is the repository root. Keep the pipeline image small and the
+# build cache effective by excluding everything the image does not copy.
+
+.git
+.gitignore
+.github
+
+# python caches / local envs
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/.venv
+**/*.egg-info
+.ruff_cache
+
+# node / web (built from its own context in compose)
+apps
+node_modules
+**/node_modules
+**/.next
+
+# data and artefacts: never baked into the image
+data
+snapshots
+reports
+*.parquet
+*.warc
+*.warc.gz
+
+# local secrets and docs
+.env
+.env.*
+!.env.example
+docs

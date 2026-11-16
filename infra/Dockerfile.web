@@ -1,0 +1,49 @@
+# Web image wrapper.
+#
+# Mirrors apps/web/Dockerfile (owned by WS-G) but adds the one thing a Next
+# standalone build needs from compose: NEXT_PUBLIC_* variables are inlined at
+# `next build` time, so the API URL must be an ARG available *before* the build,
+# not only a runtime env var. apps/web/Dockerfile does not declare it, and that
+# file is outside this workstream's scope.
+#
+# If WS-G adds the following two lines to apps/web/Dockerfile (after `FROM base
+# AS build`), compose can switch back and this file can be deleted:
+#
+#     ARG NEXT_PUBLIC_API_URL=http://localhost:8000
+#     ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+#
+# Build context is apps/web:
+#   docker compose -f infra/docker-compose.yml build web
+
+# syntax=docker/dockerfile:1.7
+
+FROM node:22-alpine AS base
+ENV PNPM_HOME=/pnpm \
+    PATH=/pnpm:$PATH \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    NEXT_TELEMETRY_DISABLED=1
+RUN corepack enable
+WORKDIR /app
+
+FROM base AS deps
+COPY package.json pnpm-lock.yaml ./
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store pnpm install --frozen-lockfile
+
+FROM base AS build
+ARG NEXT_PUBLIC_API_URL=http://localhost:8000
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN pnpm build
+
+FROM base AS runner
+ENV NODE_ENV=production \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+RUN addgroup -S nodejs -g 1001 && adduser -S nextjs -u 1001
+COPY --from=build /app/public ./public
+COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
+USER nextjs
+EXPOSE 3000
+CMD ["node", "server.js"]
