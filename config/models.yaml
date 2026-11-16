@@ -48,66 +48,86 @@ providers:
 
 profiles:
   bulk_extract:
+    # evidence: best doc evidence per GB
+    # Qwen3.5-9B at 32k/int4 is provisional until the 20-document bake-off
+    # (docs/.../10-inference-and-model-selection.md). Thinking must be off for
+    # deterministic extraction; providers.py does not forward this yet, so serve
+    # with the chat template that disables it (e.g. --chat-template-kwargs).
     provider: ${FMD_EXTRACT_PROVIDER:-local}
-    model: ${FMD_EXTRACT_MODEL:-Qwen3-14B-AWQ}
+    model: ${FMD_EXTRACT_MODEL:-Qwen3.5-9B-AWQ}
     provider_env: FMD_EXTRACT_PROVIDER
     model_env: FMD_EXTRACT_MODEL
-    model_example: Qwen3-14B-AWQ
+    model_example: Qwen3.5-9B-AWQ
     temperature: 0
-    guided_json: true          # xgrammar; must allow null
+    guided_json: true          # xgrammar; must allow null; Qwen3.5 arch support required
     max_tokens: 4096
+    context_tokens: 32768
+    quantization: int4
+    thinking: false
     required: true             # text PDFs cannot be extracted without this
   hard_pdf:
+    # evidence: hosted escalation on local failure
     provider: ${FMD_HARD_PDF_PROVIDER:-api}
     model: ${FMD_HARD_PDF_MODEL}
     provider_env: FMD_HARD_PDF_PROVIDER
     model_env: FMD_HARD_PDF_MODEL
-    model_example: gpt-4o-mini
+    model_example: gemini-2.5-flash
     temperature: 0
     guided_json: true
     max_tokens: 8192
     required: false            # scanned/hard PDFs degrade per document
     degrade_reason: vision_unavailable
   adjudicate:
-    provider: ${FMD_ADJUDICATE_PROVIDER:-api}
-    model: ${FMD_ADJUDICATE_MODEL}
+    # evidence: mid-tier cross-check, cheap
+    # gemini-2.5-flash is the documented example; it is scheduled to reroute to
+    # gemini-3.5-flash-lite (same price) on 2026-12-01. Either is env-overridable.
+    provider: ${FMD_ADJUDICATE_PROVIDER:-gemini}
+    model: ${FMD_ADJUDICATE_MODEL:-gemini-2.5-flash}
     provider_env: FMD_ADJUDICATE_PROVIDER
     model_env: FMD_ADJUDICATE_MODEL
-    model_example: gpt-4o-mini
+    model_example: gemini-2.5-flash
     temperature: 0
     guided_json: true
     bundle_pairs_per_call: 20
     required: false
   entity_adjudication:
+    # evidence: pairwise match stays local
     provider: ${FMD_ENTITY_ADJUDICATE_PROVIDER:-local}
-    model: ${FMD_ENTITY_ADJUDICATE_MODEL:-Qwen3-14B-AWQ}
+    model: ${FMD_ENTITY_ADJUDICATE_MODEL:-Qwen3.5-9B-AWQ}
     provider_env: FMD_ENTITY_ADJUDICATE_PROVIDER
     model_env: FMD_ENTITY_ADJUDICATE_MODEL
-    model_example: Qwen3-14B-AWQ
+    model_example: Qwen3.5-9B-AWQ
     temperature: 0
     guided_json: true
+    context_tokens: 32768
+    quantization: int4
+    thinking: false
     bundle_pairs_per_call: 20
     required: false
   nlp_rubric:
-    provider: ${FMD_NLP_PROVIDER:-api}
-    model: ${FMD_NLP_MODEL}
+    # evidence: mid-tier rubric, full context
+    provider: ${FMD_NLP_PROVIDER:-gemini}
+    model: ${FMD_NLP_MODEL:-gemini-2.5-flash}
     provider_env: FMD_NLP_PROVIDER
     model_env: FMD_NLP_MODEL
-    model_example: gpt-4o-mini
+    model_example: gemini-2.5-flash
     temperature: 0
     require_quoted_evidence: true
     required: false
   ocr_vlm:
+    # evidence: best open Indic OCR <16GB
     provider: ${FMD_OCR_PROVIDER:-local}
-    model: ${FMD_OCR_MODEL:-Qwen2.5-VL-7B-Instruct}
+    model: ${FMD_OCR_MODEL:-Qwen3-VL-8B-Instruct}
     provider_env: FMD_OCR_PROVIDER
     model_env: FMD_OCR_MODEL
-    model_example: Qwen2.5-VL-7B-Instruct
+    model_example: Qwen3-VL-8B-Instruct
     temperature: 0
     guided_json: true         # xgrammar/tools/responseSchema; JSON-instruct if unsupported
+    quantization: fp8
     required: false            # T3 adjudication degrades, text extraction continues
     degrade_reason: vision_unavailable
   embed:
+    # evidence: multilingual 1024-dim baseline
     provider: ${FMD_EMBED_PROVIDER:-local}
     model: ${FMD_EMBED_MODEL:-BAAI/bge-m3}
     provider_env: FMD_EMBED_PROVIDER
