@@ -63,6 +63,8 @@ routing_rules:
     use: adjudicate
   - default: bulk_extract
 
+# Note: the trigger key must stay quoted. Unquoted `on:` is a YAML 1.1 boolean
+# (True), which silently corrupts the key before pydantic ever sees it.
 fallbacks:
-  - {from: local, to: api, on: [connection_error, timeout, json_schema_violation]}
-  - {from: api, to: mock, on: [budget_exhausted]}
+  - {"from": local, "to": api, "on": [connection_error, timeout, json_schema_violation]}
+  - {"from": api, "to": mock, "on": [budget_exhausted]}

@@ -1,0 +1,69 @@
+[project]
+name = "fmd"
+version = "0.1.0"
+description = "findMyDreamCollege evidence pipeline: registry, snapshots, model router, DB repositories."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+    "psycopg[binary,pool]>=3.2,<4",
+    "PyYAML>=6.0.1,<7",
+    "httpx>=0.27,<1",
+    "python-dateutil>=2.9,<3",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+# Heavy, workstream-owned dependencies. Never installed in the base image (brief §21).
+crawl = [
+    "scrapy>=2.11,<3",
+    "curl_cffi>=0.7,<1",
+    "patchright>=1.40,<2",
+    "tldextract>=5,<6",
+    "protego>=0.3,<1",
+]
+extract = [
+    "pypdfium2>=4.30,<5",
+    "pdftext>=0.4,<1",
+    "docling>=2.0,<3",
+]
+er = [
+    "splink>=4.0,<5",
+    "duckdb>=1.0,<2",
+    "sentence-transformers>=3.0,<4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0,<9",
+    "pytest-asyncio>=0.24,<1",
+    "ruff>=0.6,<1",
+]
+
+[project.scripts]
+fmd = "fmd.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fmd"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -p no:launch_testing -p no:launch_ros"
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:fmd.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["fmd"]
