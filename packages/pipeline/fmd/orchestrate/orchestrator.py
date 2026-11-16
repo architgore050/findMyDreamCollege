@@ -19,6 +19,7 @@ from typing import Any
 from fmd.config import Registry
 from fmd.db.connection import Database
 from fmd.db.repositories import (
+    AliasesRepo,
     ClaimsRepo,
     DocumentsRepo,
     EntitiesRepo,
@@ -32,9 +33,10 @@ from fmd.frontier.queue import Frontier
 from fmd.orchestrate.adapters import build_adapter
 from fmd.orchestrate.crawl import DEFAULT_SOURCE_FAILURE_BUDGET, Crawler
 from fmd.orchestrate.extract import DEFAULT_TOOL_VERSION, Extractor, build_extract_router
-from fmd.orchestrate.ledger import JsonFileLedger, RunLedger, RunSummary, utcnow
+from fmd.orchestrate.ledger import JsonFileLedger, RunLedger, RunSummary, SqlLedger, utcnow
 from fmd.orchestrate.score import score_programmes
 from fmd.paths import resolve_snapshot_dir
+from fmd.plan import DocumentPlanner
 from fmd.store import SnapshotStore
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,7 @@ class Orchestrator:
         max_source_failures: int = DEFAULT_SOURCE_FAILURE_BUDGET,
         tool_version: str = DEFAULT_TOOL_VERSION,
         score_persist: Callable[[Any, Any], Any] | None = None,
+        planner: Any | None = None,
     ) -> None:
         self.registry = registry
         self.database = database
@@ -108,6 +111,15 @@ class Orchestrator:
         )
         self.ledger: RunLedger = ledger if ledger is not None else self._default_ledger()
         self.router = router or build_extract_router(registry)
+        self.planner = (
+            planner
+            if planner is not None
+            else DocumentPlanner(
+                entities=self.entities,
+                aliases=AliasesRepo(database) if database is not None else None,
+                er_config=registry.er,
+            )
+        )
 
     # ------------------------------------------------------------------ helpers
     def _require_database(self, repo: type) -> Any:
@@ -126,6 +138,10 @@ class Orchestrator:
         return self.store
 
     def _default_ledger(self) -> RunLedger:
+        # With Postgres available the run ledger is the ``pipeline_runs`` table;
+        # offline runs keep the JSON file under the snapshot root.
+        if self.database is not None:
+            return SqlLedger(self.database)
         root = getattr(self.store, "root", None)
         return JsonFileLedger(root) if root is not None else JsonFileLedger(resolve_snapshot_dir())
 
@@ -167,7 +183,7 @@ class Orchestrator:
         if not dry_run:
             try:
                 path = self.ledger.record(summary)
-            except OSError as exc:  # observability must not fail a successful run
+            except Exception as exc:  # observability must not fail a successful run
                 logger.warning("could not persist run %s: %s", summary.run_id, exc)
             else:
                 if path is not None:
@@ -193,6 +209,8 @@ class Orchestrator:
             adapter_factory=self.adapter_factory,
             denylisted_domains=self.registry.sources.denied_domains(),
             max_source_failures=self.max_source_failures,
+            planner=None if dry_run else self.planner,
+            sources=selected,
         )
         crawler.plan(selected, summary=summary, limit=limit, dry_run=dry_run)
         if not dry_run:

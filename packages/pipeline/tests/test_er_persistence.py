@@ -45,16 +45,22 @@ def _suffix() -> str:
 
 
 def _entity(database, name: str, state: str = "Delhi") -> int:
-    return EntitiesRepo(database).create(
-        EntityCreate(kind="institution", canonical_name=name, country="IN", state=state)
-    ).id
+    return (
+        EntitiesRepo(database)
+        .create(EntityCreate(kind="institution", canonical_name=name, country="IN", state=state))
+        .id
+    )
 
 
-def test_0002_applies_on_top_of_0001_with_the_audit_surface(pg_database) -> None:
-    from fmd.db import applied_migrations
+def test_schema_is_exactly_the_migration_files(pg_database) -> None:
+    from fmd.db import applied_migrations, discover_migrations
 
     applied = applied_migrations(pg_database)
-    assert list(applied) == ["0001_init", "0002_er_audit_and_replay"]
+    on_disk = {migration.version: migration.checksum for migration in discover_migrations()}
+    # Applied set == files on disk, checksums included. A migration *count* would
+    # make every new forward-only file a test failure (and has already caused a
+    # column to be skipped).
+    assert applied == on_disk
 
     with pg_database.connection() as conn:
         columns = {
@@ -229,9 +235,7 @@ def test_manual_alias_blocks_auto_merge_and_is_persisted(pg_database) -> None:
         resume_repo.record_audit(ERAuditCreate(**decision.model_dump()))
 
     subject_id = _entity(pg_database, f"Provisional {suffix}")
-    mention = Mention(
-        text=f"Manual Lock University {suffix}", state="Delhi", entity_id=subject_id
-    )
+    mention = Mention(text=f"Manual Lock University {suffix}", state="Delhi", entity_id=subject_id)
 
     batch = resolve_with_audit(
         [mention],

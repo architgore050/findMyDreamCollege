@@ -66,6 +66,7 @@ class FakeSource:
     kind: str = "institution"
     enabled: bool = True
     seeds: list[str] = field(default_factory=list)
+    params: dict[str, Any] | None = None
 
 
 class FakeAdapter:
@@ -151,11 +152,57 @@ class MemoryDocuments:
     def get_by_url(self, url: str) -> DocumentRecord | None:
         return self.rows.get(url)
 
+    def set_plan(
+        self,
+        document_id: int,
+        *,
+        source_id: str | None = None,
+        extraction_family: str | None,
+        entity_id: int | None,
+        plan_state: str,
+        plan_confidence: float | None = None,
+        plan_reason: str | None = None,
+    ) -> DocumentRecord | None:
+        record = self.get(document_id)
+        if record is None:
+            return None
+        updates: dict[str, Any] = {
+            "extraction_family": extraction_family,
+            "entity_id": entity_id,
+            "plan_state": plan_state,
+            "plan_confidence": plan_confidence,
+            "plan_reason": plan_reason,
+        }
+        if source_id is not None:
+            updates["source_id"] = source_id
+        merged = record.model_copy(update=updates)
+        self.rows[merged.url] = merged
+        return merged
+
+    def count_unplanned(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in self.rows.values():
+            if row.extraction_family is None:
+                reason = "missing_family"
+            elif row.plan_state == "needs_review":
+                reason = "needs_review"
+            elif row.entity_id is None:
+                reason = "unresolved_entity"
+            else:
+                continue
+            counts[reason] = counts.get(reason, 0) + 1
+        return counts
+
 
 class MemorySnapshots:
-    def __init__(self, extractions: MemoryExtractions | None = None) -> None:
+    def __init__(
+        self,
+        extractions: MemoryExtractions | None = None,
+        documents: MemoryDocuments | None = None,
+    ) -> None:
         self.rows: list[SnapshotRecord] = []
         self.extractions = extractions
+        self.documents = documents
         self._next = 1
 
     def create(self, snapshot: SnapshotCreate) -> SnapshotRecord:
@@ -187,6 +234,24 @@ class MemorySnapshots:
             }
             rows = [row for row in rows if row.id not in done]
         return sorted(rows, key=lambda row: row.id)[:limit]
+
+    def list_extractable(
+        self, tool_version: str | None = None, limit: int = 100
+    ) -> list[SnapshotRecord]:
+        rows = self.list_without_extraction(tool_version, len(self.rows) or 1)
+        if self.documents is None:
+            return rows[:limit]
+        planned = []
+        for row in rows:
+            document = self.documents.get(row.document_id)
+            if document is None:
+                continue
+            if document.extraction_family is None or document.entity_id is None:
+                continue
+            if document.plan_state == "needs_review":
+                continue
+            planned.append(row)
+        return planned[:limit]
 
 
 class MemoryExtractions:

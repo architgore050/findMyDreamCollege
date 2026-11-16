@@ -5,17 +5,19 @@ fetch ladder do), does not parse documents (adapters do), and does not claim to
 have succeeded when a fetch failed: every non-2xx outcome becomes a recorded
 rejection, abstention or failure with a machine-readable reason.
 
-Replay metadata is carried in ``request_headers["fmd_plan"]`` on the frontier and
-document rows. That is the only replay-safe JSON column available without a
-schema change, and it survives a restart so ``fmd extract`` can recover the
-source id, extraction family and entity link for each document.
+Planning is a column, not a header: ``documents.source_id``,
+``documents.extraction_family`` and ``documents.entity_id`` (migration 0003) are
+written here, so ``fmd extract`` and SQL can both see why a document is or is not
+extractable. Discovery may *reference* a family/entity in
+``DocumentRef.metadata``; when it does not, :class:`fmd.plan.DocumentPlanner`
+detects the family from the registry + heuristics and links the entity from the
+fetched text.
 """
 
 from __future__ import annotations
 
-import contextlib
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -36,10 +38,10 @@ from fmd.fetch.types import FetchRequest, FetchResult, TierUnavailable
 from fmd.frontier.queue import Frontier
 from fmd.orchestrate.adapters import call_fetch
 from fmd.orchestrate.ledger import RunSummary
+from fmd.plan import persist_plan
 
 logger = logging.getLogger(__name__)
 
-PLAN_KEY = "fmd_plan"
 # A source that cannot answer this many times in one run is stopped, not retried
 # forever. A block/quarantine is handled per URL by the frontier as well.
 DEFAULT_SOURCE_FAILURE_BUDGET = 5
@@ -48,41 +50,6 @@ SIMHASH_MAX_DISTANCE = 3
 
 def utc() -> datetime:
     return datetime.now(UTC)
-
-
-def plan_for_ref(ref: Any, source: Any) -> dict[str, Any]:
-    """Build the replayable plan for one discovered document.
-
-    Extraction family and entity link are *claims made by discovery*, not
-    inferred here. A ref that omits them yields a document that extraction will
-    abstain on with ``missing_family``/``unresolved_entity`` rather than guess.
-    """
-    metadata = getattr(ref, "metadata", None) or {}
-    plan: dict[str, Any] = {"source_id": str(source.id)}
-    if getattr(source, "kind", None):
-        plan["source_kind"] = str(source.kind)
-    family = metadata.get("family") or metadata.get("document_family")
-    if family:
-        plan["family"] = str(family)
-    if metadata.get("entity_id") is not None:
-        with contextlib.suppress(TypeError, ValueError):
-            plan["entity_id"] = int(metadata["entity_id"])
-    if metadata.get("institution"):
-        plan["institution"] = str(metadata["institution"])
-    return plan
-
-
-def plan_from_headers(headers: Mapping[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(headers, Mapping):
-        return {}
-    value = headers.get(PLAN_KEY)
-    return dict(value) if isinstance(value, Mapping) else {}
-
-
-def merge_headers(headers: Mapping[str, Any] | None, plan: Mapping[str, Any]) -> dict[str, Any]:
-    merged = dict(headers or {})
-    merged[PLAN_KEY] = dict(plan)
-    return merged
 
 
 def domain_for(url: str) -> str:
@@ -100,20 +67,15 @@ def domain_for(url: str) -> str:
         return (urlsplit(url).hostname or "").lower()
 
 
-def frontier_upsert(ref: Any, plan: Mapping[str, Any]) -> FrontierUpsert:
-    """Use the contract's ref-aware enqueue, then add the plan to replay headers.
-
-    ``from_document_ref`` gives us the POST body/header shape adapters emit;
-    a conflicting ``request_headers`` argument would duplicate that keyword, so
-    the plan is merged afterwards.
-    """
-    item = FrontierUpsert.from_document_ref(
+def frontier_upsert(ref: Any, *, source_id: str | None) -> FrontierUpsert:
+    """Enqueue a ref with its registry source persisted as a column."""
+    return FrontierUpsert.from_document_ref(
         ref,
         domain=domain_for(ref.url),
         state="queued",
         next_allowed_at=utc(),
+        source_id=source_id,
     )
-    return item.model_copy(update={"request_headers": merge_headers(item.request_headers, plan)})
 
 
 def _header(result: FetchResult, name: str) -> str | None:
@@ -150,6 +112,8 @@ class Crawler:
         adapter_factory: Any,
         denylisted_domains: Iterable[str] | None = None,
         max_source_failures: int = DEFAULT_SOURCE_FAILURE_BUDGET,
+        planner: Any | None = None,
+        sources: Iterable[Any] | None = None,
     ) -> None:
         self.frontier = frontier
         self.fetcher = fetcher
@@ -158,6 +122,8 @@ class Crawler:
         self.snapshots = snapshots
         self.adapter_factory = adapter_factory
         self.denylisted_domains = tuple(denylisted_domains or ())
+        self.planner = planner
+        self.sources_by_id = {str(getattr(source, "id", "")): source for source in sources or ()}
         self.max_source_failures = max_source_failures
         self._seen_sha: set[str] = set()
         self._fingerprints: list[int] = []
@@ -177,8 +143,9 @@ class Crawler:
         for source in sources:
             if remaining is not None and remaining <= 0:
                 break
+            source_id = str(getattr(source, "id", ""))
             outcome: dict[str, Any] = {
-                "source_id": str(getattr(source, "id", "")),
+                "source_id": source_id,
                 "adapter": getattr(source, "adapter", None),
                 "status": "ok",
                 "planned": 0,
@@ -203,11 +170,10 @@ class Crawler:
             outcome["planned"] = len(unique)
             summary.bump("planned", len(unique))
             for ref in unique:
-                plan = plan_for_ref(ref, source)
                 if dry_run:
                     summary.planned_urls.append(ref.url)
                     continue
-                self.frontier.repo.enqueue(frontier_upsert(ref, plan))
+                self.frontier.repo.enqueue(frontier_upsert(ref, source_id=source_id))
                 outcome["enqueued"] += 1
                 summary.bump("enqueued")
             summary.sources.append(outcome)
@@ -225,7 +191,7 @@ class Crawler:
             for record in due:
                 if limit is not None and processed >= limit:
                     break
-                source_id = str(plan_from_headers(record.request_headers).get("source_id") or "")
+                source_id = str(getattr(record, "source_id", None) or "")
                 if source_id in self._stopped_sources:
                     continue
                 if self.frontier._quarantined(record.domain):
@@ -263,7 +229,9 @@ class Crawler:
             self._handle_ok(record, result, summary=summary, source_id=source_id)
             return
         if result.terminal:
-            self._upsert_document(record, result, status=result.status, summary=summary)
+            self._upsert_document(
+                record, result, status=result.status, summary=summary, source_id=source_id
+            )
             self.frontier.complete(record.url, valuable_pages=0, pages=1, tier=result.fetcher_tier)
             summary.bump("rejected")
             summary.outcomes.append(
@@ -328,6 +296,7 @@ class Crawler:
             status=result.status,
             summary=summary,
             last_seen=utc(),
+            source_id=source_id,
         )
         latest = self._latest(document)
         fingerprint = simhash64(result.text) if _is_textual(content_type) else None
@@ -374,8 +343,41 @@ class Crawler:
             pages=1 if result.costs_budget else 0,
             tier=result.fetcher_tier,
         )
+        document = self._plan(
+            document, source_id=source_id, text_sample=result.text, summary=summary
+        )
         if source_id:
             self._source_failures[source_id] = 0
+
+    def _plan(
+        self,
+        document: DocumentRecord,
+        *,
+        source_id: str,
+        text_sample: str | None,
+        summary: RunSummary | None = None,
+    ) -> DocumentRecord:
+        """Fill family/entity columns for a document the planner can see.
+
+        Runs after the snapshot is stored because PDF/HTML signals live in the
+        fetched text. A plan that cannot link an entity leaves ``entity_id`` NULL
+        and records ``needs_review``; extraction then refuses to guess.
+        """
+        if self.planner is None:
+            return document
+        plan = self.planner.plan(
+            document,
+            source=self.sources_by_id.get(source_id),
+            family_hint=getattr(document, "extraction_family", None),
+            entity_id_hint=getattr(document, "entity_id", None),
+            text_sample=text_sample,
+        )
+        updated = persist_plan(self.documents, document, plan)
+        if summary is not None:
+            summary.bump(f"plan.{plan.state}")
+            if plan.abstain_reason:
+                summary.bump(f"plan.reason.{plan.abstain_reason}")
+        return updated if updated is not None else document
 
     def _upsert_document(
         self,
@@ -385,8 +387,10 @@ class Crawler:
         status: int,
         summary: RunSummary,
         last_seen: datetime | None = None,
+        source_id: str | None = None,
     ) -> DocumentRecord:
         robots = result.robots
+        source_id = source_id or getattr(record, "source_id", None)
         document = DocumentUpsert(
             url=record.url,
             domain=record.domain,
@@ -400,6 +404,9 @@ class Crawler:
             http_method=record.http_method,
             http_body=record.http_body,
             request_headers=record.request_headers,
+            source_id=source_id,
+            extraction_family=getattr(record, "extraction_family", None),
+            entity_id=getattr(record, "entity_id", None),
         )
         return self.documents.upsert(document)
 

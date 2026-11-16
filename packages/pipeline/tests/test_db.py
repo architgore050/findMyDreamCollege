@@ -41,6 +41,7 @@ from fmd.db import (
     SourceSeed,
     SourcesRepo,
     applied_migrations,
+    discover_migrations,
     run_migrations,
 )
 from fmd.db.repositories import DomainPolitenessRecord
@@ -67,10 +68,13 @@ def _country(database) -> None:
     )
 
 
-def test_migrations_are_idempotent(pg_database) -> None:
+def test_migrations_are_idempotent_and_match_the_files_on_disk(pg_database) -> None:
     assert run_migrations(pg_database) == []
     applied = applied_migrations(pg_database)
-    assert list(applied) == ["0001_init", "0002_er_audit_and_replay"]
+    on_disk = {migration.version: migration.checksum for migration in discover_migrations()}
+    # Never assert a migration *count*: every new forward-only file would fail it
+    # and the quickest fix would be to stop checking the schema at all.
+    assert applied == on_disk
 
 
 def test_evidence_and_claim_supersede_roundtrip(pg_database) -> None:
@@ -420,9 +424,7 @@ def test_post_request_shape_is_replayable_on_documents_and_frontier(pg_database)
     assert stored.request_headers is not None
     # A later conditional revalidation written as a bare GET must not erase the
     # POST shape that makes the source replayable.
-    revalidated = documents.upsert(
-        DocumentUpsert(url=url, domain="nabh.example", http_status=304)
-    )
+    revalidated = documents.upsert(DocumentUpsert(url=url, domain="nabh.example", http_status=304))
     assert revalidated.http_method == "POST"
     assert revalidated.http_body == body
 
@@ -437,9 +439,7 @@ def test_post_request_shape_is_replayable_on_documents_and_frontier(pg_database)
     )
     assert record.http_method == "POST"
     assert record.http_body == body
-    again = frontier.enqueue(
-        FrontierUpsert(url=record.url, domain="nabh.example")
-    )
+    again = frontier.enqueue(FrontierUpsert(url=record.url, domain="nabh.example"))
     assert again.http_method == "POST"
     assert again.http_body == body
 
@@ -551,16 +551,20 @@ def _claim_rows(database, entity_id: int) -> dict[int, dict]:
 
 
 def _score(database, entity_id: int, claims_hash: str) -> int:
-    return ScoresRepo(database).create(
-        ScoreCreate(
-            entity_id=entity_id,
-            scorer_version="0.1.0",
-            weights_version="test",
-            claims_hash=claims_hash,
-            sub_scores={"fees": {"point": 1, "lo": 1, "hi": 1}},
-            evidence_tier="thin",
+    return (
+        ScoresRepo(database)
+        .create(
+            ScoreCreate(
+                entity_id=entity_id,
+                scorer_version="0.1.0",
+                weights_version="test",
+                claims_hash=claims_hash,
+                sub_scores={"fees": {"point": 1, "lo": 1, "hi": 1}},
+                evidence_tier="thin",
+            )
         )
-    ).id
+        .id
+    )
 
 
 def test_merge_reparents_evidence_and_unmerge_restores_exactly(pg_database) -> None:
@@ -677,9 +681,7 @@ def test_merge_never_alters_claim_content_and_hash_follows_membership(pg_databas
     source_hash_before = claims.claims_hash(source.id)
     target_hash_before = claims.claims_hash(target.id)
     content_before = {
-        claim_id: {
-            column: row[column] for column in CLAIM_CONTENT_COLUMNS
-        }
+        claim_id: {column: row[column] for column in CLAIM_CONTENT_COLUMNS}
         for claim_id, row in _claim_rows(pg_database, target.id).items()
     }
     content_before.update(

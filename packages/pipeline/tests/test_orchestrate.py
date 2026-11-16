@@ -31,14 +31,17 @@ from fmd.db.repositories import (
     SnapshotCreate,
 )
 from fmd.discover.base import DocumentRef
+from fmd.er import EntityCandidate, ERConfig
 from fmd.extract.pipeline import build_router
 from fmd.orchestrate import JsonFileLedger, Orchestrator
-from fmd.orchestrate.crawl import plan_from_headers
+from fmd.plan import DocumentPlanner
 from fmd.store import SnapshotStore
 
 TESTS = Path(__file__).parent
 EXTRACT_FIXTURES = TESTS / "fixtures" / "extract"
 LLM_FIXTURES = EXTRACT_FIXTURES / "llm"
+PLAN_FIXTURES = TESTS / "fixtures" / "plan"
+PLAN_LLM_FIXTURES = PLAN_FIXTURES / "llm"
 
 
 class Harness:
@@ -55,8 +58,8 @@ class Harness:
     ) -> None:
         self.clock = FakeClock()
         self.extractions = MemoryExtractions()
-        self.snapshots = MemorySnapshots(self.extractions)
         self.documents = MemoryDocuments()
+        self.snapshots = MemorySnapshots(self.extractions, self.documents)
         self.claims = MemoryClaims()
         self.entities = MemoryEntities()
         self.programmes = MemoryProgrammes()
@@ -134,8 +137,12 @@ def test_crawl_happy_path_stores_snapshot_and_document(tmp_path, registry) -> No
     assert snapshot.content_type == "text/plain"
     document = harness.documents.rows[url]
     assert document.etag == '"v1"'
-    assert plan_from_headers(document.request_headers)["family"] == "placement_report"
-    assert plan_from_headers(document.request_headers)["entity_id"] == 7
+    # Plan is on the row now, not in request_headers (migration 0003).
+    assert document.source_id == "fixture"
+    assert document.extraction_family == "placement_report"
+    assert document.entity_id == 7
+    assert document.plan_state == "linked"
+    assert frontier_rows(harness.frontier)[0].source_id == "fixture"
     assert frontier_rows(harness.frontier)[0].state == "done"
     # The ledger was persisted and is greppable JSON.
     recorded = json.loads((harness.ledger.runs_dir / f"{summary.run_id}.json").read_text())
@@ -306,6 +313,49 @@ def _seed_snapshot(harness: Harness, document, text: str) -> None:
     )
 
 
+def test_crawl_plans_family_and_entity_without_ref_metadata(tmp_path, registry) -> None:
+    """The regression this workstream exists for: no metadata, real claims."""
+    url = "https://fixture.ac.in/placement-report.txt"
+    source = FakeSource(id="fixture", params={"extraction_family": "placement_report"})
+    text = (PLAN_FIXTURES / "e2e_placement_report.txt").read_text(encoding="utf-8")
+    router = build_router(registry.models, mock=True, fixtures_dir=PLAN_LLM_FIXTURES)
+    harness = Harness(
+        tmp_path,
+        registry,
+        sources=[source],
+        adapters={source.id: FakeAdapter([_ref(url)])},
+        fetcher=FakeFetcher(
+            {url: response(url, body=text, headers={"content-type": "text/plain"})}
+        ),
+        router=router,
+    )
+    harness.orchestrator.planner = DocumentPlanner(
+        candidates_provider=lambda: [
+            EntityCandidate(
+                entity_id=42,
+                canonical_name="Fixture Institute of Medical Sciences",
+                state="Delhi",
+            )
+        ],
+        er_config=ERConfig.from_mapping(
+            {"blocking": {"backend": "deterministic"}, "similarity": {"use_embeddings": False}}
+        ),
+    )
+
+    crawl = harness.orchestrator.crawl(limit=5)
+    assert crawl.counts["stored"] == 1
+    document = harness.documents.rows[url]
+    assert document.source_id == "fixture"
+    assert document.extraction_family == "placement_report"
+    assert document.entity_id == 42
+    assert document.plan_state == "linked"
+
+    extracted = harness.orchestrator.extract(limit=5)
+    assert extracted.counts["extracted"] == 1
+    assert extracted.counts["claims"] > 0
+    assert {row.entity_id for row in harness.claims.rows} == {42}
+
+
 def test_extract_resumes_and_is_idempotent(tmp_path, registry) -> None:
     text = (EXTRACT_FIXTURES / "placement_report.txt").read_text(encoding="utf-8")
     router = build_router(registry.models, mock=True, fixtures_dir=LLM_FIXTURES)
@@ -315,7 +365,8 @@ def test_extract_resumes_and_is_idempotent(tmp_path, registry) -> None:
             url="https://college.ac.in/one.txt",
             domain="college.ac.in",
             kind="placement_report",
-            request_headers={"fmd_plan": {"entity_id": 1, "family": "placement_report"}},
+            extraction_family="placement_report",
+            entity_id=1,
         )
     )
     second_doc = harness.documents.upsert(
@@ -323,7 +374,8 @@ def test_extract_resumes_and_is_idempotent(tmp_path, registry) -> None:
             url="https://college.ac.in/two.txt",
             domain="college.ac.in",
             kind="placement_report",
-            request_headers={"fmd_plan": {"entity_id": 1, "family": "placement_report"}},
+            extraction_family="placement_report",
+            entity_id=1,
         )
     )
     _seed_snapshot(harness, first_doc, text)
@@ -345,7 +397,7 @@ def test_extract_resumes_and_is_idempotent(tmp_path, registry) -> None:
     assert len(harness.extractions.rows) == 2
 
 
-def test_extract_abstains_when_entity_is_unresolved(tmp_path, registry) -> None:
+def test_extract_leaves_unplanned_documents_visible_with_a_reason(tmp_path, registry) -> None:
     text = (EXTRACT_FIXTURES / "placement_report.txt").read_text(encoding="utf-8")
     router = build_router(registry.models, mock=True, fixtures_dir=LLM_FIXTURES)
     harness = Harness(tmp_path, registry, router=router)
@@ -353,7 +405,34 @@ def test_extract_abstains_when_entity_is_unresolved(tmp_path, registry) -> None:
         DocumentUpsert(
             url="https://college.ac.in/orphan.txt",
             domain="college.ac.in",
-            request_headers={"fmd_plan": {"family": "placement_report"}},
+            extraction_family="placement_report",
+            plan_state="needs_review",
+        )
+    )
+    _seed_snapshot(harness, document, text)
+
+    summary = harness.orchestrator.extract(limit=5)
+
+    # A document with no entity is not selected (never extracted against a
+    # guessed institution) and is surfaced as an unplanned bucket instead.
+    assert summary.counts.get("extracted", 0) == 0
+    assert summary.counts["unplanned"] == 1
+    assert summary.metadata["unplanned"] == {"needs_review": 1}
+    assert summary.outcomes == []
+    assert harness.extractions.rows == []
+    assert summary.failed is False
+
+
+def test_extract_abstains_with_reason_for_an_unsupported_family(tmp_path, registry) -> None:
+    text = (EXTRACT_FIXTURES / "placement_report.txt").read_text(encoding="utf-8")
+    router = build_router(registry.models, mock=True, fixtures_dir=LLM_FIXTURES)
+    harness = Harness(tmp_path, registry, router=router)
+    document = harness.documents.upsert(
+        DocumentUpsert(
+            url="https://college.ac.in/odd.txt",
+            domain="college.ac.in",
+            extraction_family="not_a_family",
+            entity_id=1,
         )
     )
     _seed_snapshot(harness, document, text)
@@ -361,9 +440,9 @@ def test_extract_abstains_when_entity_is_unresolved(tmp_path, registry) -> None:
     summary = harness.orchestrator.extract(limit=5)
 
     assert summary.counts["abstained"] == 1
-    assert summary.outcomes[0]["reason"] == "unresolved_entity"
+    assert summary.outcomes[0]["reason"] == "unsupported_family:not_a_family"
     assert harness.extractions.rows == []
-    assert summary.failed is True  # nothing could be extracted
+    assert summary.failed is True
 
 
 def _programme(institution_id: int = 1) -> ProgrammeRecord:

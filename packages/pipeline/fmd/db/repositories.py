@@ -7,6 +7,7 @@ connection context.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -156,7 +157,6 @@ class UnmergeResult:
         yield self.audit
 
 
-
 class DocumentUpsert(RowModel):
     url: str
     domain: str
@@ -172,6 +172,16 @@ class DocumentUpsert(RowModel):
     http_body: dict[str, Any] | None = None
     request_headers: dict[str, Any] | None = None
 
+    # Crawl/extract plan, persisted as columns (migration 0003). ``plan_state`` is
+    # planned | linked | needs_review | abstained; a null ``entity_id`` with state
+    # ``needs_review`` is an abstention a human must resolve, never a guess.
+    source_id: str | None = None
+    extraction_family: str | None = None
+    entity_id: int | None = None
+    plan_state: Literal["planned", "linked", "needs_review", "abstained"] | None = None
+    plan_confidence: float | None = None
+    plan_reason: str | None = None
+
     @classmethod
     def from_document_ref(cls, ref: Any, *, domain: str | None = None) -> DocumentUpsert:
         """Accept a ``DocumentRef`` (keeping POST shape from ``metadata``).
@@ -181,9 +191,7 @@ class DocumentUpsert(RowModel):
         what makes an admin-ajax POST source replayable.
         """
         metadata = getattr(ref, "metadata", None) or {}
-        method = str(
-            metadata.get("request_method") or metadata.get("http_method") or "GET"
-        ).upper()
+        method = str(metadata.get("request_method") or metadata.get("http_method") or "GET").upper()
         if method not in {"GET", "POST"}:
             raise ValueError(f"unsupported request method {method!r} (GET or POST)")
         body = metadata.get("request_body", metadata.get("http_body"))
@@ -198,6 +206,7 @@ class DocumentUpsert(RowModel):
         return cls(
             url=ref.url,
             domain=host,
+            source_id=getattr(ref, "source_id", None),
             http_method=method,
             http_body=body if isinstance(body, dict) else None,
             request_headers=headers if isinstance(headers, dict) else None,
@@ -423,6 +432,22 @@ class LLMCallRecord(LLMCallLog):
     created_at: datetime | None = None
 
 
+class PipelineRunCreate(RowModel):
+    """One stage execution in the SQL run ledger (migration 0003)."""
+
+    run_id: str
+    stage: Literal["crawl", "extract", "score", "worker"]
+    started_at: datetime
+    finished_at: datetime | None = None
+    counts: dict[str, int] = Field(default_factory=dict)
+    errors: list[dict[str, Any]] = Field(default_factory=list)
+    status: Literal["running", "succeeded", "failed", "dry_run"] = "running"
+
+
+class PipelineRunRecord(PipelineRunCreate):
+    pass
+
+
 class FrontierUpsert(RowModel):
     url: str
     domain: str
@@ -432,6 +457,9 @@ class FrontierUpsert(RowModel):
     http_method: Literal["GET", "POST"] = "GET"
     http_body: dict[str, Any] | None = None
     request_headers: dict[str, Any] | None = None
+    source_id: str | None = None
+    extraction_family: str | None = None
+    entity_id: int | None = None
 
     @classmethod
     def from_document_ref(cls, ref: Any, **fields: Any) -> FrontierUpsert:
@@ -445,9 +473,7 @@ class FrontierUpsert(RowModel):
         form the next fetch needs anyway.
         """
         metadata = getattr(ref, "metadata", None) or {}
-        method = str(
-            metadata.get("request_method") or metadata.get("http_method") or "GET"
-        ).upper()
+        method = str(metadata.get("request_method") or metadata.get("http_method") or "GET").upper()
         if method not in {"GET", "POST"}:
             raise ValueError(f"unsupported request method {method!r} (GET or POST)")
         body = metadata.get("request_body", metadata.get("http_body"))
@@ -462,17 +488,25 @@ class FrontierUpsert(RowModel):
             headers["If-Modified-Since"] = str(last_modified)
         from urllib.parse import urlsplit
 
+        # Discovery may already know the target; carry it as a column, never as
+        # a synthetic request header. The planner refines it after the fetch.
+        family = metadata.get("family") or metadata.get("document_family")
+        if family and "extraction_family" not in fields:
+            fields["extraction_family"] = str(family)
+        if metadata.get("entity_id") is not None and "entity_id" not in fields:
+            with contextlib.suppress(TypeError, ValueError):
+                fields["entity_id"] = int(metadata["entity_id"])
+
         return cls(
             url=ref.url,
-            domain=fields.pop("domain", None)
-            or (urlsplit(ref.url).hostname or ""),
+            domain=fields.pop("domain", None) or (urlsplit(ref.url).hostname or ""),
             priority=fields.pop("priority", getattr(ref, "priority", 0) or 0),
             http_method=method,
             http_body=body if isinstance(body, dict) else None,
             request_headers=headers or None,
+            source_id=fields.pop("source_id", None) or getattr(ref, "source_id", None),
             **fields,
         )
-
 
 
 class FrontierRecord(FrontierUpsert):
@@ -770,9 +804,7 @@ class EntitiesRepo:
         if not 0.0 <= score <= 1.0:
             raise ValueError("merge score must be in [0, 1]")
         with self.db.connection() as conn:
-            subject = conn.execute(
-                "SELECT * FROM entities WHERE id = %s", (entity_id,)
-            ).fetchone()
+            subject = conn.execute("SELECT * FROM entities WHERE id = %s", (entity_id,)).fetchone()
             target = conn.execute(
                 "SELECT * FROM entities WHERE id = %s", (into_entity_id,)
             ).fetchone()
@@ -854,9 +886,7 @@ class EntitiesRepo:
             ).fetchall()
         )
         if claim_ids:
-            conn.execute(
-                "UPDATE claims SET entity_id = %s WHERE entity_id = %s", (target, source)
-            )
+            conn.execute("UPDATE claims SET entity_id = %s WHERE entity_id = %s", (target, source))
 
         # An alias already present on the target would violate the
         # (entity_id, alias, alias_type) unique index. Those rows stay on the
@@ -923,8 +953,7 @@ class EntitiesRepo:
         financing_ids = (
             self._ids(
                 conn.execute(
-                    "SELECT id FROM financing_options WHERE source_claim_id = ANY(%s) "
-                    "ORDER BY id",
+                    "SELECT id FROM financing_options WHERE source_claim_id = ANY(%s) ORDER BY id",
                     (claim_ids,),
                 ).fetchall()
             )
@@ -1000,9 +1029,7 @@ class EntitiesRepo:
             )
 
         programme_ids = [int(value) for value in moved.get("programmes") or []]
-        affiliated_ids = [
-            int(value) for value in moved.get("affiliated_programmes") or []
-        ]
+        affiliated_ids = [int(value) for value in moved.get("affiliated_programmes") or []]
         programme_ownership = {
             int(row["id"]): (row["institution_id"], row["affiliated_university_id"])
             for row in conn.execute(
@@ -1014,9 +1041,7 @@ class EntitiesRepo:
         for programme_id in programme_ids:
             ownership = programme_ownership.get(programme_id)
             if ownership is None or ownership[0] != target:
-                drift.append(
-                    f"programme {programme_id} is no longer owned by entity {target}"
-                )
+                drift.append(f"programme {programme_id} is no longer owned by entity {target}")
         for programme_id in affiliated_ids:
             ownership = programme_ownership.get(programme_id)
             if ownership is None or ownership[1] != target:
@@ -1033,17 +1058,13 @@ class EntitiesRepo:
             if int(row["programme_id"]) not in {
                 int(value) for value in moved.get("programmes") or []
             }:
-                drift.append(
-                    f"cost item {row['id']} no longer belongs to a moved programme"
-                )
+                drift.append(f"cost item {row['id']} no longer belongs to a moved programme")
         for row in conn.execute(
             "SELECT id, source_claim_id FROM financing_options WHERE id = ANY(%s)",
             ([int(value) for value in moved.get("financing_options") or []],),
         ).fetchall():
             if row["source_claim_id"] not in set(claim_ids):
-                drift.append(
-                    f"financing option {row['id']} no longer cites a moved claim"
-                )
+                drift.append(f"financing option {row['id']} no longer cites a moved claim")
         return drift
 
     def unmerge(
@@ -1057,9 +1078,7 @@ class EntitiesRepo:
         ``drift`` list instead of being applied silently.
         """
         with self.db.connection() as conn:
-            subject = conn.execute(
-                "SELECT * FROM entities WHERE id = %s", (entity_id,)
-            ).fetchone()
+            subject = conn.execute("SELECT * FROM entities WHERE id = %s", (entity_id,)).fetchone()
             if subject is None:
                 raise ValueError(f"entity {entity_id} does not exist")
             previous = subject["merged_into_entity_id"]
@@ -1090,9 +1109,7 @@ class EntitiesRepo:
 
             drift = self._unmerge_drift(conn, entity_id, previous, evidence)
             if drift:
-                return UnmergeResult(
-                    entity=_entity(subject), conflict=True, drift=tuple(drift)
-                )
+                return UnmergeResult(entity=_entity(subject), conflict=True, drift=tuple(drift))
 
             moved = evidence.get("evidence", evidence)
             moved_back: dict[str, list[int]] = {}
@@ -1125,9 +1142,7 @@ class EntitiesRepo:
                         f"{len(programme_ids)} programmes; refusing a partial revert"
                     )
                 moved_back["programmes"] = programme_ids
-            affiliated_ids = [
-                int(value) for value in moved.get("affiliated_programmes") or []
-            ]
+            affiliated_ids = [int(value) for value in moved.get("affiliated_programmes") or []]
             if affiliated_ids:
                 cursor = conn.execute(
                     "UPDATE programmes SET affiliated_university_id = %s WHERE id = ANY(%s) "
@@ -1168,9 +1183,7 @@ class EntitiesRepo:
                 (entity_id, previous, _json(payload), decided_by),
             ).fetchone()
         assert row is not None and audit_row is not None
-        return UnmergeResult(
-            entity=_entity(row), audit=_er_audit(audit_row), moved_back=moved_back
-        )
+        return UnmergeResult(entity=_entity(row), audit=_er_audit(audit_row), moved_back=moved_back)
 
     def audit_for_pair(
         self, subject_entity_id: int, candidate_entity_id: int, limit: int = 50
@@ -1183,9 +1196,7 @@ class EntitiesRepo:
             ).fetchall()
         return [_er_audit(row) for row in rows]
 
-    def audit_recent(
-        self, limit: int = 50, since: datetime | None = None
-    ) -> list[ERAuditRecord]:
+    def audit_recent(self, limit: int = 50, since: datetime | None = None) -> list[ERAuditRecord]:
         if since is None:
             sql = "SELECT * FROM er_audit ORDER BY created_at DESC, id DESC LIMIT %s"
             params: tuple[Any, ...] = (limit,)
@@ -1198,7 +1209,6 @@ class EntitiesRepo:
         with self.db.connection() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [_er_audit(row) for row in rows]
-
 
 
 class AliasesRepo:
@@ -1263,9 +1273,10 @@ class DocumentsRepo:
                 INSERT INTO documents
                     (url, domain, kind, first_seen, last_seen, etag, last_modified,
                      robots_decision, robots_checked_at, http_status, http_method, http_body,
-                     request_headers)
+                     request_headers, source_id, extraction_family, entity_id, plan_state,
+                     plan_confidence, plan_reason)
                 VALUES (%s, %s, %s, COALESCE(%s, now()), COALESCE(%s, now()), %s, %s, %s, %s,
-                        %s, %s, %s, %s)
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (url) DO UPDATE SET
                     domain = EXCLUDED.domain,
                     kind = COALESCE(EXCLUDED.kind, documents.kind),
@@ -1282,7 +1293,15 @@ class DocumentsRepo:
                         THEN documents.http_method ELSE EXCLUDED.http_method END,
                     http_body = COALESCE(EXCLUDED.http_body, documents.http_body),
                     request_headers = COALESCE(EXCLUDED.request_headers,
-                                               documents.request_headers)
+                                               documents.request_headers),
+                    source_id = COALESCE(EXCLUDED.source_id, documents.source_id),
+                    extraction_family = COALESCE(EXCLUDED.extraction_family,
+                                                 documents.extraction_family),
+                    entity_id = COALESCE(EXCLUDED.entity_id, documents.entity_id),
+                    plan_state = COALESCE(EXCLUDED.plan_state, documents.plan_state),
+                    plan_confidence = COALESCE(EXCLUDED.plan_confidence,
+                                               documents.plan_confidence),
+                    plan_reason = COALESCE(EXCLUDED.plan_reason, documents.plan_reason)
                 RETURNING *
                 """,
                 (
@@ -1299,10 +1318,68 @@ class DocumentsRepo:
                     document.http_method,
                     _json(document.http_body),
                     _json(document.request_headers),
+                    document.source_id,
+                    document.extraction_family,
+                    document.entity_id,
+                    document.plan_state,
+                    document.plan_confidence,
+                    document.plan_reason,
                 ),
             ).fetchone()
         assert row is not None
         return _document(row)
+
+    def set_plan(
+        self,
+        document_id: int,
+        *,
+        source_id: str | None = None,
+        extraction_family: str | None,
+        entity_id: int | None,
+        plan_state: str,
+        plan_confidence: float | None = None,
+        plan_reason: str | None = None,
+    ) -> DocumentRecord | None:
+        """Persist a :class:`fmd.plan.DocumentPlan` on the document row.
+
+        Deliberately an explicit UPDATE rather than ``upsert``: a plan is a
+        decision about an existing document, and ``plan_state`` must be able to
+        move backwards (e.g. ``linked`` → ``needs_review``) when evidence changes.
+        """
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE documents SET
+                    source_id = COALESCE(%s, source_id),
+                    extraction_family = %s,
+                    entity_id = %s,
+                    plan_state = %s,
+                    plan_confidence = %s,
+                    plan_reason = %s
+                WHERE id = %s
+                RETURNING *
+                """,
+                (
+                    source_id,
+                    extraction_family,
+                    entity_id,
+                    plan_state,
+                    plan_confidence,
+                    plan_reason,
+                    document_id,
+                ),
+            ).fetchone()
+        return _document(row) if row else None
+
+    def list_needs_review(self, limit: int = 100) -> list[DocumentRecord]:
+        """Ambiguous plans awaiting a human decision (WS-G review queue source)."""
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM documents WHERE plan_state = 'needs_review' "
+                "ORDER BY last_seen DESC NULLS LAST, id LIMIT %s",
+                (limit,),
+            ).fetchall()
+        return [_document(row) for row in rows]
 
     def get(self, document_id: int) -> DocumentRecord | None:
         with self.db.connection() as conn:
@@ -1388,6 +1465,34 @@ class SnapshotsRepo:
         if tool_version is not None:
             sql += (
                 " WHERE NOT EXISTS (SELECT 1 FROM extractions x"
+                " WHERE x.snapshot_id = s.id AND x.tool_version = %s)"
+            )
+            params.append(tool_version)
+        sql += " ORDER BY s.id LIMIT %s"
+        params.append(limit)
+        with self.db.connection() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        return [_snapshot(row) for row in rows]
+
+    def list_extractable(
+        self, tool_version: str | None = None, limit: int = 100
+    ) -> list[SnapshotRecord]:
+        """Snapshots whose document is planned: family + entity in columns.
+
+        This is the extract queue after migration 0003. A document that is not
+        planned (no family, no entity, or ``needs_review``) is never selected, so
+        it cannot be silently extracted against the wrong entity.
+        """
+        sql = (
+            "SELECT s.* FROM snapshots s"
+            " JOIN documents d ON d.id = s.document_id"
+            " WHERE d.extraction_family IS NOT NULL AND d.entity_id IS NOT NULL"
+            " AND (d.plan_state IS NULL OR d.plan_state <> 'needs_review')"
+        )
+        params: list[Any] = []
+        if tool_version is not None:
+            sql += (
+                " AND NOT EXISTS (SELECT 1 FROM extractions x"
                 " WHERE x.snapshot_id = s.id AND x.tool_version = %s)"
             )
             params.append(tool_version)
@@ -1801,8 +1906,7 @@ class ScoresRepo:
         invalidated = self.invalidated_score_ids(entity_id)
         with self.db.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM scores WHERE entity_id = %s "
-                "ORDER BY computed_at DESC, id DESC",
+                "SELECT * FROM scores WHERE entity_id = %s ORDER BY computed_at DESC, id DESC",
                 (entity_id,),
             ).fetchall()
         for row in rows:
@@ -1814,9 +1918,7 @@ class ScoresRepo:
             return record
         return None
 
-    def list_for_entity(
-        self, entity_id: int, *, include_stale: bool = True
-    ) -> list[ScoreRecord]:
+    def list_for_entity(self, entity_id: int, *, include_stale: bool = True) -> list[ScoreRecord]:
         invalidated = self.invalidated_score_ids(entity_id)
         with self.db.connection() as conn:
             rows = conn.execute(
@@ -2066,6 +2168,76 @@ class LLMCallsRepo:
         return Decimal(row["total"]) if row else Decimal(0)
 
 
+class PipelineRunsRepo:
+    """The SQL run ledger: one row per stage execution (migration 0003)."""
+
+    def __init__(self, database: Database) -> None:
+        self.db = database
+
+    def record(self, run: PipelineRunCreate) -> PipelineRunRecord:
+        # Idempotent on run_id: re-recording the same run updates its terminal
+        # state instead of duplicating a row (a worker may retry a ledger write).
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO pipeline_runs
+                    (run_id, stage, started_at, finished_at, counts_json, errors_json, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id) DO UPDATE SET
+                    stage = EXCLUDED.stage,
+                    started_at = EXCLUDED.started_at,
+                    finished_at = EXCLUDED.finished_at,
+                    counts_json = EXCLUDED.counts_json,
+                    errors_json = EXCLUDED.errors_json,
+                    status = EXCLUDED.status
+                RETURNING *
+                """,
+                (
+                    run.run_id,
+                    run.stage,
+                    run.started_at,
+                    run.finished_at,
+                    _json(run.counts),
+                    _json(run.errors),
+                    run.status,
+                ),
+            ).fetchone()
+        assert row is not None
+        return _pipeline_run(row)
+
+    def get(self, run_id: str) -> PipelineRunRecord | None:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM pipeline_runs WHERE run_id = %s", (run_id,)
+            ).fetchone()
+        return _pipeline_run(row) if row else None
+
+    def list(
+        self,
+        *,
+        stage: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[PipelineRunRecord]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if stage is not None:
+            conditions.append("stage = %s")
+            params.append(stage)
+        if status is not None:
+            conditions.append("status = %s")
+            params.append(status)
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.append(limit)
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM pipeline_runs{where} "  # noqa: S608
+                "ORDER BY started_at DESC, run_id LIMIT %s",
+                tuple(params),
+            ).fetchall()
+        return [_pipeline_run(row) for row in rows]
+
+
 class CrawlFrontierRepo:
     def __init__(self, database: Database) -> None:
         self.db = database
@@ -2079,8 +2251,8 @@ class CrawlFrontierRepo:
                 """
                 INSERT INTO crawl_frontier
                     (url, domain, priority, next_allowed_at, state, http_method, http_body,
-                     request_headers)
-                VALUES (%s, %s, %s, COALESCE(%s, now()), %s, %s, %s, %s)
+                     request_headers, source_id, extraction_family, entity_id)
+                VALUES (%s, %s, %s, COALESCE(%s, now()), %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (url) DO UPDATE SET
                     domain = EXCLUDED.domain,
                     priority = EXCLUDED.priority,
@@ -2095,6 +2267,10 @@ class CrawlFrontierRepo:
                     http_body = COALESCE(EXCLUDED.http_body, crawl_frontier.http_body),
                     request_headers = COALESCE(EXCLUDED.request_headers,
                                                crawl_frontier.request_headers),
+                    source_id = COALESCE(EXCLUDED.source_id, crawl_frontier.source_id),
+                    extraction_family = COALESCE(EXCLUDED.extraction_family,
+                                                 crawl_frontier.extraction_family),
+                    entity_id = COALESCE(EXCLUDED.entity_id, crawl_frontier.entity_id),
                     updated_at = now()
                 RETURNING *
                 """,
@@ -2107,6 +2283,9 @@ class CrawlFrontierRepo:
                     item.http_method,
                     _json(item.http_body),
                     _json(item.request_headers),
+                    item.source_id,
+                    item.extraction_family,
+                    item.entity_id,
                 ),
             ).fetchone()
         assert row is not None
@@ -2422,7 +2601,8 @@ def _er_audit(row: dict[str, Any]) -> ERAuditRecord:
     )
 
 
-def _claim(row: dict[str, Any]) -> ClaimRecord:    return ClaimRecord(
+def _claim(row: dict[str, Any]) -> ClaimRecord:
+    return ClaimRecord(
         extraction_id=row["extraction_id"],
         entity_id=row["entity_id"],
         predicate=row["predicate"],
@@ -2437,6 +2617,18 @@ def _claim(row: dict[str, Any]) -> ClaimRecord:    return ClaimRecord(
         method=row["method"],
         superseded_by=row["superseded_by"],
         id=row["id"],
+    )
+
+
+def _pipeline_run(row: dict[str, Any]) -> PipelineRunRecord:
+    return PipelineRunRecord(
+        run_id=row["run_id"],
+        stage=row["stage"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        counts=row["counts_json"] or {},
+        errors=row["errors_json"] or [],
+        status=row["status"],
     )
 
 

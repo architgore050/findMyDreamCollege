@@ -1,0 +1,71 @@
+{
+  "content": {
+    "cohort_year": {
+      "value": "2024-25",
+      "unit": null,
+      "quote": "2024-25",
+      "char_start": 89,
+      "char_end": 96,
+      "confidence": 0.92
+    },
+    "eligible_count": {
+      "value": 120,
+      "unit": "count",
+      "quote": "Eligible students: 120",
+      "char_start": 97,
+      "char_end": 119,
+      "confidence": 0.95
+    },
+    "placed_count": {
+      "value": 96,
+      "unit": "count",
+      "quote": "Students placed: 96",
+      "char_start": 120,
+      "char_end": 139,
+      "confidence": 0.95
+    },
+    "placement_rate": {
+      "value": "80%",
+      "unit": "percent",
+      "quote": "Placement rate: 80%",
+      "char_start": 140,
+      "char_end": 159,
+      "confidence": 0.9
+    },
+    "median_salary": {
+      "value": 420000,
+      "unit": "INR",
+      "quote": "Median salary: INR 420000 per annum",
+      "char_start": 160,
+      "char_end": 195,
+      "confidence": 0.93
+    },
+    "highest_package": {
+      "value": null,
+      "unit": null,
+      "quote": null,
+      "char_start": null,
+      "char_end": null,
+      "confidence": null
+    },
+    "internship_counted_as_employment": {
+      "value": true,
+      "unit": null,
+      "quote": "Internships are included in the placement count.",
+      "char_start": 196,
+      "char_end": 244,
+      "confidence": 0.88
+    },
+    "outcome_basis": {
+      "value": "included in the placement count",
+      "unit": null,
+      "quote": "Internships are included in the placement count.",
+      "char_start": 196,
+      "char_end": 244,
+      "confidence": 0.7
+    }
+  },
+  "tokens_in": 640,
+  "tokens_out": 220,
+  "model": "recorded-placement-model"
+}

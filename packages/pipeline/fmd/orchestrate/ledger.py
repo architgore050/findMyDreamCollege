@@ -2,11 +2,17 @@
 
 Every ``fmd crawl|extract|score|worker`` run produces one :class:`RunSummary`
 that is printed to stdout as a single JSON object and persisted by a
-:class:`RunLedger`. No schema currently models a pipeline run, and migrations are
-out of this workstream's scope, so the default ledger is a JSON file under the
-snapshot root (``runs/<run_id>.json`` plus ``heartbeat.json`` for the worker).
-The interface is deliberately a protocol: a future ``pipeline_runs`` migration
-can implement :class:`RunLedger` without touching the orchestrator.
+:class:`RunLedger`.
+
+Two implementations, one interface:
+
+* :class:`SqlLedger` writes a ``pipeline_runs`` row (migration 0003). This is
+  the default whenever a database is available: the ledger is queryable in SQL
+  (counts and errors are JSONB, status is a closed set).
+* :class:`JsonFileLedger` writes ``runs/<run_id>.json`` plus
+  ``heartbeat.json`` under the snapshot root for offline runs and tests.
+
+The interface stays a protocol so a caller can inject either.
 """
 
 from __future__ import annotations
@@ -18,6 +24,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
+
+from fmd.db.repositories import PipelineRunCreate, PipelineRunsRepo
 
 
 def utcnow() -> datetime:
@@ -100,12 +108,47 @@ class RunLedger(Protocol):
 
 
 class NullLedger:
-    """Ledger used by dry runs and unit tests; persists nothing."""
+    """Ledger used by unit tests; persists nothing."""
 
     def record(self, summary: RunSummary) -> Path | None:
         return None
 
     def heartbeat(self, payload: dict[str, Any]) -> Path | None:
+        return None
+
+
+class SqlLedger:
+    """Persist each run as a ``pipeline_runs`` row (the production default).
+
+    The row is written even for a dry run, with ``status='dry_run'``: knowing
+    that a dry run happened is observability, not evidence, and it never enters
+    the evidence tables. ``record`` returns ``None`` because there is no file.
+    """
+
+    def __init__(self, database: Any = None, *, repo: Any | None = None) -> None:
+        if repo is None and database is None:
+            raise ValueError("SqlLedger needs a database or a PipelineRunsRepo")
+        self.repo = repo if repo is not None else PipelineRunsRepo(database)
+
+    def record(self, summary: RunSummary) -> Path | None:
+        if summary.finished_at is None:
+            summary.finish()
+        status = "dry_run" if summary.dry_run else ("failed" if summary.failed else "succeeded")
+        self.repo.record(
+            PipelineRunCreate(
+                run_id=summary.run_id,
+                stage=summary.stage,
+                started_at=summary.started_at,
+                finished_at=summary.finished_at,
+                counts=dict(summary.counts),
+                errors=list(summary.failures),
+                status=status,
+            )
+        )
+        return None
+
+    def heartbeat(self, payload: dict[str, Any]) -> Path | None:
+        # Worker liveness is process-local; the run rows are the durable record.
         return None
 
 

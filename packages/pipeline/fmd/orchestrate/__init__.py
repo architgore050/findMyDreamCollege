@@ -4,7 +4,7 @@ Public surface:
 
 * :class:`Orchestrator` — ``crawl``, ``extract``, ``score`` and ``worker``.
 * :class:`RunSummary` — one JSON-serialisable run record.
-* :class:`JsonFileLedger` / :class:`NullLedger` — run persistence.
+* :class:`JsonFileLedger` / :class:`SqlLedger` — run persistence.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from fmd.orchestrate.ledger import (
     NullLedger,
     RunLedger,
     RunSummary,
+    SqlLedger,
 )
 from fmd.orchestrate.orchestrator import OrchestrationError, Orchestrator
 
@@ -24,4 +25,5 @@ __all__ = [
     "Orchestrator",
     "RunLedger",
     "RunSummary",
+    "SqlLedger",
 ]

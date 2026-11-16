@@ -254,6 +254,10 @@ sources:
     adapter: naac
     enabled: true
     params:
+      # Registry-declared extraction family (migration 0003 / fmd.plan): this
+      # source only publishes accreditation results, so the planner does not
+      # need to guess from URL/text signals.
+      extraction_family: accreditation
       listing_url: https://naac.gov.in/index.php/en/19-quick-links/62-accreditationresults
       pdf_href_pattern: '/images/docs/AccreditationResults/'
       link_text_pattern: '(?i)health scien|1st cycle|2nd cycle|CGPA'
@@ -339,6 +343,7 @@ sources:
     adapter: state_counselling
     enabled: true
     params:
+      extraction_family: seat_matrix
       listing_urls:
         - https://cetcell.mahacet.org/notices/
       pdf_href_pattern: '\.pdf$'
@@ -360,6 +365,7 @@ sources:
     adapter: state_counselling
     enabled: true
     params:
+      extraction_family: seat_matrix
       listing_urls:
         - https://cetonline.karnataka.gov.in/kea
       pdf_href_pattern: '\.pdf$'
@@ -379,6 +385,7 @@ sources:
     adapter: state_counselling
     enabled: true
     params:
+      extraction_family: seat_matrix
       listing_urls:
         - https://www.tnhealth.tn.gov.in/notifications.php
       pdf_href_pattern: '\.pdf$'
@@ -395,6 +402,7 @@ sources:
     adapter: state_counselling
     enabled: true
     params:
+      extraction_family: seat_matrix
       listing_urls:
         - https://lbscentre.kerala.gov.in/orders
         - https://lbscentre.kerala.gov.in/
@@ -412,6 +420,7 @@ sources:
     adapter: state_counselling
     enabled: true
     params:
+      extraction_family: seat_matrix
       listing_urls:
         - https://wbjeeb.nic.in/jenpas-ug/
       pdf_href_pattern: '\.pdf$'
@@ -428,6 +437,7 @@ sources:
     adapter: state_counselling
     enabled: true
     params:
+      extraction_family: seat_matrix
       listing_urls:
         - https://bfuhs.ac.in/index1.aspx
         - https://examination.bfuhsonline.ac.in/cos/noticesview.aspx
@@ -445,6 +455,7 @@ sources:
     adapter: state_counselling
     enabled: true
     params:
+      extraction_family: seat_matrix
       listing_urls:
         - https://ojee.nic.in/
       pdf_href_pattern: '\.pdf$'
@@ -462,6 +473,7 @@ sources:
     adapter: state_counselling
     enabled: true
     params:
+      extraction_family: seat_matrix
       listing_urls:
         - https://paramedical.mponline.gov.in/
       pdf_href_pattern: '\.pdf$'
@@ -483,6 +495,7 @@ sources:
     adapter: state_counselling
     enabled: true
     params:
+      extraction_family: seat_matrix
       listing_urls:
         - https://abvmuup.edu.in/admission-paramedical.php
       pdf_href_pattern: '\.pdf$'
@@ -501,6 +514,7 @@ sources:
     adapter: state_counselling
     enabled: true
     params:
+      extraction_family: seat_matrix
       listing_urls:
         - https://ruhsraj.org/
       pdf_href_pattern: '\.pdf$'
@@ -519,6 +533,7 @@ sources:
     adapter: state_counselling
     enabled: true
     params:
+      extraction_family: seat_matrix
       listing_urls:
         - https://www.knruhs.telangana.gov.in/admission-notification/
       pdf_href_pattern: '\.pdf$'
@@ -552,6 +567,7 @@ sources:
     adapter: fee_regulator
     enabled: true
     params:
+      extraction_family: fee_structure
       order_href_pattern: '(?i)\.pdf($|\?)'
       order_text_pattern: '(?i)fee|order|notification|gazette'
       assume_scanned: true

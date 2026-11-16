@@ -31,7 +31,7 @@ from fmd.extract.pdf import (
     extract_document,
 )
 from fmd.extract.prompts import load_prompt, user_message
-from fmd.extract.schemas import FamilyDocument, schema_for
+from fmd.extract.schemas import FamilyDocument, UnknownFamily, schema_for
 from fmd.extract.validate import Bands, Rejection, SpanRewrite, validate_document
 from fmd.llm import ModelRouter
 from fmd.store import SnapshotStore
@@ -48,6 +48,31 @@ class ExtractTarget:
     snapshot_id: int
     entity_id: int
     family: str
+
+
+def target_for_document(document: Any, snapshot_id: int) -> tuple[ExtractTarget | None, str | None]:
+    """Build a target from a document's plan columns (``documents.*``, 0003).
+
+    This is the only seam that knows how a document becomes an extraction
+    target. Returns ``(target, None)`` or ``(None, reason_code)``; a reason code
+    is a stable string (``missing_family``, ``unresolved_entity``,
+    ``needs_review``, ``unsupported_family:<name>``) so abstentions are countable.
+    """
+    family = getattr(document, "extraction_family", None)
+    if not family:
+        return None, "missing_family"
+    entity_id = getattr(document, "entity_id", None)
+    if entity_id is None:
+        state = getattr(document, "plan_state", None)
+        return None, "needs_review" if state == "needs_review" else "unresolved_entity"
+    try:
+        schema_for(str(family))
+    except UnknownFamily:
+        return None, f"unsupported_family:{family}"
+    return (
+        ExtractTarget(snapshot_id=snapshot_id, entity_id=int(entity_id), family=str(family)),
+        None,
+    )
 
 
 @dataclass
