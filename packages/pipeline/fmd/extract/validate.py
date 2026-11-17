@@ -6,10 +6,24 @@ turns that quote into a claim deterministically:
 1. **Resolve the span.** Exact occurrence first; if absent, canonicalise both
    sides (NFKC, unified quotes/dashes, Devanagari digits to ASCII, ``₹``/``Rs.``/
    ``Rs``/``INR`` to ``INR``, Indian digit grouping removed, whitespace
-   collapsed) and retry. Only a **unique** occurrence is accepted: several
-   matches are ``ambiguous_span`` and resolve to UNKNOWN, never a first-match
-   guess. Zero matches get exactly one repair pass (strip edge punctuation /
-   take the longest line) and then abstain.
+   collapsed) and retry. Only a **unique** occurrence is accepted. Several
+   matches are disambiguated deterministically by the field's optional
+   ``context`` (the row label / column header / institute name):
+
+   * ``unique`` — the quote occurs exactly once;
+   * ``context_row`` — the quote is ambiguous but exactly one of its
+     occurrences lies inside the table block whose anchor cell is the context
+     (a block is the run of rows under one institute/heading cell, built from
+     the acquisition table cells when available);
+   * ``context_window`` — no table matched, but exactly one occurrence of the
+     quote lies on the same line as, or within ``CONTEXT_WINDOW_CHARS`` of,
+     exactly one occurrence of the context;
+   * ``none`` — context was absent or did not disambiguate; the field abstains.
+
+   A context that names a real table block but does not contain the quote is a
+   contradiction and is rejected, never retried against a looser window. Zero
+   matches get exactly one repair pass (strip edge punctuation / take the
+   longest line) and then abstain.
 2. **Derive the value.** The resolved span is parsed by a type-specific parser
    (count, money+period, percentage, integer, date, grade, boolean, text). No
    model-supplied number, unit or conversion is ever trusted.
@@ -28,7 +42,8 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -47,6 +62,7 @@ RejectionReason = Literal[
     "missing_quote",
     "ambiguous_span",
     "unresolved_span",
+    "uncertain_column_header",
     "unparseable_value",
     "unparseable_unit",
     "missing_denominator",
@@ -56,6 +72,7 @@ RejectionReason = Literal[
 ]
 
 OutcomeKind = Literal["resolved", "ambiguous", "unresolved", "rejected", "abstained"]
+Disambiguation = Literal["unique", "context_row", "context_window", "none"]
 
 
 # --------------------------------------------------------------------------- records
@@ -160,6 +177,7 @@ class FieldOutcome:
     char_start: int | None = None
     char_end: int | None = None
     repaired: bool = False
+    disambiguation: Disambiguation = "none"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -171,6 +189,7 @@ class FieldOutcome:
             "char_start": self.char_start,
             "char_end": self.char_end,
             "repaired": self.repaired,
+            "disambiguation": self.disambiguation,
         }
 
 
@@ -381,14 +400,49 @@ class SpanMatch:
 
 
 @dataclass(frozen=True)
+class RowIdentity:
+    """Which table row a resolved value belongs to (provenance, not a guess)."""
+
+    table_index: int
+    table_page: int | None
+    row_index: int
+    row_label: str | None
+    column_header: str | None
+    value_cell: str | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "table_index": self.table_index,
+            "table_page": self.table_page,
+            "row_index": self.row_index,
+            "row_label": self.row_label,
+            "column_header": self.column_header,
+            "value_cell": self.value_cell,
+        }
+
+
+@dataclass(frozen=True)
 class SpanResolution:
     status: Literal["resolved", "ambiguous", "unresolved"]
     match: SpanMatch | None = None
     detail: str = ""
+    disambiguation: Disambiguation = "none"
+    context_quote: str | None = None
+    context_span: tuple[int, int] | None = None
+    row: RowIdentity | None = None
+    row_span: tuple[int, int] | None = None
+    column_uncertain: bool = False
 
     @property
     def repaired(self) -> bool:
         return self.match is not None and self.match.mode == "repaired"
+
+
+#: Same-line or +/- this many characters: the fallback block for a quote whose
+#: context is not a table cell. Deliberately small: a row is local, a page is not.
+CONTEXT_WINDOW_CHARS = 200
+
+_NUMERIC_CELL = re.compile(r"^\d[\d,]*(?:\.\d+)?\s*%?$")
 
 
 def _ratio(left: str, right: str) -> float:
@@ -460,34 +514,465 @@ def _repair_candidates(quote: str) -> list[str]:
     return unique
 
 
-def resolve_quote(text: str, quote: str, *, repair: bool = True) -> SpanResolution:
-    """Resolve a quote to a unique document span, deterministically."""
+# --------------------------------------------------------------------------- context
+# A table row is only meaningful with its row header. The model supplies
+# ``context``; this block turns it into a location, never a guess.
+#
+# Tables arrive from acquisition as duck-typed objects (or mappings) with
+# ``rows``, ``page``, ``cells`` and ``column_header_uncertain`` so extraction
+# stays independent of the acquisition package's concrete classes.
+
+
+def _attr(item: Any, key: str, default: Any = None) -> Any:
+    if isinstance(item, Mapping):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def _cell_norm(value: Any) -> str:
+    text, _ = canonicalise(str(value or ""))
+    return text.strip()
+
+
+def _rows_of(table: Any) -> list[list[str]]:
+    rows = _attr(table, "rows", None) or []
+    return [[str(cell) for cell in row] for row in rows]
+
+
+def _is_numeric_cell(value: str | None) -> bool:
+    return bool(value and _NUMERIC_CELL.match(_cell_norm(value)))
+
+
+def _occurrences(text: str, needle: str) -> list[tuple[int, int]]:
+    """Every occurrence, exact first, then canonical (mapped to source offsets)."""
+    if not needle:
+        return []
+    exact: list[tuple[int, int]] = []
+    start = text.find(needle)
+    while start != -1:
+        exact.append((start, start + len(needle)))
+        start = text.find(needle, start + 1)
+    if exact:
+        return exact
+    canonical_text, mapping = canonicalise(text)
+    canonical_needle, _ = canonicalise(needle)
+    if not canonical_needle or not canonical_text:
+        return []
+    hits: list[tuple[int, int]] = []
+    start = canonical_text.find(canonical_needle)
+    while start != -1 and start + len(canonical_needle) <= len(mapping):
+        span = (mapping[start][0], mapping[start + len(canonical_needle) - 1][1])
+        if span not in hits:
+            hits.append(span)
+        start = canonical_text.find(canonical_needle, start + 1)
+    return hits
+
+
+def _quote_occurrences(text: str, quote: str) -> list[tuple[int, int, str]]:
+    """Quote hits as ``(start, end, mode)``: exact hits, else normalised hits."""
+    hits: list[tuple[int, int, str]] = []
+    start = text.find(quote)
+    while start != -1:
+        hits.append((start, start + len(quote), "exact"))
+        start = text.find(quote, start + 1)
+    if hits:
+        return hits
+    for start, end in _occurrences(text, quote):
+        hits.append((start, end, "normalised"))
+    return hits
+
+
+@dataclass(frozen=True)
+class _TableBlock:
+    table_index: int
+    page: int | None
+    context_text: str
+    start: int
+    end: int
+    rows: list[list[str]]
+    first_row: int
+    last_row: int
+    anchor_col: int
+    column_header_uncertain: bool
+
+
+def _next_anchor_text(tables: list[Any], table_index: int, last_row: int, col: int) -> str | None:
+    """The cell that closes this block: next row's anchor, else the next table."""
+    rows = _rows_of(tables[table_index])
+    if last_row < len(rows) and col < len(rows[last_row]) and _cell_norm(rows[last_row][col]):
+        return rows[last_row][col]
+    for index in range(table_index + 1, len(tables)):
+        for row in _rows_of(tables[index]):
+            for cell in row:
+                if _cell_norm(cell):
+                    return cell
+    return None
+
+
+def _table_block(text: str, context: str, tables: list[Any]) -> _TableBlock | None:
+    """Locate the table block whose anchor cell is exactly this context.
+
+    A block starts at the row that prints the header cell (institute, group,
+    scheme) and runs until the same column is filled again. Exactly one such
+    anchor may match: a context that names two blocks does not disambiguate.
+    """
+    context_norm = _cell_norm(context)
+    if not context_norm:
+        return None
+    anchors: list[tuple[int, int, int]] = []
+    for table_index, table in enumerate(tables):
+        for row_index, row in enumerate(_rows_of(table)):
+            for col_index, cell in enumerate(row):
+                if _cell_norm(cell) == context_norm:
+                    anchors.append((table_index, row_index, col_index))
+    if len(anchors) != 1:
+        return None
+    table_index, row_index, col_index = anchors[0]
+    rows = _rows_of(tables[table_index])
+    last_row = len(rows)
+    for candidate in range(row_index + 1, len(rows)):
+        row = rows[candidate]
+        if col_index < len(row) and _cell_norm(row[col_index]):
+            last_row = candidate
+            break
+    context_text = rows[row_index][col_index]
+    context_hits = _occurrences(text, context_text)
+    if len(context_hits) != 1:
+        return None
+    start = context_hits[0][0]
+    end = len(text)
+    anchor = _next_anchor_text(tables, table_index, last_row, col_index)
+    if anchor:
+        boundary = text.find(anchor, start)
+        if boundary == -1:
+            boundary = text.find(_cell_norm(anchor), start)
+        if boundary > start:
+            end = boundary
+    if end <= start:
+        return None
+    return _TableBlock(
+        table_index=table_index,
+        page=_attr(tables[table_index], "page", None),
+        context_text=context_text,
+        start=start,
+        end=end,
+        rows=rows,
+        first_row=row_index,
+        last_row=last_row,
+        anchor_col=col_index,
+        column_header_uncertain=bool(_attr(tables[table_index], "column_header_uncertain", False)),
+    )
+
+
+def _column_header_for(
+    tables: list[Any], table_index: int, row_index: int, value_cell: str | None
+) -> tuple[str | None, bool]:
+    """Header text and uncertainty for the row's numeric cell.
+
+    ``column_header_uncertain`` is acquisition's merged-cell safety flag. When
+    per-cell links exist they decide cell by cell; only when a table carries no
+    links does the table-wide flag apply.
+    """
+    table = tables[table_index]
+    links = _attr(table, "cells", None) or ()
+    if not links:
+        return None, bool(_attr(table, "column_header_uncertain", False))
+    wanted = _cell_norm(value_cell)
+    row_links = [
+        link
+        for link in links
+        if int(_attr(link, "row", -1)) == row_index
+        and _is_numeric_cell(str(_attr(link, "text", "") or ""))
+        and (not wanted or _cell_norm(_attr(link, "text", "")) == wanted)
+    ]
+    if not row_links:
+        return None, False
+    link = row_links[-1]
+    return (
+        _attr(link, "header_text", None),
+        bool(_attr(link, "ambiguous", False)),
+    )
+
+
+def _identity_for_row(
+    text: str,
+    tables: list[Any],
+    table_index: int,
+    row_index: int,
+    row: list[str],
+    quote: str,
+    match_span: tuple[int, int],
+    search_from: int,
+) -> tuple[RowIdentity, tuple[int, int] | None, bool]:
+    """Build the row identity (label, value cell, header) for one known row."""
+    labels = [cell.strip() for cell in row if cell.strip() and not _is_numeric_cell(cell)]
+    row_label = labels[-1] if labels else None
+    tokens = _cell_norm(quote).split()
+    last_token = tokens[-1] if tokens else ""
+    numerics = [cell.strip() for cell in row if _is_numeric_cell(cell)]
+    value_cell = next(
+        (cell for cell in reversed(numerics) if _cell_norm(cell) == last_token),
+        numerics[-1] if numerics else None,
+    )
+    header, uncertain = _column_header_for(tables, table_index, row_index, value_cell)
+    row_span: tuple[int, int] | None = None
+    if row_label:
+        position = text.rfind(row_label, search_from, match_span[1])
+        if position != -1:
+            row_span = (position, match_span[1])
+    identity = RowIdentity(
+        table_index=table_index,
+        table_page=_attr(tables[table_index], "page", None),
+        row_index=row_index,
+        row_label=row_label,
+        column_header=header,
+        value_cell=value_cell,
+    )
+    return identity, row_span, uncertain
+
+
+def _row_identity(
+    text: str, block: _TableBlock, quote: str, tables: list[Any], match_span: tuple[int, int]
+) -> tuple[RowIdentity | None, tuple[int, int] | None, bool]:
+    """Which row of the block the matched span belongs to, plus its provenance."""
+    quote_norm = _cell_norm(quote)
+    candidates: list[int] = []
+    for row_index in range(block.first_row, block.last_row):
+        joined = " ".join(_cell_norm(cell) for cell in block.rows[row_index] if _cell_norm(cell))
+        if quote_norm and quote_norm in joined:
+            candidates.append(row_index)
+    if len(candidates) != 1:
+        return None, None, False
+    row_index = candidates[0]
+    identity, row_span, uncertain = _identity_for_row(
+        text,
+        tables,
+        block.table_index,
+        row_index,
+        block.rows[row_index],
+        quote,
+        match_span,
+        block.start,
+    )
+    return identity, row_span, uncertain
+
+
+def locate_row(
+    text: str, quote: str, tables: list[Any], match_span: tuple[int, int]
+) -> tuple[RowIdentity, tuple[int, int] | None, bool] | None:
+    """Attach row provenance to an already-unique span, if exactly one row holds it.
+
+    Used for numeric fields so the value is parsed from the row's numeric cell
+    (never the serial number) and so an uncertain column header still rejects
+    the claim. More than one matching row ⇒ no attribution (the span was unique
+    by itself; guessing a row would add nothing).
+    """
+    quote_norm = _cell_norm(quote)
+    if not quote_norm:
+        return None
+    candidates: list[tuple[int, int]] = []
+    for table_index, table in enumerate(tables):
+        for row_index, row in enumerate(_rows_of(table)):
+            joined = " ".join(_cell_norm(cell) for cell in row if _cell_norm(cell))
+            if quote_norm in joined:
+                candidates.append((table_index, row_index))
+    if len(candidates) != 1:
+        return None
+    table_index, row_index = candidates[0]
+    rows = _rows_of(tables[table_index])
+    return _identity_for_row(
+        text,
+        tables,
+        table_index,
+        row_index,
+        rows[row_index],
+        quote,
+        match_span,
+        0,
+    )
+
+
+def _resolve_in_block(
+    text: str, quote: str, block: _TableBlock, tables: list[Any], detail: str
+) -> SpanResolution:
+    hits = _quote_occurrences(text, quote)
+    inside = [hit for hit in hits if block.start <= hit[0] and hit[1] <= block.end]
+    if len(inside) != 1:
+        if not inside:
+            reason = (
+                f"context {block.context_text!r} names a table block that does not "
+                "contain the quote"
+            )
+        else:
+            reason = (
+                f"{len(inside)} occurrences of the quote fall in the block headed by "
+                f"{block.context_text!r}"
+            )
+        return SpanResolution("ambiguous", detail=f"{detail}; {reason}")
+    start, end, mode = inside[0]
+    matched = text[start:end]
+    identity, row_span, uncertain = _row_identity(text, block, quote, tables, (start, end))
+    return SpanResolution(
+        "resolved",
+        SpanMatch(
+            start,
+            end,
+            matched,
+            mode,  # type: ignore[arg-type]
+            1.0 if mode == "exact" else _ratio(quote, matched),
+        ),
+        disambiguation="context_row",
+        context_quote=block.context_text,
+        context_span=(block.start, block.start + len(block.context_text)),
+        row=identity,
+        row_span=row_span,
+        column_uncertain=uncertain,
+    )
+
+
+def _same_line(text: str, start: int, end: int, position: int) -> bool:
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    return line_start <= position < line_end
+
+
+def _resolve_in_window(
+    text: str,
+    quote: str,
+    hits: list[tuple[int, int, str]],
+    context: str,
+    detail: str,
+) -> SpanResolution:
+    context_hits = _occurrences(text, context)
+    if not context_hits:
+        return SpanResolution(
+            "ambiguous", detail=f"{detail}; context {context!r} is not in the text"
+        )
+    candidates: list[tuple[tuple[int, int, str], tuple[int, int]]] = []
+    for hit in hits:
+        near = [
+            span
+            for span in context_hits
+            if _same_line(text, hit[0], hit[1], span[0])
+            or (
+                hit[0] - CONTEXT_WINDOW_CHARS <= span[0]
+                and span[1] <= hit[1] + CONTEXT_WINDOW_CHARS
+            )
+        ]
+        if len(near) == 1:
+            candidates.append((hit, near[0]))
+    if len(candidates) != 1:
+        found = len(candidates)
+        reason = (
+            "no occurrence of the quote is next to exactly one occurrence of the context"
+            if found == 0
+            else f"{found} occurrences of the quote are next to the context"
+        )
+        return SpanResolution("ambiguous", detail=f"{detail}; {reason}")
+    (start, end, mode), context_span = candidates[0]
+    matched = text[start:end]
+    return SpanResolution(
+        "resolved",
+        SpanMatch(
+            start,
+            end,
+            matched,
+            mode,  # type: ignore[arg-type]
+            1.0 if mode == "exact" else _ratio(quote, matched),
+        ),
+        disambiguation="context_window",
+        context_quote=context,
+        context_span=context_span,
+    )
+
+
+def _resolve_ambiguous(
+    text: str,
+    quote: str,
+    detail: str,
+    *,
+    context: str | None,
+    tables: list[Any] | None,
+) -> SpanResolution:
+    context_text = (context or "").strip()
+    if not context_text:
+        return SpanResolution("ambiguous", detail=f"{detail}; no row context was supplied")
+    hits = _quote_occurrences(text, quote)
+    if not hits:
+        return SpanResolution("ambiguous", detail=detail)
+    if tables:
+        block = _table_block(text, context_text, tables)
+        if block is not None:
+            return _resolve_in_block(text, quote, block, tables, detail)
+    return _resolve_in_window(text, quote, hits, context_text, detail)
+
+
+def _tag(resolution: SpanResolution, rule: Disambiguation) -> SpanResolution:
+    return SpanResolution(
+        resolution.status,
+        resolution.match,
+        resolution.detail,
+        disambiguation=rule,
+        context_quote=resolution.context_quote,
+        context_span=resolution.context_span,
+        row=resolution.row,
+        row_span=resolution.row_span,
+        column_uncertain=resolution.column_uncertain,
+    )
+
+
+def resolve_quote(
+    text: str,
+    quote: str,
+    *,
+    context: str | None = None,
+    tables: list[Any] | None = None,
+    repair: bool = True,
+) -> SpanResolution:
+    """Resolve a quote to a unique document span, deterministically.
+
+    Precedence: an exact unique quote; a canonical unique quote; the optional
+    ``context`` (table block first, bounded window second). Nothing here tries
+    a second candidate after the first fails: a row that cannot be located is
+    ``ambiguous_span``.
+    """
     raw = (quote or "").strip()
     if not raw:
         return SpanResolution("unresolved", detail="empty quote")
     resolution = _match_exact(text, raw)
-    if resolution.status != "unresolved":
-        return resolution
-    resolution = _match_canonical(text, raw)
-    if resolution.status != "unresolved":
-        return resolution
+    if resolution.status == "resolved":
+        return _tag(resolution, "unique")
+    if resolution.status == "unresolved":
+        canonical = _match_canonical(text, raw)
+        if canonical.status == "resolved":
+            return _tag(canonical, "unique")
+        resolution = canonical
+    if resolution.status == "ambiguous":
+        return _resolve_ambiguous(text, raw, resolution.detail, context=context, tables=tables)
     if not repair:
         return resolution
     for candidate in _repair_candidates(raw):
         for helper in (_match_exact, _match_canonical):
             repaired = helper(text, candidate)
             if repaired.status == "ambiguous":
-                return repaired
+                return _resolve_ambiguous(
+                    text, raw, repaired.detail, context=context, tables=tables
+                )
             if repaired.status == "resolved" and repaired.match is not None:
-                return SpanResolution(
-                    "resolved",
-                    SpanMatch(
-                        repaired.match.start,
-                        repaired.match.end,
-                        repaired.match.quote,
-                        "repaired",
-                        repaired.match.ratio,
+                return _tag(
+                    SpanResolution(
+                        "resolved",
+                        SpanMatch(
+                            repaired.match.start,
+                            repaired.match.end,
+                            repaired.match.quote,
+                            "repaired",
+                            repaired.match.ratio,
+                        ),
                     ),
+                    "unique",
                 )
     return resolution
 
@@ -724,6 +1209,31 @@ class _ResolvedField:
         return self.resolution.match.quote if self.resolution.match else None
 
 
+_NUMERIC_UNIT_KINDS = frozenset({"count", "percent", "hours", "months", "years"})
+#: Kinds whose span is attributed to a table row (value cell + column header).
+#: Money is included for the header-safety gate, but its value is still parsed
+#: from the whole quote: a money cell is often printed without its currency,
+#: which lives in the column header.
+_ROW_SCOPED_UNIT_KINDS = _NUMERIC_UNIT_KINDS | {"money"}
+
+
+def _value_span_text(entry: _ResolvedField) -> str:
+    """The span the value is parsed from.
+
+    A row-scoped quote legitimately contains the row label ("3. B.Sc. ... 20"),
+    and the first number in that string is the serial number, not the intake.
+    When the resolver identified the row's numeric cell, the value is parsed
+    from **that cell**, never from the first digit in the quote.
+    """
+    match = entry.resolution.match
+    if match is None:
+        return ""
+    row = entry.resolution.row
+    if row is not None and row.value_cell and entry.spec.unit_kind in _NUMERIC_UNIT_KINDS:
+        return row.value_cell
+    return match.quote
+
+
 def validate_document(
     document: FamilyDocument,
     text: str,
@@ -735,8 +1245,14 @@ def validate_document(
     fuzzy_threshold: float | None = None,
     default_confidence: float = 0.5,
     repair: bool = True,
+    tables: list[Any] | None = None,
 ) -> ValidationResult:
     """Turn quote-first guided JSON into validated ``ClaimCreate`` rows.
+
+    ``tables`` are the acquisition table objects for this document (``rows``,
+    ``page``, ``cells``, ``column_header_uncertain``). They are used only to
+    turn an ambiguous quote plus its row ``context`` into one location, and to
+    refuse a value whose column header is uncertain.
 
     ``fuzzy_threshold`` is accepted for API stability but no longer used: the new
     contract never searches fuzzy windows, because a near-match is not a span.
@@ -758,7 +1274,13 @@ def validate_document(
                 )
             )
             continue
-        resolution = resolve_quote(text, str(extracted.quote), repair=repair)
+        resolution = resolve_quote(
+            text,
+            str(extracted.quote),
+            context=extracted.context,
+            tables=tables,
+            repair=repair,
+        )
         confidence = (
             extracted.confidence if extracted.confidence is not None else default_confidence
         )
@@ -787,6 +1309,48 @@ def validate_document(
                 + "; abstaining after one repair pass",
                 quote=extracted.quote,
             )
+        elif (
+            tables
+            and resolution.row is None
+            and spec.unit_kind in _ROW_SCOPED_UNIT_KINDS
+            and resolution.match is not None
+        ):
+            # A unique quote may still print a serial number before the value,
+            # and its column may still be ambiguous. Attribute the row, if one
+            # row holds this exact span.
+            located = locate_row(
+                text,
+                str(extracted.quote),
+                tables,
+                (resolution.match.start, resolution.match.end),
+            )
+            if located is not None:
+                identity, row_span, uncertain = located
+                resolution = replace(
+                    resolution,
+                    row=identity,
+                    row_span=row_span,
+                    column_uncertain=uncertain,
+                )
+                entry.resolution = resolution
+        if (
+            entry.rejection is None
+            and resolution.column_uncertain
+            and spec.unit_kind not in {"text", "date", "boolean", "grade"}
+        ):
+            # A resolving quote that points at the wrong column is worse than
+            # null: the number would be attributed to a field it does not belong to.
+            entry.rejection = Rejection(
+                field=name,
+                predicate=spec.predicate,
+                reason="uncertain_column_header",
+                detail=(
+                    "the numeric cell's column header association is uncertain "
+                    f"(acquisition flag); row context {resolution.context_quote!r} "
+                    "is not a safe attribution"
+                ),
+                quote=resolution.match.quote if resolution.match else extracted.quote,
+            )
         resolved.append(entry)
         if (
             entry.rejection is None
@@ -813,7 +1377,7 @@ def validate_document(
             continue
         entry.derived = _derive(
             entry.spec,
-            entry.resolution.match.quote,
+            _value_span_text(entry),
             default_currency=default_currency,
         )
         if entry.derived.reason is not None:
@@ -896,6 +1460,7 @@ def _outcome(entry: _ResolvedField) -> FieldOutcome:
         char_start=match.start if match is not None else None,
         char_end=match.end if match is not None else None,
         repaired=entry.resolution.repaired,
+        disambiguation=entry.resolution.disambiguation,
     )
 
 
@@ -1039,6 +1604,20 @@ def _build_claim(  # noqa: PLR0913 - explicit gates are clearer than a bag of st
         )
 
     qualifier: dict[str, Any] = dict(context)
+    qualifier["disambiguation"] = entry.resolution.disambiguation
+    if entry.resolution.context_quote:
+        qualifier["context_quote"] = entry.resolution.context_quote
+    if entry.resolution.context_span is not None:
+        qualifier["context_char_start"], qualifier["context_char_end"] = (
+            entry.resolution.context_span
+        )
+    if entry.resolution.row is not None:
+        qualifier["row"] = entry.resolution.row.as_dict()
+    if entry.resolution.row_span is not None:
+        qualifier["row_char_start"], qualifier["row_char_end"] = entry.resolution.row_span
+    value_text = _value_span_text(entry)
+    if value_text and value_text != match.quote:
+        qualifier["value_quote"] = value_text
     if spec.is_rate:
         denominator = _denominator_lookup(entry, resolved)
         if denominator is None:

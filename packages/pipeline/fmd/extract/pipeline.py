@@ -184,6 +184,7 @@ class ExtractPipeline:
             bands=self.bands,
             observed_at=observed_at,
             default_confidence=self.default_confidence,
+            tables=doc.tables,
         )
         adjudications = self._adjudicate(validation.claims, doc.text)
 
@@ -270,21 +271,34 @@ def _attach_bbox_provenance(claim: ClaimCreate, doc: ExtractedDoc) -> ClaimCreat
     The quote already resolved against the canonical text in ``validate``; this
     projects the same offsets onto the source geometry. A multi-span quote keeps
     every box; it is never collapsed into one box that covers the gap.
+
+    A row-scoped claim also carries the **row** span (label cell through value
+    cell), so a reviewer can see that this number belongs to this row.
     """
-    if doc.canonical is None or claim.char_start is None or claim.char_end is None:
-        return claim
-    hits = doc.canonical.bboxes(claim.char_start, claim.char_end)
-    if not hits:
+    if doc.canonical is None:
         return claim
     qualifier = dict(claim.qualifier or {})
-    qualifier["bboxes"] = [hit.as_dict() for hit in hits]
-    qualifier["bbox"] = list(hits[0].bbox)
-    qualifier["page_no"] = hits[0].page_no
-    granularities = {hit.granularity for hit in hits}
-    qualifier["bbox_granularity"] = (
-        hits[0].granularity if len(granularities) == 1 else doc.bbox_granularity
-    )
-    qualifier["bbox_multi_span"] = len(hits) > 1
+    if claim.char_start is not None and claim.char_end is not None:
+        hits = doc.canonical.bboxes(claim.char_start, claim.char_end)
+        if hits:
+            qualifier["bboxes"] = [hit.as_dict() for hit in hits]
+            qualifier["bbox"] = list(hits[0].bbox)
+            qualifier["page_no"] = hits[0].page_no
+            granularities = {hit.granularity for hit in hits}
+            qualifier["bbox_granularity"] = (
+                hits[0].granularity if len(granularities) == 1 else doc.bbox_granularity
+            )
+            qualifier["bbox_multi_span"] = len(hits) > 1
+    row_start = qualifier.get("row_char_start")
+    row_end = qualifier.get("row_char_end")
+    if isinstance(row_start, int) and isinstance(row_end, int) and row_end > row_start:
+        row_hits = doc.canonical.bboxes(row_start, row_end)
+        if row_hits:
+            qualifier["row_bboxes"] = [hit.as_dict() for hit in row_hits]
+            qualifier["row_bbox"] = list(row_hits[0].bbox)
+            pages = {hit.page_no for hit in row_hits}
+            if len(pages) == 1:
+                qualifier["row_page_no"] = row_hits[0].page_no
     if doc.tables:
         qualifier["table_cells_uncertain"] = any(
             table.column_header_uncertain for table in doc.tables

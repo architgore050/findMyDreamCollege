@@ -15,22 +15,22 @@ def test_full_offline_eval_run_is_deterministic() -> None:
     assert first.report == second.report
     report = first.report
     assert report["ok"] is True
-    assert report["golden"]["entries"] == 4
-    assert report["golden"]["verified_rows"] == 14
-    assert report["golden"]["unverified_rows"] == 1
+    assert report["golden"]["entries"] == 5
+    assert report["golden"]["verified_rows"] == 15
+    assert report["golden"]["unverified_rows"] == 2
     assert report["golden"]["measured_entries"] == 1
-    assert report["golden"]["unmeasured_verified_rows"] == 6
+    assert report["golden"]["unmeasured_verified_rows"] == 7
     assert report["extraction"]["evaluated"] == 8
     assert report["extraction"]["f1"] == 1.0
     assert report["extraction"]["unit_normalisation_accuracy"] == 1.0
     assert report["extraction"]["abstention_correctness"] == 1.0
-    assert report["extraction"]["unverified_excluded"] == 1
+    assert report["extraction"]["unverified_excluded"] == 2
     assert report["rejection"]["expected_rejects"] == 0
     assert report["provenance"]["coverage"] == 1.0
     assert report["provenance"]["total"] == 4
     assert report["provenance"]["resolved"] == 4
     assert report["interval_coverage"]["measurable"] is False
-    assert report["golden_traceability"]["citation_only"] == 0
+    assert report["golden_traceability"]["citation_only"] == 1
 
 
 def test_provenance_gate_controls_exit_code(tmp_path: Path, capsys) -> None:

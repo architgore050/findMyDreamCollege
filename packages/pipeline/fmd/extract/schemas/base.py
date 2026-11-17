@@ -44,11 +44,19 @@ class ExtractedField(BaseModel):
     ``char_start``/``char_end`` are deliberately absent so the model cannot
     fabricate a boundary. ``reason_if_null`` is review-console metadata and is
     never treated as evidence.
+
+    ``context`` is the optional **row identifier**: the row label, column
+    header or institute name a table cell belongs to. A table repeats the same
+    label and the same number on many rows, so a quote alone is not a location.
+    ``quote`` must contain the value and ``context`` must contain the row
+    identifier; together they must identify exactly one location. ``context``
+    is never evidence for a value — it only disambiguates a span.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     quote: str | None = None
+    context: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     reason_if_null: str | None = None
 

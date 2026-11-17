@@ -1,0 +1,54 @@
+# First real seat-matrix document: 7-page Docling extraction of the Tamil Nadu
+# Dr. M.G.R. Medical University AHS UG seat matrix (A.Y. 2024-2025).
+#
+# The intake year resolved uniquely and the T3 verifier returned `supported`
+# (page 1, bbox [188.45, 73.50, 406.75, 111.19]). On the first run the MLT seat
+# count did not resolve: the same row label and the same number appear on
+# eighteen colleges' rows, so the span was `ambiguous_span`. With the v3
+# row-scoped contract the same document re-run resolved `seats.total` = 20 for
+# the "Govt. Stanley Medical College & Hospital, Chennai - 600 001" block
+# (`disambiguation: context_row`, row "3. B.Sc. Medical Laboratory Technology",
+# column "Intake", page 1). It still stays unverified *here* because this row is
+# document-level: the document prints 20 on several colleges' MLT rows and the
+# golden schema has no per-row context, so there is no single correct value to
+# assert. Do not promote it by hand.
+#
+# This entry is citation-traceable, not fixture-measured: no recorded guided-JSON
+# response is committed for it, so `family` stays null and it enters no accuracy
+# metric.
+schema_version: 1
+id: tnmgrmu-ahs-ug-seat-matrix-2024-25
+institution: "The Tamil Nadu Dr. M.G.R. Medical University (AHS UG institutions)"
+programme: "B.Sc. Medical Laboratory Technology (one row of the AHS UG seat matrix)"
+state: "Tamil Nadu"
+source_url: "https://www.tnmgrmu.ac.in/wp-content/uploads/2025/12/AHS-UG-SeatMatrix-2024-2025-New.pdf"
+retrieved_at: "2026-11-17"
+fixture: null
+family: null
+notes: >-
+  Verified against the real extraction of the 7-page PDF (7 tables, Docling T1,
+  prompt seat_matrix@v2, model gemma-4-26b-a4b-gguf). The verified row records
+  the intake year only; the seat count is recorded as unverified because the
+  gate refused to pick one of eighteen identical MLT rows.
+expected:
+  seats.intake_year:
+    value: "A.Y. 2024-2025"
+    unit: null
+    quote: "A.Y. 2024-2025"
+    printed_value: "A.Y. 2024-2025"
+    status: verified
+    note: >-
+      Page 1, bbox [188.45, 73.50, 406.75, 111.19]; quote is verbatim in the
+      extracted text and the verifier verdict was `supported`.
+  seats.total:
+    value: null
+    unit: count
+    quote: null
+    status: unverified
+    note: >-
+      The MLT rows print 20 seats. The first run rejected the span as
+      `ambiguous_span` (eighteen identical rows); the v3 row-scoped re-run
+      resolved 20 for the Govt. Stanley Medical College block. It stays
+      unverified here because the document prints 20 on several colleges' MLT
+      rows and this golden row cannot name one row without a context field, so
+      there is no single document-level value to assert.

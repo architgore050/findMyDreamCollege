@@ -17,13 +17,34 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 def test_committed_golden_set_loads_and_splits_verified_from_unverified() -> None:
     golden = load_golden(DEFAULT_GOLDEN_DIR)
 
-    assert golden.verified_rows == 14
-    assert golden.unverified_rows == 1
-    assert len(golden.entries) == 4
-    assert {trace.traceability for trace in golden.traces} == {"fixture", "unverified"}
+    assert golden.verified_rows == 15
+    assert golden.unverified_rows == 2
+    assert len(golden.entries) == 5
+    assert {trace.traceability for trace in golden.traces} == {
+        "fixture",
+        "citation",
+        "unverified",
+    }
     template = DEFAULT_GOLDEN_DIR / "programmes" / "_TEMPLATE.yaml"
     assert template.exists()
     assert all("template" not in entry.id for entry in golden.entries)
+
+
+def test_the_real_seat_matrix_row_separates_what_resolved_from_what_did_not() -> None:
+    golden = load_golden(DEFAULT_GOLDEN_DIR)
+    entry = next(item for item in golden.entries if item.id == "tnmgrmu-ahs-ug-seat-matrix-2024-25")
+    assert entry.source_url and entry.retrieved_at
+    assert entry.family is None  # citation traceability only; not measured offline
+
+    year = entry.expected["seats.intake_year"]
+    assert year.status == "verified"
+    assert year.value == "A.Y. 2024-2025"
+    assert year.quote == "A.Y. 2024-2025"
+
+    seats = entry.expected["seats.total"]
+    assert seats.status == "unverified"
+    assert seats.value is None, "an unresolved row must not carry a value"
+    assert seats.quote is None
 
 
 def test_every_verified_quote_resolves_in_its_committed_fixture() -> None:
@@ -102,6 +123,27 @@ def test_loader_checks_abstention_absence_terms(tmp_path: Path) -> None:
     }
     (tmp_path / "entry.yaml").write_text(yaml.safe_dump(entry), encoding="utf-8")
     with pytest.raises(GoldenError, match="absent"):
+        load_golden(tmp_path, root=tmp_path)
+
+
+def test_loader_rejects_a_cited_verified_row_without_retrieved_at(tmp_path: Path) -> None:
+    entry = {
+        "schema_version": 1,
+        "id": "cited-but-undated",
+        "institution": "Unnamed",
+        "programme": "BSc MLT",
+        "source_url": "https://example.invalid/seat-matrix.pdf",
+        "expected": {
+            "seats.total": {
+                "value": 20,
+                "unit": "count",
+                "quote": "B.Sc. Medical Laboratory Technology 20",
+                "status": "verified",
+            }
+        },
+    }
+    (tmp_path / "entry.yaml").write_text(yaml.safe_dump(entry), encoding="utf-8")
+    with pytest.raises(GoldenError, match="retrieved_at"):
         load_golden(tmp_path, root=tmp_path)
 
 
