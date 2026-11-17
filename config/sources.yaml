@@ -774,8 +774,11 @@ sources:
       # The crawl is bounded and stays on one registrable domain per seed.
       domains: []
       max_depth: 2
-      max_pages_per_domain: 200
-      max_documents_per_domain: 30
+      # Bulk-ramp first pass (2026-11-17): small, polite, reversible. A domain
+      # gets a cover page plus its highest-ranked links; evidence PDFs are the
+      # scarce budget. Raise only after a run's yield is reviewed.
+      max_pages_per_domain: 20
+      max_documents_per_domain: 3
       yield_check_after: 25
       min_yield_percent: 2
       document_extensions: [.pdf]
@@ -808,7 +811,7 @@ sources:
       # crawl, and how they are ranked. `naac_bonus` only applies when an
       # accreditation claim already names the domain.
       targeting:
-        max_domains_per_run: 25
+        max_domains_per_run: 50
         base: 0
         known_website_bonus: 15
         naac_bonus: 25

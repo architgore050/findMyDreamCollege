@@ -124,6 +124,69 @@ class InventoryStage:
         return str(payload)
 
     # --------------------------------------------------------------------- run
+    def _structured_source(self, source_id: str | None) -> Any | None:
+        """The registry source that owns a structured inventory payload, if any."""
+        source = self._source(source_id)
+        if source is None or getattr(source, "kind", None) != "inventory":
+            return None
+        try:
+            InventoryFieldMap.from_source(source)
+        except InventoryPayloadError:
+            return None
+        return source
+
+    def _inventory_documents(self, limit: int) -> list[Any]:
+        """Role=inventory documents, plus stale-roled structured payloads.
+
+        Migrations 0003/0004 introduced ``documents.role`` after the first UGC
+        payload was fetched, so an old row can still be marked ``evidence``.
+        Re-planning it is out of this stage's control (the crawler skips URLs
+        already in the frontier), but the bytes are authoritative: a source that
+        declares ``params.inventory`` is an inventory payload whatever the row
+        says. The union stays deterministic (oldest first) and capped.
+        """
+        selected = list(self.documents.list_by_role("inventory", limit=limit))
+        seen = {getattr(document, "id", None) for document in selected}
+        lister = getattr(self.documents, "list_by_domain", None)
+        if lister is None:
+            return selected[:limit]
+        for source in self._all_sources():
+            if getattr(source, "kind", None) != "inventory":
+                continue
+            try:
+                InventoryFieldMap.from_source(source)
+            except InventoryPayloadError:
+                continue
+            base_url = getattr(source, "base_url", None)
+            if not base_url:
+                continue
+            from urllib.parse import urlsplit
+
+            # documents.domain is the registrable domain, so the ``www.`` host of
+            # a registry base_url would select nothing.
+            domain = (urlsplit(str(base_url)).hostname or "").lower().removeprefix("www.")
+            if not domain:
+                continue
+            source_id = str(getattr(source, "id", ""))
+            for document in lister(domain, limit):
+                if getattr(document, "source_id", None) != source_id:
+                    continue
+                if getattr(document, "id", None) in seen:
+                    continue
+                if getattr(document, "role", None) == "inventory":
+                    continue
+                seen.add(getattr(document, "id", None))
+                selected.append(document)
+        selected.sort(key=lambda document: getattr(document, "id", 0) or 0)
+        return selected[:limit]
+
+    def _all_sources(self) -> list[Any]:
+        if self.sources:
+            return list(self.sources.values())
+        if self.registry is None:
+            return []
+        return list(self.registry.sources.sources)
+
     def run(self, *, summary: RunSummary, limit: int | None = None) -> list[str]:
         """Ingest inventory documents; return the seed URLs selected to crawl."""
         if self.domains is None or self.entities is None:
@@ -131,9 +194,7 @@ class InventoryStage:
             summary.metadata["ingest"] = {"reason": "no_inventory_repository"}
             return []
 
-        documents = list(
-            self.documents.list_by_role("inventory", limit=limit or DEFAULT_INVENTORY_LIMIT)
-        )
+        documents = self._inventory_documents(limit or DEFAULT_INVENTORY_LIMIT)
         summary.bump("inventory_documents", len(documents))
         for document in documents:
             self._ingest_document(document, summary=summary)

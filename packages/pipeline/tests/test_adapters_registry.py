@@ -118,7 +118,7 @@ def test_ws_c3_adapters_are_registry_driven(registry) -> None:
 
     institutions = registry.sources.by_id("institution_sites")
     assert institutions.params.max_depth == 2
-    assert institutions.params.max_pages_per_domain == 200
+    assert institutions.params.max_pages_per_domain == 20
     assert institutions.params.document_filename_patterns
 
     nirf = registry.sources.by_id("nirf_rankings")
