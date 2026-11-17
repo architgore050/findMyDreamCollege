@@ -10,6 +10,47 @@
 
 ---
 
+## 0. Decision update — 2026-11-17 (locked: Gemma 4 26B-A4B / UD-IQ4_XS / llama.cpp)
+
+**This section supersedes §1 for the bulk-extraction role.** The operator locked
+the model on 2026-11-17; it is not open for re-litigation by the bake-off. The
+rest of this document remains the evidence trail for *why the engine and the
+allocation shape changed*, and for the OCR/adjudication roles it still governs.
+
+| Item | Decision | Note |
+|---|---|---|
+| Weights | `unsloth/gemma-4-26B-A4B-it-GGUF`, **raw (non-QAT)** | Deliberate: raw GGUF beat QAT variants on retained capability in the operator's own runs. This is operator experience, not a published benchmark — recorded as **[U-use]**, an accepted risk, not a measurement. |
+| Quant | **`gemma-4-26B-A4B-it-UD-IQ4_XS.gguf`** — 13,597,177,568 B (12.66 GiB) | Largest quant that fits 16 GB with room for a 64k KV cache. |
+| Engine | **llama.cpp `llama-server`** (GGUF), not vLLM | vLLM has no GGUF path; the chat template, the constrained decoder (`response_format: json_schema` → GBNF) and the MoE kernels all come from llama.cpp. |
+| KV cache | **q8_0/q8_0 with flash attention** (`-fa on -ctk q8_0 -ctv q8_0`) | Halves KV bytes vs f16 at the cost of a per-block scale; parity checked at 8k (runbook §2.7). |
+| Alias | `gemma-4-26b-a4b-gguf` | Served id, pinned in `config/models.yaml` and `.env`. |
+| Context | **65536** provisional default; budget table + sweep in runbook §2.7 | Must stay ≤ the server's `-c`. The sweep is the authority; 32768 is the safe fallback. |
+| MTP / speculative decoding | **Supported but OFF by default** | llama.cpp implements it (`--spec-type draft-mtp`, arch `gemma4-assistant`, merged PR #23398 on 2026-06-07; the pinned build b12468 is from 2026-11-17). Enabled only when greedy-output parity and a real speed win are both demonstrated. |
+
+Three consequences that are easy to get wrong:
+
+1. **Architecture, not parameter count, is what made this fit.** 26B total but
+   ~4B active per token (128 experts, 8 used). The weights are 12.66 GiB — the
+   size class an 8-bit KV cache can still live beside on a 16 GB card. A *dense*
+   26B at this quant would not leave room for a useful context.
+2. **Sliding-window layout keeps long context cheap.** 25 of 30 layers are
+   sliding-window (window 1024, 8 KV heads, head dim 256); only 5 are full
+   attention (2 KV heads, head dim 512). With upstream's SWA trimming
+   (`--swa-full` false, the default) the 25 SWA layers' KV is *constant* in
+   context length, so the marginal cost of context is paid by 5 layers only.
+   The measured/derived table is in runbook §2.7.
+3. **The GGUF repo root holds ~65 GB of quants.** Fetching it naively pulls
+   everything, so the downloader gained an `HF_INCLUDE` glob filter
+   (`scripts/hf_download.py`). Default empty = old behaviour.
+
+**[U] Open item, not a conclusion:** the raw-vs-QAT advantage is operator
+experience. If the bake-off later shows the QAT variant within noise on
+span-exact, the 6.7 GiB saved is worth revisiting — for now the locked decision
+stands and the fallback is a *smaller context or the 12B pilot*, never a silent
+quant swap.
+
+---
+
 ## 1. Decision in one table
 
 | Role | Provisional default | Why (document/extraction evidence) | Evidence class | Confidence |

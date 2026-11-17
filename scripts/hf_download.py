@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import hashlib
+from fnmatch import fnmatch
 from pathlib import Path
 from urllib.parse import quote
 
@@ -20,6 +21,31 @@ REPO_ID = os.environ.get(
 )
 REPO_SUBDIR = os.environ.get("HF_REPO_SUBDIR", "IQ3_XXS")
 REVISION = os.environ.get("HF_REVISION", "main")
+
+# Optional include filter, applied *after* the REPO_SUBDIR prefix is stripped.
+# Comma- or whitespace-separated globs (fnmatch syntax, case-insensitive) that
+# must match a file name for it to be downloaded:
+#
+#   HF_INCLUDE="gemma-4-26B-A4B-it-UD-IQ4_XS.gguf"
+#   HF_INCLUDE="*IQ4_XS.gguf, *UD-Q4_K_XL.gguf"
+#
+# Empty (the default) means "no filter", i.e. every file inside REPO_SUBDIR,
+# which is the original behaviour. A repository that also publishes other
+# quants (~65 GB for a single 26B model) needs this to fetch one file.
+#
+# Globs are matched against the path relative to OUTPUT_DIR first and, failing
+# that, against the full repository path, so both `*.gguf` and
+# `MTF/mtp-*.gguf` spellings work.
+HF_INCLUDE = os.environ.get("HF_INCLUDE", "")
+
+
+def include_globs():
+    """Parse HF_INCLUDE into a list of lowercased fnmatch patterns."""
+    return [
+        pattern.lower()
+        for pattern in HF_INCLUDE.replace(",", " ").split()
+        if pattern
+    ]
 
 OUTPUT_DIR = Path(
     os.environ.get(
@@ -219,6 +245,8 @@ def get_repository_files(token):
     print(f"Repository : {REPO_ID}")
     print(f"Subfolder  : {REPO_SUBDIR}/")
     print(f"Revision   : {REVISION}")
+    if HF_INCLUDE.strip():
+        print(f"Include    : {', '.join(include_globs())}")
     print()
 
     api = HfApi(token=token or None)
@@ -290,6 +318,18 @@ def get_repository_files(token):
                 if not filename:
                     continue
 
+                # Optional include filter (HF_INCLUDE). Empty = keep everything.
+                globs = include_globs()
+                if globs:
+                    lowered = filename.lower()
+                    repo_lowered = repo_path.lower()
+                    if not any(
+                        fnmatch(lowered, pattern)
+                        or fnmatch(repo_lowered, pattern)
+                        for pattern in globs
+                    ):
+                        continue
+
                 if size is None:
                     print(
                         f"WARNING: No size metadata for "
@@ -329,7 +369,11 @@ def get_repository_files(token):
                 raise RuntimeError(
                     f"No files with size metadata were found inside "
                     f"the repository folder '{REPO_SUBDIR}/'. "
-                    "Check that the folder name exists and is spelled correctly."
+                    + (
+                        f"HF_INCLUDE={HF_INCLUDE!r} filtered every remaining "
+                        f"file out. " if HF_INCLUDE.strip() else ""
+                    )
+                    + "Check that the folder name exists and is spelled correctly."
                 )
 
             # Stable ordering makes the download order predictable.

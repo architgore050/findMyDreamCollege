@@ -69,7 +69,7 @@ def test_llm_doctor_reports_resolution(capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     profiles = {row["profile"]: row for row in payload["profiles"]}
     assert profiles["bulk_extract"]["usable"] is True
-    assert profiles["bulk_extract"]["model"] == "Qwen3.5-9B-AWQ"
+    assert profiles["bulk_extract"]["model"] == "gemma-4-26b-a4b-gguf"
     assert "key_present" in profiles["bulk_extract"]
     assert payload["budgets"]["hard_stop"] is True
     assert payload["required_ok"] is True

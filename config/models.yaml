@@ -1,8 +1,11 @@
 # Provider-agnostic model routing. Nothing in the pipeline may hardcode a provider.
 # Everything below is env-switchable: change a provider or model without editing
 # this file, e.g. FMD_EXTRACT_PROVIDER=anthropic FMD_EXTRACT_MODEL=claude-3-5-sonnet.
-# `local` assumes vLLM/SGLang exposing an OpenAI-compatible endpoint.
-# Hardware budget: 16 GB VRAM => <=14B at int4. Do not plan on a 70B local model.
+# `local` is llama.cpp `llama-server` exposing an OpenAI-compatible endpoint
+# (decision 2026-11-17, docs/.../10-inference-and-model-selection.md).
+# Hardware budget: 16 GB VRAM. Served today: Gemma 4 26B-A4B (MoE, ~4B active)
+# at UD-IQ4_XS = 12.66 GiB of weights, 64k context, 8-bit KV cache.
+# Do not plan on a 70B dense local model; a 26B *MoE* is the intended shape.
 # Run `fmd llm doctor` to see what resolved and which env var is missing.
 #
 # Offline mode (docs/.../11-inference-runbook.md §7): set FMD_OFFLINE=1 (and
@@ -69,25 +72,28 @@ providers:
 profiles:
   bulk_extract:
     # evidence: best doc evidence per GB
-    # Qwen3.5-9B at 32k/int4 is provisional until the 20-document bake-off
-    # (docs/.../10-inference-and-model-selection.md). Thinking must be off for
-    # deterministic extraction; providers.py does not forward this yet, so serve
-    # with the chat template that disables it (e.g. --chat-template-kwargs).
+    # Served by llama-server (GGUF), not vLLM. Weights are the *raw* (non-QAT)
+    # unsloth/gemma-4-26B-A4B-it-GGUF at UD-IQ4_XS, 12.66 GiB, chosen over the
+    # QAT variants on retained capability (operator experience, 2026-11-17).
+    # Thinking must be off for deterministic extraction; fmd/llm/providers.py
+    # does not forward `thinking` yet, so scripts/serve_local.sh disables it in
+    # the served chat template (-rea off + chat-template-kwargs
+    # {"enable_thinking":false}). Keep those flags: without them the answer
+    # lands in `reasoning_content` and `content` is empty.
     #
-    # Served name, not a hub id: `scripts/serve_local.sh` starts vLLM with
-    #   --served-model-name Qwen3.5-9B-AWQ --max-model-len 32768
-    # over a community int4 AWQ conversion (no upstream `Qwen/Qwen3.5-9B-AWQ`
-    # repo existed on 2026-11-16). Change this string only together with the
-    # script's --served-model-name, or every call 404s with "model not found".
+    # Served name, not a hub id: `scripts/serve_local.sh` starts llama-server as
+    #   --alias gemma-4-26b-a4b-gguf -c 65536 -fa on -ctk q8_0 -ctv q8_0
+    # Change this string only together with the script's --alias, or every call
+    # 404s with "model not found".
     provider: ${FMD_EXTRACT_PROVIDER:-local}
-    model: ${FMD_EXTRACT_MODEL:-Qwen3.5-9B-AWQ}
+    model: ${FMD_EXTRACT_MODEL:-gemma-4-26b-a4b-gguf}
     provider_env: FMD_EXTRACT_PROVIDER
     model_env: FMD_EXTRACT_MODEL
-    model_example: Qwen3.5-9B-AWQ
+    model_example: gemma-4-26b-a4b-gguf
     temperature: 0
-    guided_json: true          # xgrammar; must allow null; Qwen3.5 arch support required
+    guided_json: true          # llama.cpp response_format json_schema -> GBNF
     max_tokens: 4096
-    context_tokens: 32768
+    context_tokens: 65536      # must be <= the server's -c; see runbook §2.7
     quantization: int4
     thinking: false
     required: true             # text PDFs cannot be extracted without this
@@ -132,13 +138,13 @@ profiles:
   entity_adjudication:
     # evidence: pairwise match stays local
     provider: ${FMD_ENTITY_ADJUDICATE_PROVIDER:-local}
-    model: ${FMD_ENTITY_ADJUDICATE_MODEL:-Qwen3.5-9B-AWQ}
+    model: ${FMD_ENTITY_ADJUDICATE_MODEL:-gemma-4-26b-a4b-gguf}
     provider_env: FMD_ENTITY_ADJUDICATE_PROVIDER
     model_env: FMD_ENTITY_ADJUDICATE_MODEL
-    model_example: Qwen3.5-9B-AWQ
+    model_example: gemma-4-26b-a4b-gguf
     temperature: 0
     guided_json: true
-    context_tokens: 32768
+    context_tokens: 65536
     quantization: int4
     thinking: false
     bundle_pairs_per_call: 20
@@ -161,14 +167,14 @@ profiles:
     # version, and a hard per-run cap. 0 price means the local default; a hosted
     # verifier only needs an env override, never a code change.
     provider: ${FMD_VERIFY_PROVIDER:-local}
-    model: ${FMD_VERIFY_MODEL:-Qwen3.5-9B-AWQ}
+    model: ${FMD_VERIFY_MODEL:-gemma-4-26b-a4b-gguf}
     provider_env: FMD_VERIFY_PROVIDER
     model_env: FMD_VERIFY_MODEL
-    model_example: Qwen3.5-9B-AWQ
+    model_example: gemma-4-26b-a4b-gguf
     temperature: 0
     guided_json: true
     max_tokens: 1024
-    context_tokens: 32768
+    context_tokens: 65536
     quantization: int4
     thinking: false
     required: false            # claims stay unverified when this profile degrades

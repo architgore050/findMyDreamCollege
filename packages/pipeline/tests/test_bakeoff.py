@@ -286,8 +286,8 @@ def test_models_config_defaults_and_every_profile_is_env_overridable() -> None:
     defaults = ModelsConfig.model_validate(interpolate_env(raw, {}))
 
     assert defaults.profiles["bulk_extract"].provider == "local"
-    assert defaults.profiles["bulk_extract"].model == "Qwen3.5-9B-AWQ"
-    assert defaults.profiles["bulk_extract"].context_tokens == 32768
+    assert defaults.profiles["bulk_extract"].model == "gemma-4-26b-a4b-gguf"
+    assert defaults.profiles["bulk_extract"].context_tokens == 65536
     assert defaults.profiles["bulk_extract"].quantization == "int4"
     assert defaults.profiles["bulk_extract"].thinking is False
     assert defaults.profiles["bulk_extract"].guided_json is True

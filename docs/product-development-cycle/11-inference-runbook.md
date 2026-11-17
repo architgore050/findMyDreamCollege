@@ -1,8 +1,8 @@
 # 11 — Inference runbook (local text model + OCR stage)
 
-**Status:** engine facts measured on this host 2026-11-16; end-to-end numbers
-depend on a weight download that was still in flight when this was written, and
-are flagged where unverified. **Owner:** WS-SERVE.
+**Status:** engine facts measured on this host 2026-11-17 (§2.7, llama.cpp +
+Gemma 4 26B-A4B). §2.1–§2.6 describe the superseded vLLM/9B path and are kept
+as history. **Owner:** WS-SERVE.
 **Companions:** `10-inference-and-model-selection.md` (why these models),
 `config/models.yaml` (what the router calls), `config/acquire.yaml` (the OCR
 stage), `09-local-runbook.md` (the rest of the stack).
@@ -433,8 +433,206 @@ FMD_EXTRACT_PROVIDER=mock
 not found`, not a schema error. `hard_pdf` reads `FMD_API_MODEL` directly
 (`FMD_HARD_PDF_MODEL` was removed 2026-11-16).
 
-## 3. OCR stage (T2 Qwen3-VL / T2b PaddleOCR-VL)
+## 2.7 Text model of record — Gemma 4 26B-A4B via llama.cpp (2026-11-17)
 
+§2.1–§2.6 above describe the vLLM/9B path and are kept as history. **The
+current text model is a GGUF served by `llama-server`.** Everything below was
+measured on this host on 2026-11-17 unless marked **[modelled]**.
+
+### A. Asset — exactly one file
+
+HF tree listing of `unsloth/gemma-4-26B-A4B-it-GGUF` (root, `?recursive=true`):
+
+| File | Bytes |
+|---|---|
+| `gemma-4-26B-A4B-it-UD-IQ4_XS.gguf` ← **the one we serve** | 13,597,177,568 (12.66 GiB) |
+| `gemma-4-26B-A4B-it-UD-IQ4_NL.gguf` | 13,613,037,280 |
+| `gemma-4-26B-A4B-it-UD-Q3_K_XL.gguf` | 12,907,280,096 |
+| `gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf` | 17,010,980,576 (does not fit) |
+| `gemma-4-26B-A4B-it-UD-Q5_K_XL.gguf` | 21,217,769,184 (does not fit) |
+| `mtp-gemma-4-26B-A4B-it.gguf` (Q8_0 drafter) | 461,766,816 |
+| `mmproj-F16.gguf` (vision projector) | 1,193,058,784 |
+
+**No sidecar files are needed for text.** Tokenizer, chat template and
+hyper-parameters are inside the GGUF (`--jinja` reads the embedded template).
+Skip `mmproj-*` (vision) and `MTP/*` (only for speculative decoding).
+A partial download keeps its bytes under
+`$MODEL_DIR/gemma-4-26B-A4B-it-UD-IQ4_XS/` and resumes; the tree has ~65 GB of
+quants, so **always filter**:
+
+```bash
+HF_REPO_ID=unsloth/gemma-4-26B-A4B-it-GGUF HF_REPO_SUBDIR= HF_REVISION=main \
+HF_INCLUDE='gemma-4-26B-A4B-it-UD-IQ4_XS.gguf' \
+HF_OUTPUT_DIR="$HOME/models/gemma-4-26B-A4B-it-UD-IQ4_XS" \
+  ~/.venvs/hf-downloader/bin/python -u scripts/hf_download.py
+```
+
+`HF_INCLUDE` is a comma/space separated list of case-insensitive globs applied
+after the `HF_REPO_SUBDIR` prefix is stripped; empty (default) reproduces the
+old "everything in the subdir" behaviour.
+
+### B. Engine — source build, not the prebuilt tarball
+
+The release asset `llama-b12468-bin-ubuntu-cuda-12.8-x64.tar.gz` links
+`libcudart.so.12`; this host only has the CUDA **13** runtime. Rather than pull
+the extra 594 MB cudart asset, `scripts/install_llama_cpp.sh` builds from source
+against the installed toolkit:
+
+```bash
+scripts/install_llama_cpp.sh            # ~6 min, 12 jobs, arch sm_120
+scripts/install_llama_cpp.sh --verify
+```
+
+Result **[measured]**:
+
+```
+version: 1.0.0-dev (build 1, commit 140a279)     # tag b12468, 2026-11-17
+built with GNU 13.3.0 for Linux x86_64
+Available devices:
+  CUDA0: NVIDIA GeForce RTX 5080 Laptop GPU (15839 MiB, 15623 MiB free)
+```
+
+Configured with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120`. The meson
+header prints the supported FA KV types:
+`f16-f16; q4_0-q4_0; q8_0-q8_0; bf16-bf16; f8_e4m3-f8_e4m3` — so **q8_0 KV with
+flash attention is a first-class combination**, not a fallback.
+
+Note the card reports **15839 MiB / 15623 MiB free** to llama.cpp, ~460 MiB less
+than `nvidia-smi`'s 16303 MiB (desktop compositor). Budget against 15.26 GiB,
+not 16.
+
+### C. KV budget — the numbers that decide context
+
+Hyper-parameters read straight from the GGUF header (not estimated):
+
+```
+gemma4.block_count                  30
+gemma4.attention.sliding_window     1024
+sliding_window_pattern              True x5, False,  (5 full-attention layers: 5,11,17,23,29)
+full layers : head_count_kv 2, key_length 512, value_length 512
+SWA  layers : head_count_kv 8, key_length 256, value_length 256
+```
+
+So per token: **10.62 KiB** of q8_0 KV on the 5 full layers, and the 25 SWA
+layers saturate at a fixed **106 MiB** (window 1024, upstream SWA trimming on by
+default — do not pass `--swa-full`). That is why long context is unusually cheap
+on this model:
+
+| ctx | KV q8_0 | KV f16 | weights+KV (q8) | left of 15.26 GiB | headroom at ~0.5 GiB overhead |
+|---|---|---|---|---|---|
+| 16k | 0.27 GiB | 0.51 GiB | 12.93 GiB | 2.33 GiB | 1.83 |
+| 24k | 0.35 GiB | 0.66 GiB | 13.02 GiB | 2.24 GiB | 1.74 |
+| 32k | 0.44 GiB | 0.82 GiB | 13.10 GiB | 2.16 GiB | 1.66 |
+| 40k | 0.52 GiB | 0.98 GiB | 13.18 GiB | 2.08 GiB | 1.58 |
+| 48k | 0.60 GiB | 1.13 GiB | 13.27 GiB | 1.99 GiB | 1.49 |
+| **64k** | **0.77 GiB** | 1.45 GiB | **13.43 GiB** | **1.83 GiB** | **1.33 (default)** |
+| 96k | 1.10 GiB | 2.07 GiB | 13.76 GiB | 1.50 GiB | 1.00 — at the limit |
+| 128k | 1.43 GiB | 2.70 GiB | 14.10 GiB | 1.16 GiB | 0.66 — aggressive |
+| 256k (native) | 2.76 GiB | 5.20 GiB | 15.42 GiB | **−0.16 GiB** | impossible |
+
+`overhead` = CUDA context + compute buffers. **Half-measured, not yet
+swept.** Anchor **[measured]**: `llama-server -ngl 999` with a trivial GGUF
+moves `nvidia-smi` from 14 MiB to 228 MiB, i.e. **~0.21 GiB is CUDA
+runtime + context** on this driver; the rest (est. 0.2–0.4 GiB) is the gemma4
+MoE compute buffer at `-ub 512`. That is why the older 1.1 GiB figure in §1 is
+pessimistic for llama.cpp — it was a vLLM-era number.
+
+So **65536 is the provisional default**: it clears the ≥1 GiB headroom rule at
+every overhead between 0.45 and 0.83 GiB, and 96k is the likely true ceiling.
+Both are projections until the sweep below runs — the sweep is the deliverable,
+this table is the expectation it has to confirm or overturn.
+
+**To measure the ceiling (one command, replaces the guess):**
+
+```bash
+/tmp/opencode/kv_budget_sweep.sh     # waits for the .gguf, then steps 16k..128k
+cat /tmp/opencode/kv-sweep/results.txt
+```
+
+Each step starts `llama-server` at that `-c`, waits for `/health`, records
+`nvidia-smi memory.used` and the `timings` block from a real completion, then
+stops it. A step that fails to load *or* to answer is recorded as a failure —
+"loads" alone is not a pass. Re-run after any driver, toolkit or weight change,
+and raise `FMD_MAX_MODEL_LEN` only to a measured row that still clears 1 GiB.
+
+### D. 8-bit KV cache — what to expect
+
+`q8_0` blocks are 32 values + one fp16 scale (34 B/32 = 1.0625 B/element), so the
+cache is half of f16 with a ~0.06-bit-per-element quantisation of the
+activations. It does not change the graph, the sampling or the constrained
+decoder, so the only risk is numeric. Parity check (greedy, `temperature 0`,
+same prompt, `-c 8192`): the sweep harness writes both outputs to
+`/tmp/opencode/kv-sweep/parity.txt`. **Record the verdict here once it exists.**
+Until then: q8_0 is enabled because it is what makes 32k free on a 16 GB card,
+and because the failure mode is a wording difference, not an unparsable schema.
+
+### E. MTP / speculative decoding — supported, **off**
+
+llama.cpp has first-class Gemma 4 MTP: `--spec-type draft-mtp`,
+`--model-draft <mtp file>`, arch `gemma4-assistant`, `--spec-draft-n-max N`
+(merged PR #23398 on 2026-06-07; build b12468 is 2026-11-17, and
+`src/models/gemma4-assistant.cpp` is present in the tree). The drafter shares the
+target's KV cache, so it does not need a second context, and the upstream README
+claims 159 → 257 tok/s at 0.72 acceptance on a Q4_K_M target on a B200.
+
+**It is off by default anyway**, for two reasons that are ours and not upstream's:
+
+1. **Correctness is unverified on this pair.** Speculative decoding is supposed
+   to be output-identical under greedy sampling, but that guarantee is worth
+   exactly as much as the equality test. We have not run it, so we do not claim it.
+2. **VRAM is the scarce resource, not speed.** The drafter is +461 MB resident on
+   a card where 64k of context already costs headroom. A 26B-A4B at ~4B active
+   is not decode-bound the way a dense model is.
+
+Enable only after both of these pass on the loaded pair:
+
+```bash
+# 1. parity: identical greedy bytes with and without the drafter, fixed prompt
+# 2. speed: >20% decode tok/s on a 512-token generation, twice, same prompt
+FMD_SPEC=1 scripts/serve_local.sh start   # only then
+```
+
+If either fails, the verdict is "off" and stays off. Do not enable it for a
+throughput number alone.
+
+### F. Process facts and fallback
+
+```
+pid   /tmp/opencode/fmd-serve/llama-server.pid
+log   /tmp/opencode/fmd-serve/llama-server.log
+verbs scripts/serve_local.sh {install|start|status|logs|probe|stop|fg}
+```
+
+`probe` is the gate before flipping `FMD_EXTRACT_PROVIDER` to `local`; it asserts
+(a) non-empty `content`, (b) no `<|channel>thought` leakage, (c) a guided
+`json_schema` object that is schema-valid **and** (d) a nullable field actually
+emitted as `null`.
+
+**Fallback ladder, in order, when something OOMs or misbehaves under load:**
+
+1. Lower context: `FMD_MAX_MODEL_LEN=16384 scripts/serve_local.sh start`. This is
+   almost always the fix; it frees 0.17 GiB at 16k and removes the long-prompt
+   compute-buffer spike.
+2. Free the GPU: no other GPU process. One GPU tenant at a time (§1 budget rule);
+   the OCR stage and the text model never co-reside.
+3. Retry with f16 KV (`FMD_KV_TYPE=f16`) only to *diagnose* — it costs 0.38 GiB
+   more at 32k, so it makes OOM worse, never better.
+4. Last resort: the 12B pilot GGUF. It is 6.72 GiB, so it leaves ~8 GiB for
+   context, at a real capability cost. This is a capability regression, not a
+   tuning step — say so when you take it.
+
+`FMD_EXTRACT_PROVIDER` stays `api` until `probe` is green on real weights and the
+download has finished. Flip:
+
+```bash
+FMD_EXTRACT_PROVIDER=local
+FMD_EXTRACT_MODEL=gemma-4-26b-a4b-gguf     # must equal the server's --alias
+FMD_LOCAL_LLM_URL=http://localhost:8010/v1
+```
+
+---
+
+## 3. OCR stage (T2 Qwen3-VL / T2b PaddleOCR-VL)
 ### 3.1 Why this engine
 
 Qwen3-VL-8B-Instruct is the T2 engine because it is the only local option with a
