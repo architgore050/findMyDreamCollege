@@ -37,8 +37,8 @@ def test_score_is_reproducible_from_claims_hash_and_versions(data: dict) -> None
     second = score(copy.deepcopy(data))
 
     assert first.claims_hash == GOLDEN_CLAIMS_HASH == second.claims_hash
-    assert first.scorer_version == "0.2.0"
-    assert first.weights_version == "2026-11-16.2"
+    assert first.scorer_version == "0.3.0"
+    assert first.weights_version == "2026-11-18.1"
     assert first.as_dict() == second.as_dict()
     assert first.composite.point is not None
     assert first.evidence_tier in {"well_evidenced", "partial", "thin", "insufficient"}

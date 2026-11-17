@@ -241,6 +241,10 @@ Alias types are first-class because the original brief demands acronym/alternate
 
 **Aggregation:** documented monotone transforms + published weights + empirical-Bayes shrinkage toward peer-group prior (ownership × state × affiliation type). Display `measured` and `prior_adjusted` separately so shrinkage never hides a real signal.
 
+**Predicate registry (`config/predicates.yaml`):** the ninth registry file is the single authoritative map from an emitted claim predicate (`seats.total`, `curriculum.internship_months`, `accreditation.naac_grade`, …) to its sub-score component, unit kind, and denominator/period requirements, plus an optional scoring method. `fmd/score` never hardcodes a predicate name. Loader validation rejects a missing extraction predicate, a unit-kind disagreement with the extraction schema, a dangling component reference, and an alias that points nowhere; predicates absent from both the map and the declared aliases are reported as `unknown_predicates`, never silently dropped. A claim whose unit or period contradicts the registry is rejected (`SubScore.rejected`) rather than coerced.
+
+**Component and composite minimums:** a component is scored from `n ≥ 1` usable claim, but its interval is widened by `sqrt(min_claims_for_confidence / n)`; a single perfectly-copied span is not a complete score. A composite is published from at least `min_components_for_composite` known components (default 2). A subset composite is `partial`: its point is the weighted mean of known components, while `lo`/`hi` still carry the full `[0, 100]` mass of every unknown component, and `components_used` / `components_unknown` are reported explicitly. Zero known components is `UNKNOWN` `[0, 100]`. A subset composite is never tiered `well_evidenced`.
+
 **Missing data:** `UNKNOWN` propagates to `[0, 100]` for that sub-score. Comparisons use **Pareto dominance**: A is shown as better than B only if A ≥ B on every known sub-score and strictly greater on one. Undominated pairs are rendered "not comparable on current evidence". No imputation of informative non-disclosure.
 
 **Salary/quantile estimation** (`fmd/score/quantiles.py`):

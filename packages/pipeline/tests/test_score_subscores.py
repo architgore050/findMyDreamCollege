@@ -74,7 +74,9 @@ def test_unknown_is_zero_to_hundred_never_zero_or_fifty(
         assert score.unknown_reason
 
 
-def test_below_min_claims_stays_unknown(scoring: ScoringConfig) -> None:
+def test_single_claim_is_scored_but_widened(scoring: ScoringConfig) -> None:
+    # min_claims_for_score is 1: one strong claim is real evidence, but it is
+    # never a complete score. The interval widens by sqrt(k/n).
     claim = {
         "predicate": "internship_to_offer_conversion_12m",
         "value": 0.7,
@@ -84,9 +86,59 @@ def test_below_min_claims_stays_unknown(scoring: ScoringConfig) -> None:
         "source_id": 1,
     }
     context = ScoreContext(config=scoring, profile={})
+    score = compute_sub_scores(ClaimIndex.build([claim]), context, profile={})["outcomes"]
+    assert score.point is not None
+    assert score.n_claims == 1
+    assert score.evidence_tier == "thin"
+    assert score.widened is True
+    assert score.lo < score.point < score.hi
+    assert (score.lo, score.hi) != (0.0, 100.0)
+
+
+def test_namespaced_predicate_reaches_the_component(scoring: ScoringConfig) -> None:
+    claim = {
+        "predicate": "seats.total",
+        "value": 100,
+        "unit": "count",
+        "claim_id": 1,
+        "source_id": 1,
+    }
+    context = ScoreContext(config=scoring, profile={})
+    score = compute_sub_scores(ClaimIndex.build([claim]), context, profile={})[
+        "admission_realism"
+    ]
+    assert score.point is not None
+    assert [component.name for component in score.components] == ["total"]
+
+
+def test_unit_mismatch_is_rejected_not_coerced(scoring: ScoringConfig) -> None:
+    claim = {
+        "predicate": "seats.total",
+        "value": 100,
+        "unit": "months",
+        "claim_id": 1,
+        "source_id": 1,
+    }
+    context = ScoreContext(config=scoring, profile={})
+    score = compute_sub_scores(ClaimIndex.build([claim]), context, profile={})[
+        "admission_realism"
+    ]
+    assert score.point is None
+    assert any("unit" in item["reason"] for item in score.rejected)
+
+
+def test_unknown_predicate_is_reported(scoring: ScoringConfig) -> None:
+    claim = {
+        "predicate": "mystery.predicate",
+        "value": 42,
+        "claim_id": 1,
+        "source_id": 1,
+    }
+    context = ScoreContext(config=scoring, profile={})
+    assert context.config.predicates is not None
+    assert context.config.predicates.unknown_predicates([claim]) == ("mystery.predicate",)
     scores = compute_sub_scores(ClaimIndex.build([claim]), context, profile={})
-    assert scores["outcomes"].point is None
-    assert "min_claims_for_score" in (scores["outcomes"].unknown_reason or "")
+    assert all(score.point is None for score in scores.values())
 
 
 def test_shrinkage_keeps_measured_and_prior_adjusted_separate(
@@ -226,5 +278,10 @@ def test_flag_penalty_widens_the_component_interval(scoring: ScoringConfig) -> N
     penalised_score = compute_sub_scores(index, penalised, profile={})["outcomes"]
     assert clean_score.point is not None
     assert penalised_score.point is not None
-    assert penalised_score.lo < clean_score.lo
-    assert penalised_score.hi > clean_score.hi
+    # Compare component intervals: both sub-scores are sample-size widened.
+    clean_component = next(c for c in clean_score.components if c.name == "p25_salary_to_col_ratio")
+    penalised_component = next(
+        c for c in penalised_score.components if c.name == "p25_salary_to_col_ratio"
+    )
+    assert penalised_component.lo < clean_component.lo
+    assert penalised_component.hi > clean_component.hi

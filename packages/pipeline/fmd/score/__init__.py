@@ -79,6 +79,9 @@ class ScoreResult:
     insights: InsightSelection | None = None
     gaming_flags: tuple[GamingFlag, ...] = ()
     assumptions: tuple[str, ...] = field(default_factory=tuple)
+    unknown_predicates: tuple[str, ...] = ()
+    alias_predicates: tuple[str, ...] = ()
+    predicate_registry_version: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -93,6 +96,9 @@ class ScoreResult:
             "insights": None if self.insights is None else self.insights.as_dict(),
             "gaming_flags": [flag.as_dict() for flag in self.gaming_flags],
             "assumptions": list(self.assumptions),
+            "unknown_predicates": list(self.unknown_predicates),
+            "alias_predicates": list(self.alias_predicates),
+            "predicate_registry_version": self.predicate_registry_version,
         }
 
     def to_score_create(self) -> dict[str, Any]:
@@ -136,7 +142,7 @@ def score_programme(
         from fmd.config import get_registry
 
         registry = get_registry()
-        scoring = ScoringConfig.from_config(registry.weights)
+        scoring = ScoringConfig.from_config(registry.weights, registry.predicates)
         if cost_rules is None:
             cost_rules = registry.cost_rules
     else:
@@ -146,6 +152,11 @@ def score_programme(
     problems = scoring.validate()
     if problems:
         raise ValueError("invalid scoring config: " + "; ".join(problems))
+
+    predicate_registry = scoring.predicates
+    assert predicate_registry is not None  # validate() guarantees it
+    unknown_predicates = predicate_registry.unknown_predicates(index)
+    alias_predicates = predicate_registry.alias_predicates(index)
 
     flags = detect(index, scoring.confidence_penalty_weights)
     penalties = confidence_penalties(flags)
@@ -158,12 +169,14 @@ def score_programme(
         cost_rules=cost_rules,
     )
     sub_scores = compute_sub_scores(index, context, profile=profile, cost=cost)
-    aggregate = composite(sub_scores, scoring.weights)
+    aggregate = composite(sub_scores, scoring)
 
     mandatory: list[Insight] = []
     mandatory.extend(from_filter_failures(filter_decisions))
     mandatory.extend(from_gaming_flags(flags))
-    recognition_claim = index.latest("recognition_status")
+    recognition_claim = index.latest("accreditation.recognition_status") or index.latest(
+        "recognition_status"
+    )
     status = (
         getattr(programme, "recognition_status", None)
         if not isinstance(programme, Mapping)
@@ -198,8 +211,14 @@ def score_programme(
         assumptions=(
             "sub-score component weights are equal within a sub-score; "
             "sub-score weights come from config/weights.yaml",
-            "UNKNOWN sub-scores contribute [0,100] and withhold the composite point",
+            "predicate -> component mapping comes from config/predicates.yaml; "
+            "unknown predicates are reported, never guessed",
+            "a subset composite is partial: its interval carries the full [0,100] "
+            "mass of every unknown component",
         ),
+        unknown_predicates=unknown_predicates,
+        alias_predicates=alias_predicates,
+        predicate_registry_version=predicate_registry.version,
     )
 
 

@@ -247,6 +247,8 @@ class WeightsConfig(ConfigModel):
     weights: dict[str, float]
     min_claims_for_score: int = 1
     min_claims_for_confidence: int = 1
+    min_components_for_composite: int = 2
+    single_claim_interval_half_width: float = 25.0
     peer_groups: PeerGroups
     evidence_tiers: dict[str, EvidenceTier]
     transforms: dict[str, Any] = Field(default_factory=dict)
@@ -256,6 +258,104 @@ class WeightsConfig(ConfigModel):
     salary: SalaryRules = Field(default_factory=SalaryRules)
     col: dict[str, Any] = Field(default_factory=dict)
     insights: InsightsRules = Field(default_factory=InsightsRules)
+
+
+# --------------------------------------------------------------------------- predicates
+
+PREDICATE_UNIT_KINDS = frozenset(
+    {
+        "money",
+        "count",
+        "hours",
+        "months",
+        "years",
+        "percent",
+        "ratio",
+        "grade",
+        "boolean",
+        "date",
+        "text",
+    }
+)
+
+PREDICATE_SCORING_KINDS = frozenset(
+    {
+        "percent",
+        "presence",
+        "transform",
+        "saturating",
+        "decay",
+        "cutoff_margin",
+        "eligibility_margin",
+        "cost_band",
+    }
+)
+
+
+class PredicateScoring(ConfigModel):
+    """How one predicate becomes a 0..100 component.
+
+    The parameters are registry data, never inferred from the claim value.
+    """
+
+    kind: str
+    transform: str | None = None
+    scale: float = 1.0
+    factor: float = 1.0
+
+    @field_validator("kind")
+    @classmethod
+    def _known_kind(cls, value: str) -> str:
+        if value not in PREDICATE_SCORING_KINDS:
+            raise ValueError(
+                f"unknown scoring kind {value!r}; known kinds: "
+                + ", ".join(sorted(PREDICATE_SCORING_KINDS))
+            )
+        return value
+
+    @field_validator("scale")
+    @classmethod
+    def _positive_scale(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("scale must be > 0")
+        return value
+
+
+class PredicateRule(ConfigModel):
+    """One row of ``config/predicates.yaml``."""
+
+    component: str | None = None
+    label: str | None = None
+    unit_kind: str | None = None
+    requires_denominator: bool = False
+    requires_period: bool = False
+    scoring: PredicateScoring | None = None
+    notes: str | None = None
+
+    @field_validator("unit_kind")
+    @classmethod
+    def _known_unit_kind(cls, value: str | None) -> str | None:
+        if value is not None and value not in PREDICATE_UNIT_KINDS:
+            raise ValueError(
+                f"unknown unit_kind {value!r}; known kinds: "
+                + ", ".join(sorted(PREDICATE_UNIT_KINDS))
+            )
+        return value
+
+
+class PredicatesConfig(ConfigModel):
+    """Typed view of the ninth registry file, ``config/predicates.yaml``."""
+
+    version: str
+    predicates: dict[str, PredicateRule]
+    aliases: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("version")
+    @classmethod
+    def _version_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("version must be non-empty")
+        return value
 
 
 # --------------------------------------------------------------------------- models

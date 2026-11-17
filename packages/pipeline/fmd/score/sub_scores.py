@@ -21,9 +21,6 @@ from typing import Any
 
 from fmd.score.config import ScoringConfig
 from fmd.score.evidence import (
-    INTERNSHIP_TO_OFFER,
-    REGISTRATION_CONVERSION,
-    SALARY_COL_RATIO,
     ClaimIndex,
     ClaimView,
     denominator,
@@ -31,6 +28,7 @@ from fmd.score.evidence import (
     is_rate_claim,
     numeric,
 )
+from fmd.score.predicates import PredicateRegistry, PredicateRuleView, period_present
 
 TIER_ORDER = ("well_evidenced", "partial", "thin", "insufficient")
 SUB_SCORE_IDS = (
@@ -89,6 +87,7 @@ class SubScore:
     modelled_share: float = 0.0
     widened: bool = False
     shrinkage_inactive: bool = False
+    rejected: tuple[dict[str, str], ...] = ()
 
     @property
     def known(self) -> bool:
@@ -111,6 +110,7 @@ class SubScore:
             "modelled_share": round(self.modelled_share, 4),
             "widened": self.widened,
             "shrinkage_inactive": self.shrinkage_inactive,
+            "rejected": list(self.rejected),
         }
 
 
@@ -228,16 +228,69 @@ def evidence_tier(
 
 @dataclass(frozen=True)
 class ComponentSpec:
-    """How one predicate becomes a 0..100 component."""
+    """How one registry predicate becomes a 0..100 component."""
 
     name: str
     predicate: str
     label: str
     kind: str
+    unit_kind: str | None = None
     transform: str | None = None
     scale: float = 1.0
     requires_denominator: bool = False
+    requires_period: bool = False
     factor: float = 1.0
+
+
+def _registry(context: ScoreContext) -> PredicateRegistry:
+    registry = context.config.predicates
+    if registry is None:
+        raise ValueError(
+            "scoring config has no predicate registry; load config/predicates.yaml"
+        )
+    return registry
+
+
+def _specs_for(registry: PredicateRegistry, component: str) -> tuple[ComponentSpec, ...]:
+    """Build component specs from the registry, never from hardcoded names."""
+
+    specs: list[ComponentSpec] = []
+    for rule in registry.rules_for(component):
+        if rule.kind == "cost_band":
+            continue  # affordability_roi bands are applied in its own function
+        specs.append(
+            ComponentSpec(
+                name=rule.predicate.rsplit(".", 1)[-1],
+                predicate=rule.predicate,
+                label=rule.label,
+                kind=str(rule.kind),
+                unit_kind=rule.unit_kind,
+                transform=rule.transform,
+                scale=rule.scale,
+                requires_denominator=rule.requires_denominator,
+                requires_period=rule.requires_period,
+                factor=rule.factor,
+            )
+        )
+    return tuple(specs)
+
+
+def _latest_for_rule(
+    registry: PredicateRegistry, index: ClaimIndex, rule: PredicateRuleView
+) -> ClaimView | None:
+    """Latest claim for a canonical predicate, including declared aliases."""
+
+    names = [rule.predicate, *registry.aliases_for(rule.predicate)]
+    candidates = [claim for name in names for claim in index.all(name)]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda claim: (
+            claim.observed_at.isoformat() if claim.observed_at else "",
+            str(claim.claim_id),
+        )
+    )
+    return candidates[-1]
 
 
 def _profile_get(profile: Any, path: str, default: Any = None) -> Any:
@@ -305,6 +358,8 @@ def _component_score(
     *,
     profile: Any,
 ) -> ComponentScore | None:
+    if spec.requires_period and not period_present(claim):
+        return None
     if spec.requires_denominator and is_rate_claim(claim) and denominator(claim) is None:
         return None
 
@@ -363,21 +418,43 @@ def _collect(
     *,
     profile: Any,
     extra_claims: Sequence[ClaimView] = (),
-) -> tuple[list[ComponentScore], list[ClaimView]]:
+) -> tuple[list[ComponentScore], list[ClaimView], list[dict[str, str]]]:
+    registry = _registry(context)
     components: list[ComponentScore] = []
     used: list[ClaimView] = []
+    rejected: list[dict[str, str]] = []
     for spec in specs:
-        found = index.latest(spec.predicate)
+        rule = registry.resolve(spec.predicate)
+        if rule is None:  # pragma: no cover - registry validated at load time
+            continue
+        found = _latest_for_rule(registry, index, rule)
         if found is None:
+            continue
+        reason = registry.rejects(found, rule)
+        if reason is not None:
+            rejected.append(
+                {
+                    "predicate": found.predicate,
+                    "claim_id": str(found.claim_id),
+                    "reason": reason,
+                }
+            )
             continue
         component = _component_score(spec, found, context, profile=profile)
         if component is None:
+            rejected.append(
+                {
+                    "predicate": found.predicate,
+                    "claim_id": str(found.claim_id),
+                    "reason": "value cannot be scored under the configured method",
+                }
+            )
             continue
         components.append(component)
         used.append(found)
     for claim in extra_claims:
         used.append(claim)
-    return components, used
+    return components, used, rejected
 
 
 def _finalise(
@@ -387,8 +464,10 @@ def _finalise(
     sub_score_id: str,
     *,
     extra_claims: Sequence[ClaimView] = (),
+    rejected: Sequence[Mapping[str, str]] = (),
 ) -> SubScore:
     config = context.config
+    rejected_tuple = tuple(dict(item) for item in rejected)
     claims_pair = list(used) + list(extra_claims)
     n_claims = len({str(c.claim_id) if c.claim_id is not None else id(c) for c in claims_pair})
     n_sources = len({str(c.source_id) for c in claims_pair if c.source_id is not None})
@@ -397,8 +476,19 @@ def _finalise(
     tier = evidence_tier(n_claims, n_sources, modelled_share, config.evidence_tiers)
 
     if not components:
-        return unknown_sub_score(
+        unknown = unknown_sub_score(
             f"no usable evidence for {sub_score_id}", n_claims=n_claims, n_sources=n_sources
+        )
+        return SubScore(
+            point=unknown.point,
+            lo=unknown.lo,
+            hi=unknown.hi,
+            n_claims=unknown.n_claims,
+            n_sources=unknown.n_sources,
+            evidence_tier=unknown.evidence_tier,
+            unknown_reason=unknown.unknown_reason,
+            shrinkage_inactive=True,
+            rejected=rejected_tuple,
         )
     if n_claims < config.min_claims_for_score:
         return SubScore(
@@ -415,6 +505,7 @@ def _finalise(
             ),
             modelled_share=modelled_share,
             shrinkage_inactive=True,
+            rejected=rejected_tuple,
         )
 
     weights = [1.0 for _ in components]
@@ -427,12 +518,27 @@ def _finalise(
     threshold = config.min_claims_for_confidence
     widened = False
     shrinkage_inactive = prior is None
-    if prior is not None and n_claims < threshold:
-        shrink = n_claims / (n_claims + threshold) if (n_claims + threshold) else 0.0
-        adjusted = shrink * measured + (1.0 - shrink) * float(prior)
+    if n_claims < threshold:
+        # A single strong claim is real evidence but a wide one. Widen the
+        # interval by sqrt(k/n) whether or not a peer prior exists; never
+        # invent a central value.
         widen = math.sqrt(threshold / max(n_claims, 1))
-        lo = clamp(adjusted - (adjusted - lo) * widen)
-        hi = clamp(adjusted + (hi - adjusted) * widen)
+        if prior is not None:
+            shrink = n_claims / (n_claims + threshold) if (n_claims + threshold) else 0.0
+            adjusted = shrink * measured + (1.0 - shrink) * float(prior)
+            lo = clamp(adjusted - (adjusted - lo) * widen)
+            hi = clamp(adjusted + (hi - adjusted) * widen)
+        else:
+            adjusted = measured
+            # Claim confidence can be 1.0 for a single perfectly-copied span;
+            # that is not sample representativeness. Widen from the larger
+            # existing half-width, with the configured floor so n=1 is visibly
+            # uncertain rather than falsely precise.
+            half = max(adjusted - lo, hi - adjusted)
+            if half <= 0.0:
+                half = context.config.single_claim_interval_half_width
+            lo = clamp(adjusted - half * widen)
+            hi = clamp(adjusted + half * widen)
         widened = True
     else:
         # No suppliable prior: never invent one. Report measured unchanged.
@@ -451,136 +557,8 @@ def _finalise(
         modelled_share=modelled_share,
         widened=widened,
         shrinkage_inactive=shrinkage_inactive,
+        rejected=rejected_tuple,
     )
-
-
-# --------------------------------------------------------------------------- specs
-
-
-OUTCOME_SPECS: tuple[ComponentSpec, ...] = (
-    ComponentSpec(
-        "internship_to_offer",
-        INTERNSHIP_TO_OFFER,
-        "Internship-to-offer conversion (12m)",
-        "percent",
-        requires_denominator=True,
-    ),
-    ComponentSpec(
-        "registration_conversion",
-        REGISTRATION_CONVERSION,
-        "Registration conversion (12m)",
-        "percent",
-        requires_denominator=True,
-    ),
-    ComponentSpec(
-        "salary_growth_3y",
-        "salary_growth_3y",
-        "Salary growth over 3 years",
-        "percent",
-    ),
-    ComponentSpec(
-        "salary_vs_col",
-        SALARY_COL_RATIO,
-        "P25 salary relative to city cost of living",
-        "saturating",
-        scale=1.0,
-    ),
-)
-
-CLINICAL_SPECS: tuple[ComponentSpec, ...] = (
-    ComponentSpec(
-        "internship_hours",
-        "internship_hours",
-        "Internship hours",
-        "transform",
-        transform="internship_hours",
-    ),
-    ComponentSpec("nabl_lab", "nabl_accredited_lab", "NABL-accredited training lab", "presence"),
-    ComponentSpec("nabh_hospital", "nabh_hospital", "NABH-accredited hospital access", "presence"),
-    ComponentSpec(
-        "departments_rotated",
-        "departments_rotated",
-        "Departments rotated",
-        "saturating",
-        scale=6.0,
-    ),
-    ComponentSpec(
-        "equipment_verified",
-        "lab_equipment_verified",
-        "Lab equipment verified",
-        "presence",
-    ),
-)
-
-ACADEMIC_SPECS: tuple[ComponentSpec, ...] = (
-    ComponentSpec("naac_grade", "naac_grade", "NAAC grade", "transform", transform="naac_grade"),
-    ComponentSpec(
-        "recognition",
-        "recognition_status",
-        "Recognition status",
-        "transform",
-        transform="recognition_status",
-    ),
-    ComponentSpec("autonomous", "autonomous_status", "Autonomous status", "presence"),
-    ComponentSpec("faculty_count", "faculty_count", "Faculty count", "saturating", scale=40.0),
-    ComponentSpec(
-        "nirf_proxy",
-        "nirf_rank_institution",
-        "NIRF institution-level proxy",
-        "decay",
-        scale=100.0,
-    ),
-)
-
-FINANCING_SPECS: tuple[ComponentSpec, ...] = (
-    ComponentSpec("loan_terms", "loan_terms_published", "Published loan terms", "presence"),
-    ComponentSpec("subsidy", "subsidy_eligible", "Subsidy eligibility", "presence"),
-    ComponentSpec(
-        "collateral_free", "collateral_free_available", "Collateral-free option", "presence"
-    ),
-    ComponentSpec(
-        "student_work_hours",
-        "student_work_legal_hours",
-        "Legal student-work entitlement",
-        "saturating",
-        scale=20.0,
-    ),
-)
-
-STUDENT_LIFE_SPECS: tuple[ComponentSpec, ...] = (
-    ComponentSpec("city_safety", "city_safety_index", "City safety index", "percent"),
-    ComponentSpec("hostel", "hostel_available", "Hostel availability", "presence"),
-    ComponentSpec("gender_safety", "gender_safety_measures", "Gender-safety measures", "presence"),
-    ComponentSpec(
-        "support_services", "support_services_count", "Support services", "saturating", scale=3.0
-    ),
-    ComponentSpec("review_safety", "review_aspect_safety", "Review: safety aspect", "percent"),
-)
-
-ADMISSION_SPECS: tuple[ComponentSpec, ...] = (
-    ComponentSpec(
-        "cutoff_margin",
-        "cutoff_pct",
-        "Cutoff vs applicant marks",
-        "cutoff_margin",
-        scale=10.0,
-    ),
-    ComponentSpec(
-        "eligibility_margin",
-        "eligibility_min_aggregate_pct",
-        "Eligibility margin",
-        "eligibility_margin",
-        scale=8.0,
-    ),
-    ComponentSpec("seats", "seats", "Seats available", "transform", transform="seats"),
-    ComponentSpec(
-        "applicant_seat_ratio",
-        "applicants_per_seat",
-        "Applicants per seat",
-        "decay",
-        scale=10.0,
-    ),
-)
 
 
 # --------------------------------------------------------------------------- sub-scores
@@ -589,22 +567,31 @@ ADMISSION_SPECS: tuple[ComponentSpec, ...] = (
 def outcomes(
     index: ClaimIndex, context: ScoreContext, *, profile: Any = None, cost: Any = None
 ) -> SubScore:
-    components, used = _collect(OUTCOME_SPECS, index, context, profile=profile)
-    return _finalise(components, used, context, "outcomes")
+    registry = _registry(context)
+    components, used, rejected = _collect(
+        _specs_for(registry, "outcomes"), index, context, profile=profile
+    )
+    return _finalise(components, used, context, "outcomes", rejected=rejected)
 
 
 def clinical_training(
     index: ClaimIndex, context: ScoreContext, *, profile: Any = None, cost: Any = None
 ) -> SubScore:
-    components, used = _collect(CLINICAL_SPECS, index, context, profile=profile)
-    return _finalise(components, used, context, "clinical_training")
+    registry = _registry(context)
+    components, used, rejected = _collect(
+        _specs_for(registry, "clinical_training"), index, context, profile=profile
+    )
+    return _finalise(components, used, context, "clinical_training", rejected=rejected)
 
 
 def academic_quality(
     index: ClaimIndex, context: ScoreContext, *, profile: Any = None, cost: Any = None
 ) -> SubScore:
-    components, used = _collect(ACADEMIC_SPECS, index, context, profile=profile)
-    return _finalise(components, used, context, "academic_quality")
+    registry = _registry(context)
+    components, used, rejected = _collect(
+        _specs_for(registry, "academic_quality"), index, context, profile=profile
+    )
+    return _finalise(components, used, context, "academic_quality", rejected=rejected)
 
 
 def _band_score(value: float, bands: Mapping[str, Any]) -> float | None:
@@ -726,22 +713,31 @@ def affordability_roi(
 def financing_feasibility(
     index: ClaimIndex, context: ScoreContext, *, profile: Any = None, cost: Any = None
 ) -> SubScore:
-    components, used = _collect(FINANCING_SPECS, index, context, profile=profile)
-    return _finalise(components, used, context, "financing_feasibility")
+    registry = _registry(context)
+    components, used, rejected = _collect(
+        _specs_for(registry, "financing_feasibility"), index, context, profile=profile
+    )
+    return _finalise(components, used, context, "financing_feasibility", rejected=rejected)
 
 
 def student_life_safety(
     index: ClaimIndex, context: ScoreContext, *, profile: Any = None, cost: Any = None
 ) -> SubScore:
-    components, used = _collect(STUDENT_LIFE_SPECS, index, context, profile=profile)
-    return _finalise(components, used, context, "student_life_safety")
+    registry = _registry(context)
+    components, used, rejected = _collect(
+        _specs_for(registry, "student_life_safety"), index, context, profile=profile
+    )
+    return _finalise(components, used, context, "student_life_safety", rejected=rejected)
 
 
 def admission_realism(
     index: ClaimIndex, context: ScoreContext, *, profile: Any = None, cost: Any = None
 ) -> SubScore:
-    components, used = _collect(ADMISSION_SPECS, index, context, profile=profile)
-    return _finalise(components, used, context, "admission_realism")
+    registry = _registry(context)
+    components, used, rejected = _collect(
+        _specs_for(registry, "admission_realism"), index, context, profile=profile
+    )
+    return _finalise(components, used, context, "admission_realism", rejected=rejected)
 
 
 IMPLEMENTATIONS: Mapping[str, Any] = {

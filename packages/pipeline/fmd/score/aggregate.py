@@ -46,6 +46,9 @@ class Composite:
     known_weight: float
     total_weight: float
     unknown_sub_scores: tuple[str, ...]
+    components_used: tuple[str, ...] = ()
+    components_unknown: tuple[str, ...] = ()
+    partial: bool = True
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +64,9 @@ class Composite:
             "known_weight": round(self.known_weight, 4),
             "total_weight": round(self.total_weight, 4),
             "unknown_sub_scores": list(self.unknown_sub_scores),
+            "components_used": list(self.components_used),
+            "components_unknown": list(self.components_unknown),
+            "partial": self.partial,
         }
 
 
@@ -95,22 +101,36 @@ def composite(
     weights: Mapping[str, float] | ScoringConfig,
     *,
     tiers: Mapping[str, Mapping[str, Any]] | None = None,
+    min_components: int | None = None,
 ) -> Composite:
-    """Weighted composite with independent and comonotonic interval bounds."""
+    """Weighted composite with independent and comonotonic interval bounds.
+
+    Evidence from a *subset* of components is published as a partial composite:
+    the point is the weighted mean of the known components, but the interval
+    carries the full unknown mass ``[0, 100]`` per missing component, so one
+    component can never masquerade as the whole picture. A composite from
+    ``min_components`` or more is still ``partial`` while any component is
+    unknown. Zero known components is ``UNKNOWN``.
+    """
 
     if isinstance(weights, ScoringConfig):
         config = weights
         weight_map = config.weights
         tier_map = config.evidence_tiers
+        minimum = config.min_components_for_composite
     else:
         weight_map = weights
         tier_map = tiers or {}
+        minimum = 2
+    if min_components is not None:
+        minimum = min_components
 
     validate_weights(weight_map)
 
     known_weight = 0.0
     total_weight = 0.0
     unknown: list[str] = []
+    used: list[str] = []
     point_sum = 0.0
     lo_comonotonic_sum = 0.0
     hi_comonotonic_sum = 0.0
@@ -128,6 +148,7 @@ def composite(
             variance += (weight * (100.0 / (2.0 * Z80))) ** 2
             continue
         known_weight += weight
+        used.append(sub_score_id)
         point_sum += weight * score.point
         lo_comonotonic_sum += weight * score.lo
         hi_comonotonic_sum += weight * score.hi
@@ -141,31 +162,59 @@ def composite(
     lo_comonotonic = lo_comonotonic_sum / total_weight
     hi_comonotonic = hi_comonotonic_sum / total_weight
     sigma_composite = math.sqrt(variance) / total_weight
-    point = point_sum / total_weight if not unknown else None
+    partial = bool(unknown) or len(used) < minimum
 
-    if point is None:
-        lo_independent = max(0.0, _weighted_lower(sub_scores, weight_map, total_weight))
-        hi_independent = min(100.0, _weighted_upper(sub_scores, weight_map, total_weight))
+    if not used:
+        point = None
+        lo_independent, hi_independent = 0.0, 100.0
+        lo, hi = 0.0, 100.0
+        bound = "unknown"
+    elif not unknown:
+        point = point_sum / total_weight
+        if len(used) < minimum:
+            # A one-component registry cannot satisfy the composite minimum;
+            # keep the point as the component value but publish no precision.
+            lo_independent, hi_independent = 0.0, 100.0
+            lo, hi = 0.0, 100.0
+            bound = "partial_wide"
+        else:
+            lo_independent = max(0.0, point - Z80 * sigma_composite)
+            hi_independent = min(100.0, point + Z80 * sigma_composite)
+            lo, hi = lo_comonotonic, hi_comonotonic
+            bound = "independent"
     else:
-        lo_independent = max(0.0, point - Z80 * sigma_composite)
-        hi_independent = min(100.0, point + Z80 * sigma_composite)
+        # Normalise the point over the evidence that exists; the interval is
+        # plain interval arithmetic over *all* weights, so the unknown mass
+        # stays visible instead of being renormalised away.
+        point = point_sum / known_weight if known_weight > 0 else None
+        lo_independent = lo_comonotonic
+        hi_independent = hi_comonotonic
+        lo, hi = lo_comonotonic, hi_comonotonic
+        bound = "partial_wide" if len(used) < minimum else "wide"
 
-    known_scores = [_as_sub_score(sub_scores[key]) for key in weight_map if key in sub_scores]
-    tier = _composite_tier(known_scores, unknown, tier_map)
+    known_scores = [
+        score
+        for key in weight_map
+        if key in sub_scores and (score := _as_sub_score(sub_scores[key])).point is not None
+    ]
+    tier = _composite_tier(known_scores, unknown, tier_map, partial=partial)
 
     return Composite(
         point=point,
-        lo=lo_independent if point is not None else lo_comonotonic,
-        hi=hi_independent if point is not None else hi_comonotonic,
+        lo=lo,
+        hi=hi,
         lo_independent=lo_independent,
         hi_independent=hi_independent,
         lo_comonotonic=lo_comonotonic,
         hi_comonotonic=hi_comonotonic,
-        bound="independent" if point is not None else "comonotonic",
+        bound=bound,
         evidence_tier=tier,
         known_weight=known_weight,
         total_weight=total_weight,
         unknown_sub_scores=tuple(unknown),
+        components_used=tuple(used),
+        components_unknown=tuple(unknown),
+        partial=partial,
     )
 
 
@@ -197,6 +246,8 @@ def _composite_tier(
     known_scores: Sequence[SubScore],
     unknown: Sequence[str],
     tiers: Mapping[str, Mapping[str, Any]],
+    *,
+    partial: bool = False,
 ) -> str:
     if not known_scores:
         return "insufficient"
@@ -205,9 +256,9 @@ def _composite_tier(
         return TIER_ORDER.index(tier) if tier in TIER_ORDER else len(TIER_ORDER)
 
     worst = max(known_scores, key=lambda score: rank(score.evidence_tier)).evidence_tier
-    if unknown and rank(worst) < rank("thin"):
-        # A missing sub-score cannot leave the record "well evidenced".
-        worst = "thin"
+    if partial and rank(worst) < rank("partial"):
+        # A subset composite can never claim to be better than partial.
+        worst = "partial"
     if tiers and known_scores:
         total_claims = sum(score.n_claims for score in known_scores)
         total_sources = sum(score.n_sources for score in known_scores)
@@ -215,6 +266,8 @@ def _composite_tier(
             total_claims, 1
         )
         measured = evidence_tier(total_claims, total_sources, share, tiers)
+        if partial and rank(measured) < rank("partial"):
+            measured = "partial"
         if rank(measured) > rank(worst):
             worst = measured
     return worst

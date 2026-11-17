@@ -42,18 +42,38 @@ def test_composite_with_all_known_sub_scores() -> None:
     assert result.unknown_sub_scores == ()
 
 
-def test_unknown_propagates_and_withholds_point() -> None:
+def test_unknown_propagates_as_a_wide_partial_composite() -> None:
     sub_scores = {
         "a": _score(80.0, 70.0, 90.0),
         "b": _score(None, 0.0, 100.0, evidence_tier="insufficient", n_claims=0, n_sources=0),
     }
     result = composite(sub_scores, {"a": 50.0, "b": 50.0})
-    assert result.point is None
+    # The point is the weighted mean of what is known, but the interval still
+    # carries the unknown component's full [0,100] mass.
+    assert result.point == pytest.approx(80.0)
     assert result.lo_comonotonic == pytest.approx(35.0)
     assert result.hi_comonotonic == pytest.approx(95.0)
-    assert result.bound == "comonotonic"
+    assert result.lo <= result.point <= result.hi
+    assert result.bound == "partial_wide"
+    assert result.partial is True
+    assert result.components_used == ("a",)
+    assert result.components_unknown == ("b",)
     assert result.unknown_sub_scores == ("b",)
     assert result.known_weight == 50.0
+
+
+def test_zero_components_is_unknown() -> None:
+    sub_scores = {
+        "a": _score(None, 0.0, 100.0, evidence_tier="insufficient", n_claims=0, n_sources=0),
+        "b": _score(None, 0.0, 100.0, evidence_tier="insufficient", n_claims=0, n_sources=0),
+    }
+    result = composite(sub_scores, {"a": 50.0, "b": 50.0})
+    assert result.point is None
+    assert (result.lo, result.hi) == (0.0, 100.0)
+    assert result.bound == "unknown"
+    assert result.components_used == ()
+    assert result.partial is True
+    assert result.evidence_tier == "insufficient"
 
 
 def test_composite_tier_is_capped_when_a_sub_score_is_missing() -> None:
@@ -68,7 +88,7 @@ def test_composite_tier_is_capped_when_a_sub_score_is_missing() -> None:
         "b": _score(None, 0.0, 100.0, evidence_tier="partial", n_claims=0, n_sources=0),
     }
     result = composite(sub_scores, {"a": 50.0, "b": 50.0}, tiers=tiers)
-    assert result.evidence_tier == "thin"
+    assert result.evidence_tier == "partial"
 
 
 def test_pareto_dominance_including_not_comparable() -> None:

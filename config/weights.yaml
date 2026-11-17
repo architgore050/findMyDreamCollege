@@ -1,8 +1,8 @@
 # Scoring configuration. Changing anything here requires bumping `weights_version`.
 # Sub-scores return {point, lo, hi, n_claims, n_sources, evidence_tier}. UNKNOWN propagates as [0,100].
 
-weights_version: "2026-11-16.2"
-scorer_version: "0.2.0"
+weights_version: "2026-11-18.1"
+scorer_version: "0.3.0"
 
 weights:
   outcomes: 30
@@ -13,10 +13,21 @@ weights:
   admission_realism: 10
   financing_feasibility: 5
 
-# Sub-scores with no evidence below this many claims are returned as UNKNOWN, not scored.
-min_claims_for_score: 2
-# Below this, point estimates are shrunk toward the peer-group prior and the interval widened.
+# A component (sub-score) is scored from n >= 1 usable claim: one strong,
+# verified claim is real evidence, but its interval is widened by
+# sqrt(min_claims_for_confidence / n). It is never a complete score.
+# A composite is published from >= min_components_for_composite known
+# components; fewer is reported as `partial` with a wide interval and the
+# exact components_used / components_unknown lists. Zero components is UNKNOWN.
+min_claims_for_score: 1
+min_components_for_composite: 2
+# Below this, point estimates are shrunk toward the peer-group prior (when one
+# is supplied) and the interval is always widened.
 min_claims_for_confidence: 5
+# A component scored from n < min_claims_for_confidence is widened from at
+# least this half-width before sqrt(k/n) is applied. A perfectly-copied span
+# (confidence 1.0) is not sample representativeness.
+single_claim_interval_half_width: 25
 
 peer_groups:
   # Shrinkage target keys. v1 ships no numeric priors: until a caller supplies
@@ -43,6 +54,11 @@ transforms:
   internship_hours:
     type: piecewise
     points: [[0, 0], [600, 30], [1200, 70], [1800, 100]]
+  # MLT curricula state the internship in months, not hours. This map is the
+  # explicit months scale; there is no hours<->months conversion by guesswork.
+  internship_months:
+    type: piecewise
+    points: [[0, 0], [3, 25], [6, 50], [12, 100]]
   seats:
     type: log
     scale: 100

@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from fmd.score.predicates import PredicateRegistry, PredicateRegistryError
 from fmd.score.quantiles import QuantileRules
 
 
@@ -44,11 +45,14 @@ class ScoringConfig:
     scorer_version: str
     min_claims_for_score: int
     min_claims_for_confidence: int
+    min_components_for_composite: int
+    single_claim_interval_half_width: float
     transforms: Mapping[str, Any]
     evidence_tiers: Mapping[str, Mapping[str, Any]]
     confidence_penalty_weights: Mapping[str, float]
     salary: QuantileRules
     insights: InsightRules
+    predicates: PredicateRegistry | None = None
     peer_group_keys: tuple[str, ...] = ()
     peer_group_min_size: int = 0
     peer_group_fallback: str = "country_prior"
@@ -56,8 +60,13 @@ class ScoringConfig:
     extras: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_config(cls, weights: Any) -> ScoringConfig:
-        """Build from ``WeightsConfig`` (typed) or its YAML mapping."""
+    def from_config(cls, weights: Any, predicates: Any | None = None) -> ScoringConfig:
+        """Build from ``WeightsConfig`` (typed) or its YAML mapping.
+
+        ``predicates`` is the ninth registry file. When omitted it is read from
+        the same registry (``WeightsConfig`` carries no predicate map); a
+        caller that supplies synthetic weights must pass it explicitly.
+        """
 
         raw = _plain(weights)
         if not isinstance(raw, Mapping):
@@ -68,12 +77,30 @@ class ScoringConfig:
         peer = raw.get("peer_groups") or {}
         tiers = raw.get("evidence_tiers") or {}
 
+        registry: PredicateRegistry | None = None
+        candidate = predicates if predicates is not None else raw.get("predicates")
+        if candidate is not None:
+            registry = PredicateRegistry.from_config(candidate)
+        else:
+            try:
+                from fmd.config import get_registry
+
+                registry = PredicateRegistry.from_config(get_registry().predicates)
+            except (PredicateRegistryError, RuntimeError, ValueError):
+                # Validation reports the missing registry; scoring stays
+                # unavailable rather than guessing bare predicate names.
+                registry = None
+
         return cls(
             weights={str(k): float(v) for k, v in (raw.get("weights") or {}).items()},
             weights_version=str(raw.get("weights_version", "unversioned")),
             scorer_version=str(raw.get("scorer_version", "0.0.0")),
             min_claims_for_score=int(raw.get("min_claims_for_score", 1)),
             min_claims_for_confidence=int(raw.get("min_claims_for_confidence", 1)),
+            min_components_for_composite=int(raw.get("min_components_for_composite", 2)),
+            single_claim_interval_half_width=float(
+                raw.get("single_claim_interval_half_width", 25.0)
+            ),
             transforms=dict(raw.get("transforms") or {}),
             evidence_tiers={
                 str(name): {
@@ -102,6 +129,7 @@ class ScoringConfig:
                 ),
                 min_marginal_gain=float(insight_raw.get("min_marginal_gain", 0.0)),
             ),
+            predicates=registry,
             peer_group_keys=tuple(str(k) for k in (peer.get("keys") or ())),
             peer_group_min_size=int(peer.get("min_group_size", 0)),
             peer_group_fallback=str(peer.get("fallback", "country_prior")),
@@ -116,6 +144,8 @@ class ScoringConfig:
                     "scorer_version",
                     "min_claims_for_score",
                     "min_claims_for_confidence",
+                    "min_components_for_composite",
+                    "single_claim_interval_half_width",
                     "transforms",
                     "evidence_tiers",
                     "confidence_penalties",
@@ -131,11 +161,22 @@ class ScoringConfig:
         """Return problems instead of silently renormalising anything."""
 
         problems: list[str] = []
+        if self.predicates is None:
+            problems.append(
+                "no predicate registry: config/predicates.yaml must be loaded so "
+                "namespaced claims map to sub-score components"
+            )
         total = sum(self.weights.values())
         if abs(total - 100.0) > 1e-6:
             problems.append(f"sub-score weights sum to {total:g}, expected 100")
         if any(weight < 0 for weight in self.weights.values()):
             problems.append("sub-score weights must be non-negative")
+        if self.min_claims_for_score < 1:
+            problems.append("min_claims_for_score must be >= 1")
+        if self.min_components_for_composite < 1:
+            problems.append("min_components_for_composite must be >= 1")
+        if not 0.0 < self.single_claim_interval_half_width <= 50.0:
+            problems.append("single_claim_interval_half_width must be within (0, 50]")
         if self.salary.min_n_for_empirical_quantile < 2:
             problems.append("salary.min_n_for_empirical_quantile must be >= 2")
         if self.salary.widen_interval_when_n_lt < 1:

@@ -1166,8 +1166,9 @@ Inventory: **1,247 entities**, **1,204 institution domains** (1,153 pending,
 (`yield_score=0`), so 1,200+ is the real ceiling of this source shape.
 
 Evidence crawl (50 domains, 300-document cap, 38 min): 103 URLs planned,
-94 fetched, 21 stored, **73 deduped** (simhash, near-identical IQAC/boilerplate
-PDFs), 20 robots abstentions, 15 network failures (13 connect timeouts, 1 read
+94 fetched, 21 stored, **73 deduped** (simhash; see §Dedupe audit below —
+the 2026-11-18 audit found these were *false positives*, not boilerplate),
+20 robots abstentions, 15 network failures (13 connect timeouts, 1 read
 timeout, 1 DNS). 47 documents linked to a family: `accreditation` 27,
 `placement_report` 10, `curriculum` 9, `seat_matrix` 1. 27 PDFs have snapshots.
 
@@ -1179,10 +1180,10 @@ All 7 new claims verified `supported`; 0 unverified. Every claim carries
 `qualifier_json.page_no` and a glyph `bbox`, and its quote resolves in
 `extractions.text`.
 
-Scoring: **no programmes exist yet** (0 rows), so composite bands are not
-meaningful at this n. Claims are accreditation/curriculum/placement facts, not
-seat/fee facts; programme assembly needs a second crawl aimed at seat matrices
-and fee notifications.
+Scoring: **no programmes existed at the time of the first pass** (0 rows), so
+composite bands were not meaningful. Programme materialisation landed on
+2026-11-18 (§Programme materialisation); the predicate-alias fix later the same
+day made components scoreable — see that section for the recomputed bands.
 
 ### Log commands
 
@@ -1197,3 +1198,153 @@ tail -f /tmp/opencode/ramp/score.log        # score summary
 Run summaries are also persisted in `pipeline_runs` (query by `run_id` printed
 at the end of each log) and mirrored into `docs/` only when a report is asked
 for; the logs above are the run-summary files for this pass.
+
+## Programme materialisation (2026-11-18)
+
+Scoring selects from `programmes`. Before this stage that table had 0 rows, so a
+12-claim evidence base produced an empty shortlist by construction.
+
+### Contract
+
+`fmd/ingest/programmes.py` (pure) + `ProgrammeStage` in
+`fmd/orchestrate/ingest.py` (persistence). One row per
+`(institution, ER-normalised programme name)`.
+
+* Input is **only** `claims.verification_status='supported'`, unsuperseded,
+  `method <> 'modelled'`, from a `documents.role='evidence'` document whose
+  entity is an institution. Navigation/inventory documents are refused in SQL.
+* Every set attribute records its claim id in `programmes.field_sources`,
+  keyed by the **predicate** that proved it
+  (`{"seats.total": "5", "seats.programme_name": "4"}`). An attribute with no
+  claim stays `NULL`; no seats/duration is ever defaulted.
+* Names go through `fmd.er.normalise.normalise_name` plus the registry alias
+  table `config/sources.yaml → institution_sites.params.programme_mapping`.
+  `B.Sc. MLT` and `Bachelor of Medical Laboratory Technology (BMLT)` collapse to
+  `bsc mlt`; MLT and MLS stay separate keys and are flagged
+  `needs_review` (`possible_duplicate_programme_name:…`) rather than merged.
+  Multiple names at one institution get one row each; unqualified attributes
+  are left `NULL` with `attribute_programme_ambiguous`.
+* Re-running is idempotent: `ON CONFLICT (institution_id, normalised_name)` and
+  the row is replaced with the current draft (including NULLs).
+
+Invocation (host venv; the run ledger row is written by the caller when needed):
+
+```bash
+export DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd
+cd packages/pipeline
+uv run python - <<'PY'
+from fmd.config import load_registry
+from fmd.db import Database
+from fmd.orchestrate.ingest import ProgrammeStage
+from fmd.orchestrate.ledger import RunSummary, utcnow
+db = Database(); stage = ProgrammeStage.from_database(db, load_registry(None))
+s = RunSummary(run_id="programme-materialisation", stage="ingest", started_at=utcnow())
+stage.run(summary=s); s.finish(); print(s.as_json()); db.close()
+PY
+uv run python -m fmd.cli score
+```
+
+### Measured on the 12-claim DB
+
+2 programmes created from 12 supported claims; 3 entities rejected
+(`no_programme_name_claim`: entities 1, 704, 1027 — accreditation/placement
+facts without a programme name).
+
+| programme | institution | name | seats | internship | duration | field_sources |
+|---|---|---|---|---|---|---|
+| 1 | 2 TN Dr MGR MU | B.Sc. Medical Laboratory Technology | 20 | — | — | seats.programme_name=4, seats.total=5 |
+| 2 | 10 Adesh University | Bachelor of Medical Laboratory Sciences | — | 1 mo | — | curriculum.programme_name=10, curriculum.internship_months=12 |
+
+Scores before the alias fix: 2 written, **0 with any scoreable sub-score**, composite
+`UNKNOWN` [0,100], `evidence_tier=insufficient`. Two independent blockers were
+recorded here:
+
+1. **Predicate vocabulary mismatch** (the main one): extraction emits
+   namespaced predicates (`seats.total`, `accreditation.naac_grade`,
+   `curriculum.internship_months`) while `fmd/score/sub_scores.py` looked up
+   bare names (`seats`, `naac_grade`, `internship_hours`). No claim was visible
+   to any component.
+2. **`min_claims_for_score=2`**: even after aliasing, entity 2 contributes one
+   `seats` claim and entity 10 one `internship_*` claim, so a sub-score would
+   still be UNKNOWN at this n. `duration` came from `curriculum.semesters=8`
+   only; converting semesters to months is a derivation that this stage
+   deliberately does not perform, so `duration_months` is NULL.
+
+### Predicate alias fix and recomputation (2026-11-18, WS-SCORE-ALIAS)
+
+`config/predicates.yaml` now maps every extraction predicate to a component,
+unit kind and denominator/period rule; `fmd/score/sub_scores.py` builds its
+component specs from that registry. `min_claims_for_score` is 1 with interval
+widening, and a subset composite is `partial` with `components_used` /
+`components_unknown` (see brief §11). Re-running `fmd score --force` on the same
+12-claim DB produced:
+
+| programme | component (n) | component value [interval] | composite band | tier | components used / unknown |
+|---|---|---|---|---|---|
+| 1 seats=20 | `admission_realism` (1) | 65.97 [58.59, 73.34] | 65.97 [5.86, 97.33] partial | thin | 1 / 6 |
+| 2 internship=1 mo | `clinical_training` (1) | 8.33 [0.00, 38.05] | 8.33 [0.00, 90.71] partial | thin | 1 / 6 |
+
+Every other component is `UNKNOWN` [0,100]: the remaining claims are
+evidence-only (`seats.intake_year`, `seats.programme_name`,
+`curriculum.programme_name`, `curriculum.semesters`) and do not score.
+`unknown_predicates` is empty; the 1-month internship scores through the
+explicit `internship_months` transform, not an hours conversion. Semesters are
+still not converted to months.
+
+Ranking at n=2 is **not defensible**: the two partial composites rest on
+disjoint components (seats vs internship months), so `compare()` returns
+`not_comparable` and no ordering is published. The numbers are evidence, not a
+shortlist.
+
+## Dedupe audit (2026-11-18)
+
+The 19:22 crawl dropped 73 of 94 fetched documents as `near_duplicate_simhash`.
+Audit of those 73 documents:
+
+* **73/73 are PDFs**; 0 HTML/JSON.
+* **33 distinct domains**; **71 distinct filename stems** — only one stem
+  appears twice (a genuine same-name republication). 72/73 are therefore
+  *distinctly named documents*: annual reports by year, English vs Hindi
+  editions, prospectuses, certificates, circulars.
+* Mechanism, measured from the object store: the crawler's `FetchResult.text`
+  is raw body bytes decoded as UTF-8, not extracted PDF text. 64-bit simhash
+  over decoded PDF container bytes is dominated by `%PDF`/object-stream/font
+  boilerplate. Recomputing full-body simhash over 12 stored PDFs gives 31/66
+  pairs at Hamming ≤3 (the configured threshold); a 64 KB-prefix pass over all
+  122 stored PDFs gives 1,905/7,381 pairs ≤3. Unrelated PDFs collide by
+  construction, so raising/lowering `simhash_threshold` cannot fix it.
+
+Verdict: **false positives, material (≥72/73, 98.6%)**. Applied config fix:
+`institution_sites.params.dedupe.mode: exact` — byte-identical mirrors are
+still caught by sha256; distinct PDFs are no longer collapsed. The durable fix
+is to fingerprint *extracted text* in `fmd/fetch` (out of this workstream).
+
+Re-run the audit offline against a run summary that carries
+`metadata.dedupe` (URL, compared_url, similarity, hamming_distance):
+
+```python
+from fmd.ingest.dedupe_audit import audit
+print(audit(entries).as_dict())   # boilerplate vs false_positive, by_source
+```
+
+## `hard_pdf` abstention semantics (2026-11-18)
+
+The first pass recorded `unresolved_provider` ×3. That code means "the
+environment named a provider that is not declared under `providers:`" — a
+misconfiguration, and the wrong label for an optional tier. Verified against
+the current registry (offline, `ModelRouter.call("hard_pdf", …)`):
+
+| env | reason |
+|---|---|
+| no `FMD_API_LLM_URL` / `KEY` / `MODEL` | `vision_unavailable` |
+| URL+key set, `FMD_API_MODEL` unset | `vision_unavailable` |
+| model+URL+key set, unknown `FMD_HARD_PDF_PROVIDER` | `unresolved_provider` |
+
+Fix: **point `hard_pdf` at an explicitly optional profile**, which the profile
+already is (`required: false`, `degrade_reason: vision_unavailable`); the
+observed rows predate the profile-blocker path. No routing change was needed.
+If a deployment has no hosted vision model, leave `FMD_API_MODEL` unset and the
+tier degrades per document with `vision_unavailable`; text PDFs still extract.
+A non-empty `FMD_HARD_PDF_PROVIDER` must name a provider declared under
+`providers:` (`api`, `gemini`, …); a typo is the only way to see
+`unresolved_provider` again.

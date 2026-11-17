@@ -29,6 +29,7 @@ from fmd.config.models import (
     ExamsConfig,
     ModelsConfig,
     PlanConfig,
+    PredicatesConfig,
     SourcesConfig,
     WeightsConfig,
 )
@@ -45,6 +46,7 @@ CONFIG_FILES: dict[str, str] = {
     "er": "er.yaml",
     "acquire": "acquire.yaml",
     "plan": "plan.yaml",
+    "predicates": "predicates.yaml",
 }
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -114,6 +116,7 @@ class Registry:
     er: ErConfig
     acquire: AcquireConfig
     plan: PlanConfig
+    predicates: PredicatesConfig
     config_dir: Path
 
     @property
@@ -469,6 +472,103 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
     if plan.phase_b.max_headings < 0:
         errors.append("plan.yaml: phase_b.max_headings must be >= 0")
 
+    # ---------------------------------------------------------------- predicates
+    predicates = registry.predicates
+    if not predicates.version.strip():
+        errors.append("predicates.yaml: version must be non-empty")
+    if not predicates.predicates:
+        errors.append(
+            "predicates.yaml: `predicates` is empty. Every predicate the extractor "
+            "can emit must have a row; scoring must never guess a mapping."
+        )
+    for predicate, rule in predicates.predicates.items():
+        where = f"predicates.yaml: predicates[{predicate!r}]"
+        if not predicate.strip():
+            errors.append("predicates.yaml: predicate names must not be blank")
+            continue
+        if rule.component is None:
+            if rule.scoring is not None:
+                errors.append(
+                    f"{where}: `scoring` is set but `component` is null. Either map it "
+                    "to a sub-score or remove the scoring block."
+                )
+            continue
+        if rule.component not in weights.weights:
+            errors.append(
+                f"{where}: component {rule.component!r} is not a configured sub-score "
+                f"in weights.yaml. Known components: " + ", ".join(sorted(weights.weights))
+            )
+        if rule.scoring is None:
+            errors.append(
+                f"{where}: component {rule.component!r} is set but no `scoring` block "
+                "explains how the value becomes 0..100."
+            )
+        elif rule.scoring.kind == "transform":
+            transform = rule.scoring.transform
+            if not transform:
+                errors.append(f"{where}: scoring.kind=transform needs `transform`")
+            elif transform not in weights.transforms:
+                errors.append(
+                    f"{where}: transform {transform!r} is not defined in "
+                    "weights.yaml:transforms"
+                )
+    for alias, target in predicates.aliases.items():
+        if alias in predicates.predicates:
+            errors.append(
+                f"predicates.yaml: alias {alias!r} collides with a canonical predicate"
+            )
+        if target not in predicates.predicates:
+            errors.append(
+                f"predicates.yaml: alias {alias!r} points at unknown predicate {target!r}"
+            )
+    declared_components = {
+        rule.component for rule in predicates.predicates.values() if rule.component is not None
+    }
+    for component in weights.weights:
+        if component not in declared_components:
+            errors.append(
+                f"predicates.yaml: component {component!r} has no predicate mapped to it. "
+                "A weighted component that can never receive evidence is a config error."
+            )
+
+    # Every predicate the extractor can emit must be in the registry, and the
+    # declared unit kind must agree with the extraction schema (no coercion).
+    try:
+        from fmd.extract.schemas import predicate_specs
+
+        emitted = predicate_specs()
+    except Exception as exc:  # pragma: no cover - import-time schema failure
+        errors.append(f"predicates.yaml: cannot read extraction predicate vocabulary: {exc}")
+        emitted = {}
+    for predicate, spec in sorted(emitted.items()):
+        rule = predicates.predicates.get(predicate)
+        if rule is None:
+            errors.append(
+                f"predicates.yaml: extraction predicate {predicate!r} is missing. "
+                "Every emitted predicate must be mapped to a component or explicitly "
+                "declared as an evidence-only input (component: null)."
+            )
+            continue
+        if (
+            spec.unit_kind is not None
+            and rule.unit_kind is not None
+            and spec.unit_kind != rule.unit_kind
+        ):
+            errors.append(
+                f"predicates.yaml: {predicate!r} declares unit_kind "
+                f"{rule.unit_kind!r} but the extraction schema emits {spec.unit_kind!r}"
+            )
+        if spec.is_rate and not rule.requires_denominator:
+            errors.append(
+                f"predicates.yaml: {predicate!r} is a rate in the extraction schema and "
+                "must set requires_denominator: true"
+            )
+        if spec.period_required and not rule.requires_period:
+            errors.append(
+                f"predicates.yaml: {predicate!r} requires a printed period in the "
+                "extraction schema and must set requires_period: true"
+            )
+
 
 def load_registry(
     config_dir: str | Path | None = None,
@@ -503,6 +603,7 @@ def load_registry(
         "er": ErConfig,
         "acquire": AcquireConfig,
         "plan": PlanConfig,
+        "predicates": PredicatesConfig,
     }
     for key, model in model_for.items():
         filename = CONFIG_FILES[key]
@@ -529,6 +630,7 @@ def load_registry(
         er=parsed["er"],
         acquire=parsed["acquire"],
         plan=parsed["plan"],
+        predicates=parsed["predicates"],
         config_dir=directory.resolve(),
     )
     _validate_cross_references(registry, errors)

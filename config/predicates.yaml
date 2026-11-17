@@ -1,0 +1,364 @@
+# Authoritative predicate registry (WS-SCORE-ALIAS).
+#
+# One row per predicate. The extractor emits namespaced predicates
+# (`seats.total`, `curriculum.internship_months`, ...); scoring maps each of
+# them to at most one sub-score component through this file. Nothing in
+# `fmd/score` may hardcode a predicate name any more.
+#
+# Fields
+#   component     sub-score id from config/weights.yaml, or null when the
+#                 predicate is evidence/filter input and is not scored directly.
+#   unit_kind     money | count | hours | months | years | percent | ratio |
+#                 grade | boolean | date | text. A claim whose unit contradicts
+#                 this is rejected, never coerced.
+#   requires_denominator  rate claims must carry a cohort denominator in
+#                 `qualifier_json` (invariant: rates need a denominator).
+#   requires_period       money claims must carry a printed period
+#                 (`per_year` / `per_month` / `one_time` / `per_semester`).
+#   scoring       how the claim becomes 0..100. `kind` is one of
+#                 percent | presence | transform | saturating | decay |
+#                 cutoff_margin | eligibility_margin | cost_band.
+#                 `transform` names a map in weights.yaml:transforms.
+#                 `scale`/`factor` are explicit monotone parameters; none are
+#                 inferred from the value.
+#
+# `aliases` are declared legacy spellings only (pre-namespace fixtures and the
+# unflagged derived vocabulary). A predicate not in `predicates` or `aliases`
+# is reported as unknown, never silently ignored.
+
+version: "2026-11-18.1"
+
+predicates:
+  # ---------------------------------------------------------------- accreditation
+  accreditation.institution_name:
+    unit_kind: text
+  accreditation.programme_name:
+    unit_kind: text
+  accreditation.naac_grade:
+    component: academic_quality
+    label: "NAAC grade"
+    unit_kind: grade
+    scoring: {kind: transform, transform: naac_grade}
+  accreditation.recognition_status:
+    component: academic_quality
+    label: "Recognition status"
+    unit_kind: text
+    scoring: {kind: transform, transform: recognition_status}
+  accreditation.body:
+    unit_kind: text
+  accreditation.valid_until:
+    unit_kind: date
+
+  # ---------------------------------------------------------------- curriculum
+  curriculum.programme_name:
+    unit_kind: text
+  curriculum.duration_months:
+    unit_kind: months
+  curriculum.semesters:
+    unit_kind: count
+  curriculum.internship_hours:
+    component: clinical_training
+    label: "Internship hours"
+    unit_kind: hours
+    scoring: {kind: transform, transform: internship_hours}
+  curriculum.internship_months:
+    component: clinical_training
+    label: "Internship months"
+    unit_kind: months
+    scoring: {kind: transform, transform: internship_months}
+
+  # ---------------------------------------------------------------- seats
+  seats.intake_year:
+    unit_kind: text
+  seats.programme_name:
+    unit_kind: text
+  seats.total:
+    component: admission_realism
+    label: "Seats available"
+    unit_kind: count
+    scoring: {kind: transform, transform: seats}
+  seats.government_quota:
+    unit_kind: count
+  seats.management_quota:
+    unit_kind: count
+  seats.quota_note:
+    unit_kind: text
+
+  # ---------------------------------------------------------------- placement
+  placement.cohort_year:
+    unit_kind: count
+  placement.eligible_count:
+    unit_kind: count
+  placement.placed_count:
+    unit_kind: count
+  placement.rate:
+    component: outcomes
+    label: "Placement rate"
+    unit_kind: percent
+    requires_denominator: true
+    scoring: {kind: percent}
+  placement.internship_counted_as_employment:
+    unit_kind: boolean
+  placement.basis:
+    unit_kind: text
+
+  # ---------------------------------------------------------------- salary
+  salary.median:
+    unit_kind: money
+    requires_period: true
+    notes: "Derived salary-vs-cost-of-living ratios are separate claims; a raw salary is never scored against an invented basket."
+  salary.highest_package:
+    unit_kind: money
+    requires_period: true
+
+  # ---------------------------------------------------------------- fees
+  fee.academic_year:
+    unit_kind: text
+  fee.currency:
+    unit_kind: text
+  fee.tuition:
+    unit_kind: money
+    requires_period: true
+  fee.hostel:
+    unit_kind: money
+    requires_period: true
+  fee.mandatory:
+    unit_kind: money
+    requires_period: true
+  fee.total_first_year:
+    unit_kind: money
+    requires_period: true
+  fee.period_note:
+    unit_kind: text
+
+  # ---------------------------------------------------------------- exams
+  exam.name:
+    unit_kind: text
+  exam.cycle_year:
+    unit_kind: count
+  exam.registration_opens:
+    unit_kind: date
+  exam.registration_closes:
+    unit_kind: date
+  exam.date:
+    unit_kind: date
+  exam.requires_travel:
+    unit_kind: boolean
+  exam.fee:
+    unit_kind: money
+    requires_period: true
+
+  # ---------------------------------------------------------------- cost of living
+  cost.city:
+    unit_kind: text
+  cost.basket_period:
+    unit_kind: text
+  cost.rent_monthly:
+    unit_kind: money
+    requires_period: true
+  cost.food_monthly:
+    unit_kind: money
+    requires_period: true
+  cost.transport_monthly:
+    unit_kind: money
+    requires_period: true
+  cost.utilities_monthly:
+    unit_kind: money
+    requires_period: true
+
+  # ---------------------------------------------------------------- derived outcomes
+  internship_to_offer_conversion_12m:
+    component: outcomes
+    label: "Internship-to-offer conversion (12m)"
+    unit_kind: percent
+    requires_denominator: true
+    scoring: {kind: percent}
+  registration_conversion_12m:
+    component: outcomes
+    label: "Registration conversion (12m)"
+    unit_kind: percent
+    requires_denominator: true
+    scoring: {kind: percent}
+  salary_growth_3y:
+    component: outcomes
+    label: "Salary growth over 3 years"
+    unit_kind: percent
+    scoring: {kind: percent}
+  p25_salary_to_col_ratio:
+    component: outcomes
+    label: "P25 salary relative to city cost of living"
+    unit_kind: ratio
+    scoring: {kind: saturating, scale: 1.0}
+
+  # ---------------------------------------------------------------- derived clinical
+  nabl_accredited_lab:
+    component: clinical_training
+    label: "NABL-accredited training lab"
+    unit_kind: boolean
+    scoring: {kind: presence}
+  nabh_hospital:
+    component: clinical_training
+    label: "NABH-accredited hospital access"
+    unit_kind: boolean
+    scoring: {kind: presence}
+  departments_rotated:
+    component: clinical_training
+    label: "Departments rotated"
+    unit_kind: count
+    scoring: {kind: saturating, scale: 6.0}
+  lab_equipment_verified:
+    component: clinical_training
+    label: "Lab equipment verified"
+    unit_kind: boolean
+    scoring: {kind: presence}
+
+  # ---------------------------------------------------------------- derived academic
+  autonomous_status:
+    component: academic_quality
+    label: "Autonomous status"
+    unit_kind: boolean
+    scoring: {kind: presence}
+  faculty_count:
+    component: academic_quality
+    label: "Faculty count"
+    unit_kind: count
+    scoring: {kind: saturating, scale: 40.0}
+  nirf_rank_institution:
+    component: academic_quality
+    label: "NIRF institution-level proxy"
+    unit_kind: count
+    scoring: {kind: decay, scale: 100.0}
+
+  # ---------------------------------------------------------------- derived financing
+  loan_terms_published:
+    component: financing_feasibility
+    label: "Published loan terms"
+    unit_kind: boolean
+    scoring: {kind: presence}
+  subsidy_eligible:
+    component: financing_feasibility
+    label: "Subsidy eligibility"
+    unit_kind: boolean
+    scoring: {kind: presence}
+  collateral_free_available:
+    component: financing_feasibility
+    label: "Collateral-free option"
+    unit_kind: boolean
+    scoring: {kind: presence}
+  student_work_legal_hours:
+    component: financing_feasibility
+    label: "Legal student-work entitlement"
+    unit_kind: hours
+    scoring: {kind: saturating, scale: 20.0}
+
+  # ---------------------------------------------------------------- derived student life
+  city_safety_index:
+    component: student_life_safety
+    label: "City safety index"
+    unit_kind: percent
+    scoring: {kind: percent}
+  hostel_available:
+    component: student_life_safety
+    label: "Hostel availability"
+    unit_kind: boolean
+    scoring: {kind: presence}
+  gender_safety_measures:
+    component: student_life_safety
+    label: "Gender-safety measures"
+    unit_kind: boolean
+    scoring: {kind: presence}
+  support_services_count:
+    component: student_life_safety
+    label: "Support services"
+    unit_kind: count
+    scoring: {kind: saturating, scale: 3.0}
+  review_aspect_safety:
+    component: student_life_safety
+    label: "Review: safety aspect"
+    unit_kind: percent
+    scoring: {kind: percent}
+
+  # ---------------------------------------------------------------- derived admission
+  cutoff_pct:
+    component: admission_realism
+    label: "Cutoff vs applicant marks"
+    unit_kind: percent
+    scoring: {kind: cutoff_margin, scale: 10.0}
+  eligibility_min_aggregate_pct:
+    component: admission_realism
+    label: "Eligibility margin"
+    unit_kind: percent
+    scoring: {kind: eligibility_margin, scale: 8.0}
+  applicants_per_seat:
+    component: admission_realism
+    label: "Applicants per seat"
+    unit_kind: ratio
+    scoring: {kind: decay, scale: 10.0}
+
+  # ---------------------------------------------------------------- derived affordability
+  dsr25:
+    component: affordability_roi
+    label: "DSR25 (first-year EMI / P25 salary)"
+    unit_kind: ratio
+    scoring: {kind: cost_band}
+  affordability_gap:
+    component: affordability_roi
+    label: "Family out-of-pocket / annual income"
+    unit_kind: ratio
+    scoring: {kind: cost_band}
+
+  # ---------------------------------------------------------------- filter / derived inputs
+  credential_level:
+    unit_kind: text
+  eligibility_min_pcb_pct:
+    unit_kind: percent
+  eligibility_max_age:
+    unit_kind: count
+  eligibility_requires_subjects:
+    unit_kind: text
+  language_test_required:
+    unit_kind: text
+  language_min_score:
+    unit_kind: ratio
+  medium_of_instruction:
+    unit_kind: text
+  exam_required:
+    unit_kind: text
+  exam_registration_opens:
+    unit_kind: date
+  exam_registration_closes:
+    unit_kind: date
+  exam_requires_travel:
+    unit_kind: boolean
+  intake_cycles:
+    unit_kind: count
+  tcoa:
+    unit_kind: money
+    requires_period: true
+  tcoa_lo:
+    unit_kind: money
+    requires_period: true
+  tcoa_hi:
+    unit_kind: money
+    requires_period: true
+  net_price:
+    unit_kind: money
+    requires_period: true
+  p25_first_year_salary:
+    unit_kind: money
+    requires_period: true
+  autonomous:
+    unit_kind: boolean
+
+# Legacy spellings seen in committed fixtures and the pre-namespace scorer
+# vocabulary. Declared, so resolving them is explicit; still reported through
+# `alias` on the resolved rule so a caller can log deprecated usage.
+aliases:
+  seats: seats.total
+  naac_grade: accreditation.naac_grade
+  recognition_status: accreditation.recognition_status
+  internship_hours: curriculum.internship_hours
+  internship_months: curriculum.internship_months
+  placement_rate: placement.rate
+  median_salary: salary.median
+  highest_package: salary.highest_package
