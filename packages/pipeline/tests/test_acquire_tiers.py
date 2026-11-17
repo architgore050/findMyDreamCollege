@@ -531,3 +531,48 @@ def test_image_only_page_with_no_vision_engine_produces_no_claims(
     message = str(excinfo.value)
     assert "cannot be extracted on this host" in message
     assert "503" in message
+
+
+# --------------------------------------------------------------------------- device / OOM
+
+
+def test_docling_device_defaults_to_cpu_and_is_env_overridable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local-LLM-resident hosts must not put Docling on the same GPU by default."""
+    from fmd.acquire.tiers import docling_device
+
+    monkeypatch.delenv("FMD_DOCLING_DEVICE", raising=False)
+    assert docling_device(_policy()) == "cpu"
+    monkeypatch.setenv("FMD_DOCLING_DEVICE", "cuda")
+    assert docling_device(_policy()) == "cuda"
+
+
+def test_invalid_docling_device_is_a_named_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fmd.acquire.tiers import docling_device
+
+    monkeypatch.setenv("FMD_DOCLING_DEVICE", "rocm")
+    with pytest.raises(Exception) as excinfo:
+        docling_device(_policy())
+    assert "acquisition_failed:invalid_docling_device" in str(excinfo.value)
+
+
+def test_docling_oom_does_not_fall_back_to_flat_t0_text() -> None:
+    """A CUDA OOM is an acquisition failure, never a clean 0-claim extraction."""
+    from fmd.acquire.errors import AcquisitionFailed
+
+    class OomConverter:
+        def convert(self, path: str) -> object:
+            raise RuntimeError("CUDA out of memory. Tried to allocate 50.00 MiB")
+
+    table_text = LONG_TEXT + "\n50000 60 4\n45000 60 4\n40000 60 4"
+
+    with pytest.raises(AcquisitionFailed) as excinfo:
+        run_tiers(
+            b"ignored",
+            policy=_policy(),
+            t0=lambda _: _doc(table_text),
+            t1=lambda _: t1_extract(b"%PDF-1.4", converter=OomConverter(), policy=_policy()),
+        )
+    assert excinfo.value.reason == "acquisition_failed:docling_cuda_oom"
+    assert "out of memory" in str(excinfo.value)

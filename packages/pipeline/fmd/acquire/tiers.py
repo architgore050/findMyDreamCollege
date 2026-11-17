@@ -33,7 +33,12 @@ import httpx
 import yaml
 
 from fmd.acquire.canonical import PageGeometry, TextBlock, build_canonical
-from fmd.acquire.errors import ArtifactsUnavailable, TierUnavailable
+from fmd.acquire.errors import (
+    ACQUISITION_FAILED_PREFIX,
+    AcquisitionFailed,
+    ArtifactsUnavailable,
+    TierUnavailable,
+)
 from fmd.acquire.guards import (
     OCR_TIERS,
     born_digital_length_warnings,
@@ -53,6 +58,7 @@ _DEVANAGARI = range(0x0900, 0x0980)
 #: Stable review reason (never prose): offline mode has no Docling artifacts.
 ARTIFACTS_UNAVAILABLE_OFFLINE = "artifacts_unavailable_offline"
 _TRUTHY = {"1", "true", "yes", "on"}
+_DEVICES = {"cpu", "auto", "cuda"}
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +88,75 @@ def _enforce_offline_env() -> None:
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+
+def docling_device(policy: AcquirePolicy) -> str:
+    """Resolve the Docling accelerator from env then registry, default ``cpu``.
+
+    ``config/acquire.yaml:backends.T1.device`` is the source of truth; the
+    ``FMD_DOCLING_DEVICE`` env var is a per-run override (useful on a host whose
+    GPU is free). Anything outside ``cpu|auto|cuda|cuda:N`` is a config error,
+    not a silent ``auto``.
+    """
+    spec = policy.backend("T1")
+    value = str(
+        os.environ.get("FMD_DOCLING_DEVICE")
+        or getattr(spec, "device", None)
+        or "cpu"
+    ).strip().lower()
+    base = value.split(":", 1)[0]
+    if base not in _DEVICES:
+        raise AcquisitionFailed(
+            f"{ACQUISITION_FAILED_PREFIX}invalid_docling_device",
+            f"device {value!r} is not one of cpu|auto|cuda|cuda:N",
+        )
+    return value
+
+
+def _preflight_cuda(device: str, policy: AcquirePolicy) -> None:
+    """Fail loudly before allocating a model on an already-busy GPU.
+
+    A local LLM server at 64k leaves only a sliver of a 16 GB card. Docling
+    would then OOM *after* downloading/loading weights, which used to be caught
+    as a generic tier fallback and reported as a clean run with zero claims.
+    This check turns that into ``acquisition_failed:insufficient_gpu_memory``
+    before the first allocation.
+    """
+    if not device.startswith("cuda"):
+        return
+    try:
+        import torch
+    except ImportError as exc:  # Docling itself is unusable without torch
+        raise AcquisitionFailed(
+            f"{ACQUISITION_FAILED_PREFIX}torch_unavailable",
+            "device=cuda requires torch (installed with Docling)",
+        ) from exc
+    if not torch.cuda.is_available():
+        raise AcquisitionFailed(
+            f"{ACQUISITION_FAILED_PREFIX}cuda_unavailable",
+            "device=cuda requested but torch.cuda.is_available() is false",
+        )
+    raw_min = getattr(policy.backend("T1"), "min_free_vram_gib", 1.0)
+    try:
+        minimum = float(raw_min)
+    except (TypeError, ValueError):
+        minimum = 1.0
+    free_bytes, _total = torch.cuda.mem_get_info()
+    free_gib = free_bytes / (1024**3)
+    if free_gib < minimum:
+        raise AcquisitionFailed(
+            f"{ACQUISITION_FAILED_PREFIX}insufficient_gpu_memory",
+            f"only {free_gib:.2f} GiB free, need >= {minimum:.2f} GiB; "
+            "stop the local LLM server or set FMD_DOCLING_DEVICE=cpu",
+        )
+
+
+def _is_oom(exc: BaseException) -> bool:
+    """True for torch/CUDA allocation failures (type or message based)."""
+    if type(exc).__name__ in {"OutOfMemoryError", "CudaError"}:
+        return True
+    text = str(exc).lower()
+    return "out of memory" in text or "outofmemory" in text
 
 
 def docling_artifacts_path(policy: AcquirePolicy) -> Path | None:
@@ -415,10 +490,17 @@ def t1_extract(
     """
     policy = policy or AcquirePolicy.load()
     _enforce_offline_env()
+    device: str | None = None
     if converter is None:
         artifacts = docling_artifacts_path(policy)
         if offline_enabled():
             _require_docling_artifacts(artifacts)
+        device = docling_device(policy)
+        if device != "cpu":
+            # PyTorch's caching allocator fragments under a co-resident LLM;
+            # expandable segments let it grow/shrink instead of failing late.
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        _preflight_cuda(device, policy)
         try:
             from docling.document_converter import DocumentConverter
         except ImportError as exc:
@@ -426,13 +508,18 @@ def t1_extract(
                 "T1 (Docling) is not installed. Install the extraction extra with "
                 "`uv sync --all-extras`, or the dispatcher will fall back to T0 text."
             ) from exc
-        converter = _docling_converter(DocumentConverter, artifacts)
+        converter = _docling_converter(DocumentConverter, artifacts, device=device)
 
     path = _write_temp(data)
     try:
         try:
             result = converter.convert(str(path))
         except Exception as exc:  # docling raises model/runtime specific errors
+            if _is_oom(exc):
+                raise AcquisitionFailed(
+                    f"{ACQUISITION_FAILED_PREFIX}docling_cuda_oom",
+                    f"Docling ran out of memory on device {device or 'injected'}: {exc}",
+                ) from exc
             raise TierUnavailable(f"Docling conversion failed: {exc}") from exc
     finally:
         path.unlink(missing_ok=True)
@@ -440,16 +527,21 @@ def t1_extract(
     return _docling_doc(document, policy)
 
 
-def _docling_converter(factory: Any, artifacts: Path | None) -> Any:
-    """Build a converter pinned to the configured local artifact directory."""
-    if artifacts is None:
-        return factory()
+def _docling_converter(
+    factory: Any, artifacts: Path | None, *, device: str | None = None
+) -> Any:
+    """Build a converter pinned to the configured local artifacts and device."""
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import PdfFormatOption
 
     options = PdfPipelineOptions()
-    options.artifacts_path = str(artifacts)
+    if artifacts is not None:
+        options.artifacts_path = str(artifacts)
+    if device is not None:
+        from docling.datamodel.accelerator_options import AcceleratorOptions
+
+        options.accelerator_options = AcceleratorOptions(device=device)
     return factory(
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
     )
@@ -931,6 +1023,10 @@ def run_tiers(
     if decision.tier == "T1":
         try:
             result = (t1 or t1_extract)(data)
+        except AcquisitionFailed:
+            # A resource failure is not a "use the flat text instead" signal.
+            # Re-raise so orchestration marks the document and the run failed.
+            raise
         except ArtifactsUnavailable as exc:
             # Offline with no local layout/table artifacts: this is not a reason
             # to pretend T0's flat text answered a table/layout question. Route
@@ -1030,6 +1126,7 @@ __all__ = [
     "TierPolicy",
     "apply_anomaly_guard",
     "docling_artifacts_path",
+    "docling_device",
     "indic_self_check",
     "offline_enabled",
     "plan_tiers",

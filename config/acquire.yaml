@@ -80,6 +80,17 @@ backends:
     tool: docling
     model: docling
     granularity: span
+    # Device for the RT-DETR layout + TableFormer models. Default `cpu` on
+    # purpose: a local LLM server (llama-server, ~14 GiB at 64k) is normally
+    # resident on the only 16 GB GPU, and a second CUDA consumer OOMs the
+    # acquisition pass. `auto` restores Docling's own detection; `cuda` is an
+    # explicit opt-in for a host with a free card. Override per shell with
+    # FMD_DOCLING_DEVICE (same values) without editing this file.
+    device: ${FMD_DOCLING_DEVICE:-cpu}
+    # CUDA preflight: fail before loading a model when less than this is free.
+    # Only consulted when device resolves to cuda/cuda:N; a starved card is a
+    # named acquisition failure, never a silent fallback to flat T0 text.
+    min_free_vram_gib: 1.0
     # Local artifact cache for the layout and table-structure models. Docling
     # downloads these from Hugging Face on first use; that fetch is exactly what
     # stalls an extraction when the host has no network. Point this at a

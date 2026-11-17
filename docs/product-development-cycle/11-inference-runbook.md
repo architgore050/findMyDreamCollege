@@ -825,10 +825,19 @@ OCR rows have their own dependency: the 10.6 GB Qwen3-VL download.
 
 ## 6. Run this (copy-paste, in order)
 
+The GPU has exactly one resident model: `llama-server`. Docling (T1 layout +
+TableFormer) runs on **CPU** by default (`config/acquire.yaml:backends.T1.device:
+cpu`). That is deliberate, not a fallback: at 64k the text model holds ~14 GiB
+of the 15.5 GiB card, so a second CUDA consumer cannot fit. A Docling CUDA OOM
+is now `acquisition_failed:docling_cuda_oom`: the document is marked
+`needs_review`, the run summary is `ok:false`, and the CLI exits non-zero. It
+never reports a clean run with zero claims.
+
 ```bash
 # 0) once per boot: host text model (weights already on host; no download)
 scripts/serve_local.sh start
-curl -s localhost:8010/v1/models                      # expect id Qwen3.5-9B-AWQ
+scripts/serve_local.sh probe                          # text, no leak, guided JSON, null
+curl -s localhost:8010/v1/models                      # expect gemma-4-26b-a4b-gguf
 
 # 1) stack (api waits for db); rebuilds never touch weights
 docker compose -f infra/docker-compose.yml up -d db api worker
@@ -838,19 +847,33 @@ curl -s localhost:8000/api/health                     # expect status ok
 docker compose -f infra/docker-compose.yml exec api \
   python -m fmd.cli llm doctor --live
 
-# 3) one bounded real extraction + verification
+# 3) the ordered evidence pass: acquire -> extract -> verify -> score
+#    (acquire = CPU Docling; never start a second GPU model here)
 docker compose -f infra/docker-compose.yml exec api \
   python -m fmd.cli extract --limit 3
 docker compose -f infra/docker-compose.yml exec api \
   python -m fmd.cli verify --limit 50
-
-# 4) score (versioned; needs the eval diff per AGENTS.md)
 docker compose -f infra/docker-compose.yml exec api python -m fmd.cli score
 
-# 5) stop (weights and DB survive; nothing is re-downloaded)
+# 4) stop (weights and DB survive; nothing is re-downloaded)
 docker compose -f infra/docker-compose.yml stop worker api
 scripts/serve_local.sh stop
 ```
+
+**Host-run workaround** (snapshots copied out of the Docker volume):
+
+```bash
+export FMD_SNAPSHOT_DIR="$HOME/fmd-snap2"
+export FMD_LOCAL_LLM_URL=http://127.0.0.1:8010/v1   # compose uses host.docker.internal
+export FMD_EXTRACT_PROVIDER=local FMD_EXTRACT_MODEL=gemma-4-26b-a4b-gguf
+export FMD_VERIFY_PROVIDER=local  FMD_VERIFY_MODEL=gemma-4-26b-a4b-gguf
+uv run fmd extract --limit 3
+```
+
+`FMD_DOCLING_DEVICE` overrides `backends.T1.device` per shell (`cpu|auto|cuda`).
+Use `cuda` only when the text server is stopped or the card is otherwise free;
+when it is not, the preflight fails with
+`acquisition_failed:insufficient_gpu_memory` before any weights are loaded.
 
 Long steps (extraction over many documents, a first crawl) are the human's to
 run: hand them the command, do not add a wait loop. `scripts/serve_ocr.sh
@@ -931,3 +954,38 @@ cache raised `artifacts_unavailable_offline` in **0.11 s**; the same call with
 the default converter under `HF_HUB_OFFLINE=1` took **7.6 s** to surface the
 Hugging Face cache error. The guard exists so the first number is the normal
 offline behaviour.
+
+**CPU T1 baseline (measured 2026-11-17):** the 11-page RUHS Ph.D. research-centre
+guidelines/fee PDF (19,036 characters, 7 detected tables) ran T1 with
+`device=cpu` in **47.9 s = 0.23 pages/s**, while `llama-server` stayed resident
+at 64k. That is the intended split. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+is set automatically only on the CUDA path; it cannot help CPU and is not a
+substitute for stopping the other GPU consumer.
+
+## Measured: KV budget and context ceiling (2026-11-17, RTX 5080 Laptop 16303 MiB)
+
+Sweep at `-ngl 999 -fa on -ctk q8_0 -ctv q8_0 -np 1 --jinja -rea off`, weights
+`gemma-4-26B-A4B-it-UD-IQ4_XS.gguf` (12.66 GiB, sha256 verified `babd1e38…`).
+Each step confirmed the server **served** a completion, not merely loaded.
+
+| ctx | result | VRAM used (MiB) | free (MiB) | decode tok/s |
+|---|---|---|---|---|
+| 16k | ok | 13,708 | 2,595 | 84.5 |
+| 24k | ok | 13,818 | 2,485 | 104.5 |
+| 32k | ok | 13,942 | 2,361 | 106.8 |
+| 48k | ok | 14,192 | 2,111 | 106.4 |
+| **64k** | **ok** | **14,442** | **1,861** | **106.3** |
+| 96k | ok | 14,942 | 1,361 | 103.0 |
+| 128k | ok | 15,442 | 861 | 106.3 |
+
+**Operating point: 65536.** 128k technically loads but leaves 861 MiB, which is not
+enough for compute spikes plus a concurrent API/worker process. 96k is viable
+(1.36 GiB free) if a job genuinely needs it; 64k is the default.
+
+Probe (all PASS): text completion; no `<|channel>thought` leakage in `content`;
+guided `json_schema` returns a schema-valid object; **nullable fields correctly
+return `null`** (`{"institute_name": null, "seats": null, "is_recognised": null}`),
+confirming GBNF neither forces nor forbids null.
+
+Notes: first cold load took 44 s; subsequent loads 4–5 s (page cache). Idle GPU
+after unload: 14 MiB, ~19 W.

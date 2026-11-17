@@ -25,6 +25,7 @@ import logging
 from collections.abc import Iterable
 from typing import Any
 
+from fmd.acquire.errors import ACQUISITION_FAILED_PREFIX
 from fmd.db.repositories import ClaimsRepo, ExtractionsRepo, SnapshotsRepo
 from fmd.extract.pipeline import (
     ExtractPipeline,
@@ -133,6 +134,34 @@ class Extractor:
                 result = pipeline.run_batch([target])[0]
             except Exception as exc:  # per-document isolation
                 reason = getattr(exc, "reason", None) or type(exc).__name__
+                if str(reason).startswith(ACQUISITION_FAILED_PREFIX):
+                    # A starved GPU is a failed run, not an empty success. The
+                    # document is parked for review with the stable reason and
+                    # the summary is marked failed so the CLI exits non-zero.
+                    self._mark_acquisition_failed(document, str(reason))
+                    summary.bump("acquisition_failed")
+                    summary.fail(
+                        "extract",
+                        str(reason),
+                        snapshot_id=snapshot.id,
+                        document_id=snapshot.document_id,
+                        url=getattr(document, "url", None),
+                        detail=str(exc),
+                    )
+                    summary.outcomes.append(
+                        {
+                            "snapshot_id": snapshot.id,
+                            "document_id": snapshot.document_id,
+                            "url": getattr(document, "url", None),
+                            "outcome": "acquisition_failed",
+                            "reason": str(reason),
+                            "detail": str(exc),
+                        }
+                    )
+                    logger.error(
+                        "acquisition failed for snapshot %s: %s", snapshot.id, exc
+                    )
+                    continue
                 logger.warning("extraction abstained for snapshot %s: %s", snapshot.id, exc)
                 summary.bump("abstained")
                 summary.outcomes.append(
@@ -249,6 +278,30 @@ class Extractor:
         except Exception as exc:  # one bad page must not lose the extracted claims
             logger.warning("verification failed for extraction %s: %s", result.extraction_id, exc)
             return None
+
+    # ------------------------------------------------------------------ failures
+    def _mark_acquisition_failed(self, document: Any, reason: str) -> None:
+        """Persist ``acquisition_failed:<reason>`` on the document row.
+
+        ``plan_state`` stays inside migration 0003's closed set, so the reason
+        lives in ``plan_reason`` and the state is ``needs_review``: the retry
+        queue stops silently re-running a document that cannot be acquired on
+        this host until a human acts.
+        """
+        setter = getattr(self.documents, "set_plan", None)
+        if setter is None or document is None:
+            return
+        try:
+            setter(
+                int(document.id),
+                extraction_family=getattr(document, "extraction_family", None),
+                entity_id=getattr(document, "entity_id", None),
+                plan_state="needs_review",
+                plan_reason=reason,
+                role=getattr(document, "role", None),
+            )
+        except Exception as exc:  # observability must not mask the original failure
+            logger.warning("could not persist acquisition failure on document: %s", exc)
 
     # ------------------------------------------------------------------ linkage
     def _target(self, snapshot: Any, document: Any) -> tuple[ExtractTarget | None, str | None]:

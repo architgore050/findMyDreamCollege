@@ -354,7 +354,9 @@ class Orchestrator:
         summary.metadata["tool_version"] = self.tool_version
         summary.metadata["force"] = force
         attempted = summary.counts.get("extracted", 0) + summary.counts.get("abstained", 0)
-        summary.failed = (
+        # Preserve failures already recorded per document (e.g. an acquisition
+        # OOM): a run that also extracted something is still a failed run.
+        summary.failed = summary.failed or (
             attempted > 0
             and summary.counts.get("extracted", 0) == 0
             and summary.counts.get("skipped", 0) == 0

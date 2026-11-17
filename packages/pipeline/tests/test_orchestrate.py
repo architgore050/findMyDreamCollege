@@ -749,6 +749,48 @@ def test_extract_abstains_with_reason_for_an_unsupported_family(tmp_path, regist
     assert summary.failed is True
 
 
+
+def test_acquisition_oom_fails_the_run_and_marks_the_document(
+    tmp_path, registry, monkeypatch
+) -> None:
+    """A starved GPU is a visible failure, not ``ok:true`` with zero claims."""
+    from fmd.acquire.errors import AcquisitionFailed
+
+    text = (EXTRACT_FIXTURES / "placement_report.txt").read_text(encoding="utf-8")
+    router = build_router(registry.models, mock=True, fixtures_dir=LLM_FIXTURES)
+    harness = Harness(tmp_path, registry, router=router)
+    document = harness.documents.upsert(
+        DocumentUpsert(
+            url="https://college.ac.in/fee-structure.pdf",
+            domain="college.ac.in",
+            extraction_family="fee_structure",
+            entity_id=1,
+        )
+    )
+    _seed_snapshot(harness, document, text)
+
+    def boom(self: Any, targets: Any) -> Any:
+        raise AcquisitionFailed(
+            "acquisition_failed:docling_cuda_oom",
+            "CUDA out of memory. Tried to allocate 50.00 MiB",
+        )
+
+    monkeypatch.setattr("fmd.extract.pipeline.ExtractPipeline.run_batch", boom)
+
+    summary = harness.orchestrator.extract(limit=5)
+    payload = summary.as_dict()
+
+    assert payload["ok"] is False
+    assert summary.failed is True
+    assert summary.counts["acquisition_failed"] == 1
+    assert summary.failures[0]["reason"] == "acquisition_failed:docling_cuda_oom"
+    assert summary.outcomes[0]["outcome"] == "acquisition_failed"
+    assert harness.extractions.rows == []
+    updated = harness.documents.get(document.id)
+    assert updated is not None
+    assert updated.plan_reason == "acquisition_failed:docling_cuda_oom"
+    assert updated.plan_state == "needs_review"
+
 def _programme(institution_id: int = 1) -> ProgrammeRecord:
     return ProgrammeRecord(
         id=institution_id,
