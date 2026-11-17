@@ -14,6 +14,11 @@
 # KV cache: 8-bit (q8_0/q8_0) + flash attention. Measured cost table lives in
 #           docs/.../11-inference-runbook.md §2.7; the default below is the
 #           measured safe context with >=1 GiB VRAM headroom.
+# Batching: -b 4096 -ub 2048 was chosen by sweep on 2026-11-18 (runbook §2.8):
+#           4,698 tok/s prefill on an 11.4k prompt vs 3,786 at 2048/512 (+24%),
+#           decode unchanged within noise (100.7 vs 103.5 tok/s), and it is the
+#           largest ubatch that still clears 1 GiB free at 64k (1,153 MiB).
+#           It is also why 96k is out of reach with this ubatch (619 MiB free).
 #
 #   scripts/serve_local.sh install  # fetch the llama-server binary if absent
 #   scripts/serve_local.sh start    # background serve on 127.0.0.1:8010
@@ -49,11 +54,11 @@ MODEL_SPEC="${FMD_VLLM_MODEL:-$MODEL_DIR/gemma-4-26B-A4B-it-UD-IQ4_XS}"
 SERVED="${FMD_SERVED_NAME:-gemma-4-26b-a4b-gguf}"
 PORT="${FMD_VLLM_PORT:-8010}"
 BIND="${FMD_LLAMA_HOST:-127.0.0.1}"
-# Context default: 65536 (runbook §2.7). It clears the >=1 GiB VRAM headroom
-# rule at the measured ~0.5 GiB CUDA-context+compute overhead, but the 64k row
-# of that table is still a projection — run the sweep in §2.7 before a long
-# extraction run, and drop to 32768 if it fails. The 26B's 12.66 GiB of weights,
-# not the KV cache, is what bounds context here.
+# Context default: 65536 (runbook §2.7, measured 2026-11-18: 15,150 MiB used /
+# 1,153 MiB free at 64k with -b 4096 -ub 2048). 32k needs 14,682 MiB and 96k
+# needs 15,684 MiB, so 64k is the largest row that clears the >=1 GiB headroom
+# rule with this ubatch; 128k fails to allocate its compute buffers outright.
+# The 26B's 12.66 GiB of weights, not the KV cache, is what bounds context here.
 CTX="${FMD_MAX_MODEL_LEN:-65536}"
 KV="${FMD_KV_TYPE:-q8_0}"
 NGL="${FMD_NGL:-999}"
@@ -119,7 +124,7 @@ serve_args() {
     -c "$CTX"
     -fa on
     -ctk "$KV" -ctv "$KV"
-    -b 2048 -ub 512
+    -b 4096 -ub 2048
     -np 1
     --jinja
     -rea off
@@ -129,8 +134,12 @@ serve_args() {
   # and forcing a 12.66 GiB read into RAM is wrong on this host anyway — model
   # loading is mmap by default, which lets the page cache evict, and -ngl 999
   # still puts every weight on the GPU.
-  # MTP / speculative decoding. Default OFF: it is only enabled after the
-  # greedy-equality check in the runbook passes for the exact drafter file.
+  # MTP / speculative decoding. Default OFF, and it is not merely unverified:
+  # the drafter is not on this host. Parity gate (runbook §2.7 E, 2026-11-18)
+  # could not run — mtp-gemma-4-26B-A4B-it-Q8_0.gguf is absent, and the only
+  # mtp *.gguf on disk is a qwen4exp-mtp head that llama-server refuses with
+  # "unknown model architecture". Leave OFF until the gemma4-assistant drafter
+  # exists and the greedy byte-parity test passes.
   if [ "$SPEC" = "1" ]; then
     args+=( --model-draft "$DRAFT" --spec-type draft-mtp --spec-draft-n-max 4 )
   fi

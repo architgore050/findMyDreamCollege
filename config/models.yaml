@@ -83,8 +83,10 @@ profiles:
     #
     # Served name, not a hub id: `scripts/serve_local.sh` starts llama-server as
     #   --alias gemma-4-26b-a4b-gguf -c 65536 -fa on -ctk q8_0 -ctv q8_0
-    # Change this string only together with the script's --alias, or every call
-    # 404s with "model not found".
+    #   -b 4096 -ub 2048 -np 1
+    # (-b/-ub chosen by sweep 2026-11-18: +24% prefill, decode flat, 64k keeps
+    # 1,153 MiB free; see runbook §2.8). Change this string only together with
+    # the script's --alias, or every call 404s with "model not found".
     provider: ${FMD_EXTRACT_PROVIDER:-local}
     model: ${FMD_EXTRACT_MODEL:-gemma-4-26b-a4b-gguf}
     provider_env: FMD_EXTRACT_PROVIDER
@@ -93,7 +95,8 @@ profiles:
     temperature: 0
     guided_json: true          # llama.cpp response_format json_schema -> GBNF
     max_tokens: 4096
-    context_tokens: 65536      # must be <= the server's -c; see runbook §2.7
+    context_tokens: 65536      # must be <= the server's -c; measured ceiling
+                               # at -ub 2048 is 64k (runbook §2.8)
     quantization: int4
     thinking: false
     required: true             # text PDFs cannot be extracted without this

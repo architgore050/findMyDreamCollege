@@ -537,12 +537,19 @@ runtime + context** on this driver; the rest (est. 0.2–0.4 GiB) is the gemma4
 MoE compute buffer at `-ub 512`. That is why the older 1.1 GiB figure in §1 is
 pessimistic for llama.cpp — it was a vLLM-era number.
 
-So **65536 is the provisional default**: it clears the ≥1 GiB headroom rule at
-every overhead between 0.45 and 0.83 GiB, and 96k is the likely true ceiling.
-Both are projections until the sweep below runs — the sweep is the deliverable,
-this table is the expectation it has to confirm or overturn.
+So **65536 is the default**, now measured rather than projected (§2.8): 15,150 MiB
+used, 1,153 MiB free at `-b 4096 -ub 2048`. The sweeping also showed that the
+`-ub` value, not the KV cache, is what sets the ceiling: 32k → 14,682 MiB, 96k →
+15,684 MiB (619 MiB free, fails the rule), 128k → does not allocate its compute
+buffers at all. Raising context above 64k therefore buys nothing that §2.8 can
+see: decode is flat across 32k/64k/96k, while pages are 2k–12k tokens.
 
-**To measure the ceiling (one command, replaces the guess):**
+**The sweep below has since been run (§2.8.2, 2026-11-18) and it overturned part of
+this table:** 128k does not "load with 0.66 GiB headroom", it fails to allocate
+its compute buffers once `-ub` is 2048, and 96k leaves 619 MiB, not 1.00 GiB.
+Use §2.8.2 for the decision; this table is kept as the projection it was. The
+older one-shot sweep harness (superseded by `/tmp/opencode/tune/sweep_launch.sh`,
+which restarts per config and reads `timings`):
 
 ```bash
 /tmp/opencode/kv_budget_sweep.sh     # waits for the .gguf, then steps 16k..128k
@@ -566,34 +573,51 @@ same prompt, `-c 8192`): the sweep harness writes both outputs to
 Until then: q8_0 is enabled because it is what makes 32k free on a 16 GB card,
 and because the failure mode is a wording difference, not an unparsable schema.
 
-### E. MTP / speculative decoding — supported, **off**
+### E. MTP / speculative decoding — **rejected: no drafter to test (2026-11-18)**
 
 llama.cpp has first-class Gemma 4 MTP: `--spec-type draft-mtp`,
 `--model-draft <mtp file>`, arch `gemma4-assistant`, `--spec-draft-n-max N`
 (merged PR #23398 on 2026-06-07; build b12468 is 2026-11-17, and
 `src/models/gemma4-assistant.cpp` is present in the tree). The drafter shares the
-target's KV cache, so it does not need a second context, and the upstream README
-claims 159 → 257 tok/s at 0.72 acceptance on a Q4_K_M target on a B200.
+target's KV cache, so it does not need a second context.
 
-**It is off by default anyway**, for two reasons that are ours and not upstream's:
+**The parity gate could not be run, because `mtp-gemma-4-26B-A4B-it-Q8_0.gguf`
+is not on this host.** The weights directory holds only the target GGUF; the
+whole filesystem has exactly one `mtp *.gguf`,
+`~/AI/Models/Strata-data/mtp/mtp-q2_0.gguf`, and it is a `qwen4exp-mtp` head for
+`Qwen/Qwen3.8-Flash-Next`. Pointing llama-server at it next to the Gemma target:
 
-1. **Correctness is unverified on this pair.** Speculative decoding is supposed
-   to be output-identical under greedy sampling, but that guarantee is worth
-   exactly as much as the equality test. We have not run it, so we do not claim it.
-2. **VRAM is the scarce resource, not speed.** The drafter is +461 MB resident on
-   a card where 64k of context already costs headroom. A 26B-A4B at ~4B active
-   is not decode-bound the way a dense model is.
-
-Enable only after both of these pass on the loaded pair:
-
-```bash
-# 1. parity: identical greedy bytes with and without the drafter, fixed prompt
-# 2. speed: >20% decode tok/s on a 512-token generation, twice, same prompt
-FMD_SPEC=1 scripts/serve_local.sh start   # only then
+```
+E llama_model_load: error loading model: unknown model architecture: 'qwen4exp-mtp'
+E common_speculative_init_result: failed to load draft model
+E srv    load_model: failed to load draft model
 ```
 
-If either fails, the verdict is "off" and stays off. Do not enable it for a
-throughput number alone.
+That is not "parity failed", it is "there is no pair to compare": zero of the
+three prompts (short factual, 6k extraction, 12k) could be run with MTP, so there
+is no output pair and no differing excerpt to quote. **Verdict: off.** No token
+is spent on a capability claim either way — speculative decoding has never
+produced a token on this host.
+
+Two measured reasons not to chase it:
+
+1. **VRAM.** +461 MB would take the chosen 64k config from 15,150 to ~15,611 MiB
+   (≈692 MiB free), which fails the ≥1 GiB rule on its own. Buying that back
+   (`-ub 1024`) costs 3% prefill (§2.8.1).
+2. **The workload is not decode-starved in a way a drafter fixes.** Decode is
+   ~101 tok/s and flat from 32k to 96k; the measured cost of a document is its
+   prefill (§2.8), which MTP does not touch.
+
+The gate stays as written — byte-identical greedy output on all three prompts
+**and** >20% decode gain — and it runs only after the `gemma4-assistant` drafter
+exists. `scripts/serve_local.sh` keeps the `FMD_SPEC` plumbing but the default is
+`0`:
+
+```bash
+FMD_SPEC=1 scripts/serve_local.sh start   # only after both gates pass
+```
+
+Do not enable it for a throughput number alone.
 
 ### F. Process facts and fallback
 
@@ -629,6 +653,105 @@ FMD_EXTRACT_PROVIDER=local
 FMD_EXTRACT_MODEL=gemma-4-26b-a4b-gguf     # must equal the server's --alias
 FMD_LOCAL_LLM_URL=http://localhost:8010/v1
 ```
+
+---
+
+## 2.8 Throughput sweep — measured 2026-11-18 (same host, same weights)
+
+Method: `llama-server` b12468, greedy (`temperature 0`, `top_k 1`, seed 42),
+`cache_prompt=false` so every run pays full prefill, prompts fixed to file
+(short factual = 100 tok, extraction-style = 6,001 tok, long = 11,401 tok), and
+numbers read from llama.cpp's own `timings` block. Temperature 0 and a fixed
+prompt are the only controls that matter for a kernel benchmark; `PYTHONHASHSEED`
+is irrelevant because nothing here is Python-side. Harness lives in
+`/tmp/opencode/tune/` (throwaway); each row is the mean of 2–6 restarts, min–max
+shown where it matters.
+
+### 2.8.1 Prefill `-b`/`-ub` at 64k, single slot, 11,401-token prompt
+
+| `-b`/`-ub` | prefill tok/s (samples) | decode tok/s | VRAM MiB | free MiB |
+|---|---|---|---|---|
+| 2048 / 512 (old) | **3,843** (3,765–4,018) | 103.5–108.1 | 14,492 | 1,811 |
+| 4096 / 1024 | **4,508** (4,399–4,690) | 102.0–102.6 | 14,690 | 1,613 |
+| **4096 / 2048 (chosen)** | **4,784** (4,642–5,011) | 100.5–100.8 | 15,150 | 1,153 |
+| 8192 / 2048 | 4,803 (4,666–4,939) | — | 15,150 | 1,153 |
+
++24% prefill over the old pair, decode flat within noise. 8192/2048 adds nothing
+over 4096/2048, so the logical batch is not the limiter. 4096/2048 is the largest
+ubatch that still clears 1 GiB free at 64k on this card; that is the whole reason
+it wins over 8192/2048 (identical) and over 4096/1024 (3% slower prefill).
+
+### 2.8.2 Context, with the winning flags
+
+| ctx | VRAM MiB | free MiB | prefill tok/s | decode tok/s | serves? |
+|---|---|---|---|---|---|
+| 32768 | 14,682 | 1,621 | 4,633 | 97.3 | yes |
+| **65536 (chosen)** | **15,150** | **1,153** | **4,621** | **98.4** | yes |
+| 98304 | 15,684 | 619 | 4,648 | 97.8 | yes, fails headroom |
+| 131072 | — | — | — | — | **no**: `failed to allocate compute pp buffers` |
+
+Decode and prefill are flat from 32k to 96k, so **nothing above 64k buys
+anything real**: documents are 2k–12k tokens, i.e. 64k already holds a whole page
+five times over, and the only measured effect of a bigger context is less VRAM
+headroom. 64k stays the default; 96k is now a known-bad row (not just
+"aggressive"), and 128k is a hard failure at `-ub 2048` rather than the old
+"0.66 GiB headroom" projection.
+
+### 2.8.3 `-np 2` — two concurrent 6k documents
+
+| slots | wall for 2×6k | aggregate tok/s | per-request decode | VRAM MiB | free MiB |
+|---|---|---|---|---|---|
+| `-np 1` | 7.72–7.78 s | 65.8–66.4 | 101.4–101.8 | 15,150 | 1,153 |
+| `-np 2` (`-c 65536`, 32k/slot) | 6.16–6.23 s | 82.2–83.1 | 63.9–74.3 | 15,340 | 963 |
+| `-np 2 --kv-unified-per-slot 32768` | 6.13–6.22 s | 82.3–83.6 | 63.5–75.1 | 15,340 | 963 |
+| `-np 2` + `-ub 1024` | 6.12–6.14 s | 83.4–83.6 | 76.4–78.2 | 14,838 | 1,465 |
+
+Batch throughput does improve: **+25% aggregate** for two simultaneous documents,
+at the cost of halving each stream's decode. Per-slot context is *not* too small
+— 32,768 tokens per slot is still 2.7× the largest page plus its 4k completion.
+`--kv-unified-per-slot` exists in b12468 but is a no-op when `-c` already sizes
+the shared pool; it only matters if you want `-c` omitted.
+
+**Default stays `-np 1`**, because the router issues one request at a time
+(`fmd/llm` has no thread pool), two slots drop 64k → 32k per request, and
+`-np 2` at `-ub 2048` leaves 963 MiB, under the rule. If a batch driver ever
+exists, the recipe is `-np 2 -c 65536 -ub 1024` (1,465 MiB free, +25%).
+Two GPUs' worth of extraction can also be had the boring way: two servers, one
+document each — but that needs a second card, not a flag.
+
+### 2.8.4 Thermals — 10 continuous minutes at the winning config
+
+Continuous 11.4k-prefill + 256-token decode, telemetry every 20 s (30 samples):
+
+| metric | idle | sustained |
+|---|---|---|
+| temp | 41–54 °C | **65 → 87 °C**, settles 83–87 |
+| board power | 5–25 W | **112–133 W** (cap 115 W; boost excursions) |
+| SM clock | 1,492 MHz | **1,500–2,197 MHz** of 3,090 max |
+| utilisation | 0% | 82–100% |
+
+The card is **power-limited, not thermally throttled**: temperature plateaus
+below 90 °C and the clock tracks the power budget (it climbs back into the
+2,000s whenever draw dips), with no drop to a lower base clock. Cost of a hot
+card: decode 101 → 93.4 tok/s (−8%) and short-prompt decode 117.5 → 108.9 after
+the 10-minute run; prefill is unchanged (4,621 vs 4,689). Long extraction runs
+should be budgeted at the hot number, not the cold one.
+
+### 2.8.5 Config of record
+
+```bash
+-c 65536 -b 4096 -ub 2048 -np 1 -ngl 999 -fa on -ctk q8_0 -ctv q8_0 --jinja -rea off
+```
+
+4,784 tok/s prefill (11.4k prompt; 5,021 re-measured on the restarted server),
+~101 tok/s decode cold / 93 hot, 15,150 MiB, 1,153 MiB free.
+`scripts/serve_local.sh` and `config/models.yaml` carry these values, and
+`scripts/serve_local.sh probe` is green on it (a/text, b/no-thought-leak,
+c/guided-json, d/guided-json-nullable). `uv run pytest -q` in
+`packages/pipeline` is 719 passed / 1 failed, and that failure is not this
+change: `test_adapters_registry` still asserts
+`max_pages_per_domain == 200` while the uncommitted bulk-ramp edit in
+`config/sources.yaml` sets 20.
 
 ---
 
@@ -989,3 +1112,88 @@ confirming GBNF neither forces nor forbids null.
 
 Notes: first cold load took 44 s; subsequent loads 4–5 s (page cache). Idle GPU
 after unload: 14 MiB, ~19 W.
+
+## Bulk ramp: first bounded pass (2026-11-17)
+
+The model is proven; the bottleneck is evidence volume. This is the first
+bounded ramp from an almost-empty DB, not a scale run. Every cap below is
+registry data and belongs in the run ledger with the numbers it produced.
+
+### Caps (exact keys)
+
+`config/sources.yaml` → `sources[id=institution_sites].params`:
+
+| key | value | meaning |
+|---|---|---|
+| `max_pages_per_domain` | `20` | navigation pages fetched per institution domain |
+| `max_documents_per_domain` | `3` | evidence PDFs kept per domain |
+| `targeting.max_domains_per_run` | `50` | inventory-discovered domains planned in one ingest |
+
+The per-run document cap is the CLI argument, not config: `fmd crawl --limit 300`.
+Politeness stays at the registry/env defaults (`FMD_DEFAULT_RPS=1` per
+registrable domain, robots honoured). Raising any cap requires a fresh review of
+the previous run's `deduped`/`failed`/`abstained` counts.
+
+### Order of operations (host venv)
+
+```bash
+export DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd
+export FMD_SNAPSHOT_DIR=$HOME/fmd-snap2
+cd packages/pipeline
+
+# 1. inventory: fetch the UGC payloads, then entities/domains
+uv run python -m fmd.cli crawl --source ugc_university_list
+uv run python -c 'from fmd.config import load_registry; from fmd.db import Database; \
+from fmd.orchestrate import Orchestrator; d=Database(None); \
+print(Orchestrator(registry=load_registry(None), database=d).ingest().as_json()); d.close()'
+
+# 2. evidence crawl (detached; one summary at the end)
+setsid nohup env ... uv run python -m fmd.cli crawl --source institution_sites \
+  --limit 300 > /tmp/opencode/ramp/crawl.log 2>&1 &
+
+# 3. extract + inline verify, then an explicit verify pass for leftovers
+FMD_EXTRACT_PROVIDER=local FMD_EXTRACT_MODEL=gemma-4-26b-a4b-gguf \
+  uv run python -m fmd.cli extract --limit 50
+FMD_VERIFY_PROVIDER=local FMD_VERIFY_MODEL=gemma-4-26b-a4b-gguf \
+  uv run python -m fmd.cli verify --limit 500
+```
+
+### What the first pass produced
+
+Inventory: **1,247 entities**, **1,204 institution domains** (1,153 pending,
+50 queued, 1 planned) from 2,028 UGC records. The UGC payload has 1,304 rows for
+`unitypeID=0`, 560 for `3`, 164 for `4`; `unitypeID=1,2` answered empty
+(`yield_score=0`), so 1,200+ is the real ceiling of this source shape.
+
+Evidence crawl (50 domains, 300-document cap, 38 min): 103 URLs planned,
+94 fetched, 21 stored, **73 deduped** (simhash, near-identical IQAC/boilerplate
+PDFs), 20 robots abstentions, 15 network failures (13 connect timeouts, 1 read
+timeout, 1 DNS). 47 documents linked to a family: `accreditation` 27,
+`placement_report` 10, `curriculum` 9, `seat_matrix` 1. 27 PDFs have snapshots.
+
+Extraction: 15 extractable snapshots → **7 documents extracted, 7 claims, 3
+rejected claims** (`ambiguous_span` ×2, `unparseable_unit` ×1), 4 document
+abstentions (3 `unresolved_provider` for `hard_pdf` because the `api` profile
+has no base URL, 1 `TierUnavailable` for a scanned PDF with no T2 endpoint).
+All 7 new claims verified `supported`; 0 unverified. Every claim carries
+`qualifier_json.page_no` and a glyph `bbox`, and its quote resolves in
+`extractions.text`.
+
+Scoring: **no programmes exist yet** (0 rows), so composite bands are not
+meaningful at this n. Claims are accreditation/curriculum/placement facts, not
+seat/fee facts; programme assembly needs a second crawl aimed at seat matrices
+and fee notifications.
+
+### Log commands
+
+```bash
+tail -f /tmp/opencode/ramp/ingest.log       # ingest summary (single JSON line)
+tail -f /tmp/opencode/ramp/crawl.log        # tier warnings, then run summary
+tail -f /tmp/opencode/ramp/extract.log      # per-document outcomes + summary
+tail -f /tmp/opencode/ramp/verify.log       # verify pass summary
+tail -f /tmp/opencode/ramp/score.log        # score summary
+```
+
+Run summaries are also persisted in `pipeline_runs` (query by `run_id` printed
+at the end of each log) and mirrored into `docs/` only when a report is asked
+for; the logs above are the run-summary files for this pass.
