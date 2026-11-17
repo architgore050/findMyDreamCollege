@@ -6,7 +6,7 @@
 # (default ~/.venvs/fmd-vllm) and is created by `serve_local.sh install`.
 #
 #   scripts/serve_local.sh install   # create the venv and install vLLM
-#   scripts/serve_local.sh start     # background serve on 0.0.0.0:8000
+#   scripts/serve_local.sh start     # background serve on 0.0.0.0:8010
 #   scripts/serve_local.sh status    # pid + /v1/models + nvidia-smi memory
 #   scripts/serve_local.sh stop      # SIGTERM the process group
 #   scripts/serve_local.sh logs      # tail the log
@@ -17,7 +17,7 @@
 #   FMD_VLLM_VENV   venv path                 (default ~/.venvs/fmd-vllm)
 #   FMD_VLLM_MODEL  local dir or hub repo     (default $FMD_MODEL_DIR/Qwen3.5-9B-AWQ)
 #   FMD_SERVED_NAME OpenAI model id           (default Qwen3.5-9B-AWQ)
-#   FMD_VLLM_PORT   port                      (default 8000)
+#   FMD_VLLM_PORT   port                      (default 8010)
 #   FMD_MAX_MODEL_LEN context                 (default 32768)
 #   FMD_VLLM_GPU_MEM_UTIL                     (default 0.90)
 #
@@ -31,7 +31,7 @@ MODEL_DIR="${FMD_MODEL_DIR:-/home/archit-gore/models}"
 VENV="${FMD_VLLM_VENV:-$HOME/.venvs/fmd-vllm}"
 MODEL="${FMD_VLLM_MODEL:-$MODEL_DIR/Qwen3.5-9B-AWQ}"
 SERVED="${FMD_SERVED_NAME:-Qwen3.5-9B-AWQ}"
-PORT="${FMD_VLLM_PORT:-8000}"
+PORT="${FMD_VLLM_PORT:-8010}"
 MAX_LEN="${FMD_MAX_MODEL_LEN:-32768}"
 GPU_UTIL="${FMD_VLLM_GPU_MEM_UTIL:-0.90}"
 RUN_DIR="${FMD_RUN_DIR:-/tmp/opencode/fmd-serve}"

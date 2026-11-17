@@ -138,36 +138,79 @@ scripts/fetch_model.sh QuantTrio/Qwen3.5-9B-AWQ
 ls -l "$MODEL_DIR/Qwen3.5-9B-AWQ"       # expect 5 safetensors + configs
 ```
 
-**Fresh fetch.** `fetch_model.sh` reads `model.safetensors.index.json` and
-fetches every shard independently into `<shard>.part`; the part file is renamed
-only after the size matches `.fmd-manifest.json`, the safetensors header parses
-(8-byte JSON length + tensor count + declared payload end), and, when the Hub
-exposes LFS metadata, the sha256 matches. Completion is never inferred from
+**Fresh fetch.**
+
+```bash
+scripts/fetch_model.sh QuantTrio/Qwen3.5-9B-AWQ
+ls -l "$MODEL_DIR/Qwen3.5-9B-AWQ"       # 5 safetensors + configs
+```
+
+The Hub file listing — `/api/models/<repo>/tree/<rev>?recursive=true` — is the
+authority on what the repo contains. Three states follow from it:
+
+| state | meaning | effect |
+|---|---|---|
+| **required** | listed with a size (LFS `oid` when it is a weight file) | fetched, size + safetensors header + sha256 verified |
+| **optional** | not listed, or listed by an older manifest but since removed upstream | never fetched, never fails verification, never quarantined |
+| **corrupt** | listed, but local size/hash disagrees | quarantined, then re-fetched |
+
+`video_preprocessor_config.json` and `vocab.json` are **only** required if the
+current tree lists them — for `QuantTrio/Qwen3.5-9B-AWQ@main` it does, but a
+stale manifest that names a file the repo no longer ships is demoted to
+`optional` on the next run instead of failing forever. Files that are simply
+absent from the listing are reported as `OPTIONAL <name>: not listed upstream`
+and exit 0.
+
+Each shard downloads into `<shard>.part`; the part file is renamed only after
+the size matches `.fmd-manifest.json`, the safetensors header parses (8-byte
+JSON length + tensor count + declared payload end), and, when the Hub exposes
+LFS metadata, the sha256 matches. Completion is never inferred from
 `Content-Length`. Disk space is checked against the remaining bytes first
 (exit 3 rather than a full disk); `FMD_DISK_RESERVE_BYTES` keeps headroom.
 
-**After a disconnect, run the same command again.** Bytes already in the
-`.part` file are preserved and `curl -C -` resumes at that offset — nothing
-restarts from zero. Each line is one attempt: attempt n/N, bytes this session,
-total on disk, speed, HTTP status. A transfer below 10 KiB/s for 60 s is killed
-and retried with exponential backoff (5 s → 300 s); `FMD_FETCH_ATTEMPTS`
-(default 10) caps attempts per file. If a server ignores `Range`, the resulting
-full-body restart is detected by size and the file is restarted cleanly instead
-of being appended twice.
+**After a disconnect, run the same command again.** Bytes in `.part` are kept
+and `curl -C -` (or `aria2c -c`) resumes at that offset. Each attempt prints
+progress (bytes this session, total on disk, rate, HTTP status). A transfer
+below 10 KiB/s for 60 s is killed; a zero-progress attempt backs off at least
+30 s, then 5 s → 300 s exponential, capped at 5 min. `FMD_FETCH_ATTEMPTS`
+(default 10) caps attempts per file. `FMD_WALL_BUDGET=43200` stops *starting*
+new files after 12 h and still prints the summary. If a server ignores `Range`
+(a 200 while resuming), the file is restarted from zero instead of appended
+twice.
+
+At the end of every fetch/repair:
+
+```
+summary: +3.1 GiB in 2h14m (avg 402.11 KiB/s), 6 file(s) touched, 0 quarantined
+  ok     model-00001-of-00005.safetensors   +2.8 GiB  404.10 KiB/s
+  FAIL   model-00003-of-00005.safetensors   +291 MiB  38.20 KiB/s
+```
+
+**Bad files are never deleted.** `repair` moves them to
+`<dir>/.bad/<utc-timestamp>/<path>` and writes `<path>.reason` next to the
+moved file, so a failed night can be diagnosed afterwards:
+
+```bash
+find "$MODEL_DIR/Qwen3.5-9B-AWQ/.bad" -name '*.reason' -exec sh -c 'echo "$1:"; cat "$1"' _ {} \;
+```
+
+A short `.part` is evidence of a disconnect, not corruption, so repair keeps it
+for resume; only a `.part` at or past the declared size is quarantined.
 
 **Verify an existing directory** (offline; no Hub needed):
 
 ```bash
 scripts/fetch_model.sh verify "$MODEL_DIR/Qwen3.5-9B-AWQ"
 # PASS model-00001-of-00005.safetensors (… bytes, header=… tensors=…)
+# OPTIONAL vocab.json: not listed upstream, absent locally
 ```
 
 Exit codes: `0` all files pass, `2` some failed (names printed), `3` disk
-space, `4` metadata/index unavailable.
+space, `4` metadata/index unavailable, `64` usage error.
 
-**Repair the corrupted 9B directory.** `repair` re-checks every file, deletes
-only the invalid ones, and re-fetches exactly those; valid shards are never
-re-downloaded:
+**Repair a directory.** `repair` refreshes the listing first (so absent files
+stop being reported as missing), quarantines only what actually fails, and
+re-fetches exactly those files; valid shards are never re-downloaded:
 
 ```bash
 # directories fetched by the old script have no manifest; name the repo:
@@ -176,22 +219,77 @@ FMD_MODEL_REPO=QuantTrio/Qwen3.5-9B-AWQ \
 scripts/fetch_model.sh verify "$MODEL_DIR/Qwen3.5-9B-AWQ"
 ```
 
-It prints `FAIL <shard>: expected N bytes, found M` (or a sha256 mismatch), so
-the bad shard is never ambiguous. When `.fmd-manifest.json` is absent, repair
-rebuilds it from the Hub using `.source` or `FMD_MODEL_REPO`.
-
 **Expected sizes.** `.fmd-manifest.json` records the exact byte size of every
 file on first contact; `verify` is the authority. Reference points:
-Qwen3.5-2B-AWQ ≈3.2 GB, Qwen3-VL-8B-Instruct-FP8 ≈10.6 GB (two shards). The 9B
-AWQ set is 5 safetensors shards plus configs. A shard shorter than the manifest
-says is truncated — repair it; do not serve it.
+`QuantTrio/Qwen3.5-9B-AWQ@main` is **11.5 GiB (12.2 GB)** across 5 safetensors
+shards (2.8 / 2.8 / 2.8 / 2.8 / 0.40 GiB) plus ~20 MB of configs and
+tokenizer; Qwen3.5-2B-AWQ ≈3.2 GB, Qwen3-VL-8B-Instruct-FP8 ≈10.6 GB (two
+shards). A shard shorter than the manifest says is truncated — repair it; do
+not serve it.
 
-**When the host throttles.** `fetch_model.sh` honours `HF_ENDPOINT`, so switch
-mirror (e.g. `HF_ENDPOINT=https://hf-mirror.com`) or route through the host
-proxy (`HTTPS_PROXY=…`) without changing flags. Leave the connect timeout and
-retry defaults alone; raise `FMD_SPEED_TIME` / lower `FMD_SPEED_LIMIT` only when
-the link is genuinely slow but alive. Gated repos need `HF_TOKEN` (read from a
-0600 file by curl; never printed or placed on the command line).
+**Diagnosing a slow link (2.3 KiB/s and friends).** Retries do not fix
+throughput; measure it. `speed` probes the largest file in the repo with a
+bounded range request and reports MiB/s per method, then recommends one:
+
+```bash
+scripts/fetch_model.sh speed QuantTrio/Qwen3.5-9B-AWQ
+# method                       throughput  note
+# curl -4 single stream      225.08 KiB/s
+# curl -6 single stream               n/a  no IPv6 route
+# curl -4 x4 parallel        341.33 KiB/s  4 streams, 4.0 MiB in 12s
+# mirror https://hf-mirror.com  84.11 KiB/s
+# mirror x4 parallel         182.51 KiB/s  4 streams, 3.6 MiB in 20s
+# fastest: curl -4 x4 parallel (FMD_DOWNLOADER=aria2) at 341.33 KiB/s
+```
+
+It measures IPv4 vs IPv6, single stream vs `FMD_PROBE_CONNECTIONS` parallel
+streams, and the alternate endpoint `FMD_MIRROR` (default
+`https://hf-mirror.com`). Each probe is capped by `FMD_PROBE_BYTES` (8 MiB) and
+`FMD_PROBE_TIME` (20 s), so the whole diagnosis costs a few MiB. Below
+`FMD_SLOW_THRESHOLD` (1 MiB/s) it prints the sneakernet path instead of a
+command that would take days.
+
+**Switch mirror or add connections.**
+
+```bash
+# alternate endpoint, no other change (token, resume and verification follow):
+HF_ENDPOINT=https://hf-mirror.com scripts/fetch_model.sh QuantTrio/Qwen3.5-9B-AWQ
+
+# multi-connection: needs aria2c on PATH; auto-detected, falls back to curl
+FMD_DOWNLOADER=aria2 FMD_ARIA2_CONNECTIONS=8 \
+  scripts/fetch_model.sh QuantTrio/Qwen3.5-9B-AWQ
+```
+
+`FMD_DOWNLOADER=auto` (default) uses `aria2c -c -x8 -s8 -k1M --max-tries=0
+--retry-wait=5 --lowest-speed-limit=10K --timeout=60 --connect-timeout=30`
+when it is installed and no `HF_TOKEN` is set, else single-stream curl. aria2
+is deliberately skipped for gated repos: it has no `--header=@file`, so a token
+would be visible in `ps`. Parallel streams only help when the cap is
+per-connection; `speed` tells you whether that is the case here.
+
+**When the host throttles.** `HF_ENDPOINT`, `HTTPS_PROXY` and IPv4-vs-IPv6 all
+work without other flags. Lower `FMD_SPEED_LIMIT` only when the link is
+genuinely slow but alive; raise `FMD_SPEED_TIME` if a 60 s stall probe is too
+aggressive. Gated repos need `HF_TOKEN` (read from a 0600 file by curl; never
+printed or placed on the command line).
+
+**Sneakernet.** If `speed` stays under 1 MiB/s, downloading 11.5 GiB here is
+not an overnight job (at 2.3 KiB/s it is ~61 days; at 300 KiB/s ~11 h of
+perfect link). Fetch on a faster host and copy:
+
+```bash
+# on the fast host
+hf download QuantTrio/Qwen3.5-9B-AWQ --local-dir ~/models/Qwen3.5-9B-AWQ
+tar -C ~/models -czf qwen9b.tgz Qwen3.5-9B-AWQ    # ~11.5 GiB
+# on this host
+rsync -avP --partial user@fasthost:~/models/Qwen3.5-9B-AWQ/ "$MODEL_DIR/Qwen3.5-9B-AWQ/"
+scripts/fetch_model.sh repair "$MODEL_DIR/Qwen3.5-9B-AWQ"   # fills any gap
+scripts/fetch_model.sh verify "$MODEL_DIR/Qwen3.5-9B-AWQ"   # exit 0 before serving
+```
+
+The `hf` CLI in `packages/pipeline/.venv` (xet, chunked, resumable) is a good
+choice on the fast host: it measured about the same as 4 parallel curl streams
+here, and it cannot report resumable byte offsets the way `.part` files do.
 
 Do **not** point vLLM at the Hub id for day-to-day serving: a Hub id can
 silently fetch, a local directory cannot.
