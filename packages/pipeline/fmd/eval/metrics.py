@@ -9,7 +9,11 @@ number like "precision 1.0" cannot be read as more than it proves:
 * **provenance coverage** is resolved published numbers / all published
   numbers, and is a hard gate (default 1.0);
 * **abstention correctness** only counts abstentions; a run that abstains on
-  everything gets a low recall, not a high score.
+  everything gets a low recall, not a high score;
+* **row attribution** is checked separately when a golden row names a context:
+  the same value in the wrong row is a false positive (wrong attribution), never
+  a miss, and is counted in ``wrong_attributions``. ``row_attribution_accuracy``
+  is ``None`` until at least one row-context claim has a prediction.
 """
 
 from __future__ import annotations
@@ -19,6 +23,13 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
+
+from fmd.eval.rowctx import (
+    canonical_equal,
+    inside,
+    occurrence_spans,
+    row_block,
+)
 
 NUMERIC_TOLERANCE = 1e-9
 PUBLISHED_METHODS = frozenset({"extracted", "derived"})
@@ -85,6 +96,12 @@ class Prediction:
     char_start: int | None = None
     char_end: int | None = None
     method: str = "extracted"
+    context: str | None = None
+    disambiguation: str | None = None
+    row_label: str | None = None
+    column_header: str | None = None
+    value_cell: str | None = None
+    table_page: int | None = None
 
 
 @dataclass(frozen=True)
@@ -100,10 +117,20 @@ class GoldenRow:
     printed_value: Any = None
     printed_unit: str | None = None
     reason: str | None = None
+    context: str | None = None
+    disambiguation: str | None = None
+    row_label: str | None = None
+    column_header: str | None = None
+    value_cell: str | None = None
+    table_page: int | None = None
 
     @property
     def scored(self) -> bool:
         return self.status == "verified" and self.expectation in {"value", "abstain"}
+
+    @property
+    def has_row_context(self) -> bool:
+        return bool(self.context)
 
 
 @dataclass(frozen=True)
@@ -122,6 +149,9 @@ class FieldResult:
     exact: bool = False
     abstained: bool = False
     abstention_correct: bool = False
+    has_row_context: bool = False
+    attribution_ok: bool = True
+    wrong_attribution: bool = False
     detail: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -140,6 +170,9 @@ class FieldResult:
             "exact": self.exact,
             "abstained": self.abstained,
             "abstention_correct": self.abstention_correct,
+            "has_row_context": self.has_row_context,
+            "attribution_ok": self.attribution_ok,
+            "wrong_attribution": self.wrong_attribution,
             "detail": self.detail,
         }
 
@@ -156,6 +189,10 @@ class ExtractionMetrics:
     abstentions: int = 0
     correct_abstentions: int = 0
     unverified_excluded: int = 0
+    wrong_attributions: int = 0
+    row_context_rows: int = 0
+    row_attribution_checks: int = 0
+    row_attribution_correct: int = 0
     per_field: list[FieldResult] = field(default_factory=list)
 
     @property
@@ -192,6 +229,14 @@ class ExtractionMetrics:
     def abstention_correctness(self) -> float | None:
         return None if self.abstentions == 0 else self.correct_abstentions / self.abstentions
 
+    @property
+    def row_attribution_accuracy(self) -> float | None:
+        return (
+            None
+            if self.row_attribution_checks == 0
+            else self.row_attribution_correct / self.row_attribution_checks
+        )
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "evaluated": self.evaluated,
@@ -209,6 +254,11 @@ class ExtractionMetrics:
             "abstentions": self.abstentions,
             "correct_abstentions": self.correct_abstentions,
             "unverified_excluded": self.unverified_excluded,
+            "row_context_rows": self.row_context_rows,
+            "row_attribution_checks": self.row_attribution_checks,
+            "row_attribution_correct": self.row_attribution_correct,
+            "row_attribution_accuracy": _round(self.row_attribution_accuracy),
+            "wrong_attributions": self.wrong_attributions,
             "per_field": [result.as_dict() for result in self.per_field],
         }
 
@@ -303,19 +353,34 @@ def score_field(
     expected_unit = normalise_unit(row.unit)
     predicted_unit = normalise_unit(prediction.unit) if prediction else None
     unit_ok = expected_unit == predicted_unit
-    exact = bool(has_prediction and span_ok and value_ok and unit_ok)
+    has_row_context = row.has_row_context
+    attribution_ok = _attribution_ok(row, prediction, text)
+    exact = bool(has_prediction and span_ok and value_ok and unit_ok and attribution_ok)
+    wrong_attribution = bool(
+        has_prediction
+        and has_row_context
+        and not attribution_ok
+        and value_ok
+    )
     abstained = not has_prediction
     abstention_correct = abstained and row.expectation == "abstain"
     detail = ""
     if has_prediction and not exact:
         missing = [
             name
-            for name, ok in (("span", span_ok), ("value", value_ok), ("unit", unit_ok))
+            for name, ok in (
+                ("span", span_ok),
+                ("value", value_ok),
+                ("unit", unit_ok),
+                ("row", attribution_ok),
+            )
             if not ok
         ]
         detail = "mismatch: " + ", ".join(missing)
     elif abstained and not abstention_correct:
         detail = "missing prediction for a verified value"
+    if wrong_attribution:
+        detail = "wrong row attribution: the value is real but the span is in another row"
     return FieldResult(
         field=row.field,
         expected=row.value,
@@ -331,8 +396,42 @@ def score_field(
         exact=exact,
         abstained=abstained,
         abstention_correct=abstention_correct,
+        has_row_context=has_row_context,
+        attribution_ok=attribution_ok,
+        wrong_attribution=wrong_attribution,
         detail=detail,
     )
+
+
+def _attribution_ok(row: GoldenRow, prediction: Prediction | None, text: str | None) -> bool:
+    """Did the prediction land in the golden row's block?
+
+    Rows without context are backward compatible: attribution is not claimed,
+    so it cannot be wrong. A row-context claim must have a unique context in the
+    extraction text and the prediction span must fall inside that block. Claim
+    metadata (context, row label) is checked when the prediction supplies it;
+    its absence is not fabricated into a pass.
+    """
+
+    if not row.has_row_context:
+        return True
+    if prediction is None or text is None:
+        return False
+    if prediction.char_start is None or prediction.char_end is None:
+        return False
+    if prediction.char_start < 0 or prediction.char_end < prediction.char_start:
+        return False
+    context_spans = occurrence_spans(text, row.context)
+    if len(context_spans) != 1:
+        return False
+    block = row_block(text, context_spans[0])
+    if not inside([(prediction.char_start, prediction.char_end)], block):
+        return False
+    if prediction.context and not canonical_equal(row.context, prediction.context):
+        return False
+    if row.row_label and prediction.row_label:
+        return canonical_equal(row.row_label, prediction.row_label)
+    return True
 
 
 def summarise_fields(
@@ -346,6 +445,14 @@ def summarise_fields(
         if result.expectation not in {"value", "abstain"}:
             continue
         metrics.evaluated += 1
+        if result.has_row_context:
+            metrics.row_context_rows += 1
+            if result.has_prediction:
+                metrics.row_attribution_checks += 1
+                if result.attribution_ok:
+                    metrics.row_attribution_correct += 1
+        if result.wrong_attribution:
+            metrics.wrong_attributions += 1
         if result.abstained:
             metrics.abstentions += 1
             if result.abstention_correct:

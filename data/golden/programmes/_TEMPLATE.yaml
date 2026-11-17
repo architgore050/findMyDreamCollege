@@ -10,6 +10,13 @@
 # A verified row needs EITHER `fixture:` on the entry (repo-relative path to a
 # committed fixture containing the quote verbatim) OR `source_url` + a real
 # `retrieved_at`. Otherwise it must be `status: unverified` with `value: null`.
+#
+# Table-row claims may also set:
+#   context: "Institution / heading cell"
+#   disambiguation: unique | context_row | context_window
+#   row: {row_label, column_header, value_cell, table_page}
+# The loader re-checks a verified context against the fixture. See
+# docs/product-development-cycle/08-eval-methodology.md.
 
 - schema_version: 1
   id: template-replace-me
@@ -28,6 +35,9 @@
       unit: count
       quote: null
       status: unverified
+      # context: null
+      # disambiguation: null
+      # row: {row_label: null, column_header: null, value_cell: null, table_page: null}
       note: "A human must open the source PDF/HTML and copy the exact quote."
     salary.median:
       value: null

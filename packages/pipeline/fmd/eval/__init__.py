@@ -9,7 +9,15 @@ dated source (see :mod:`fmd.eval.golden`).
 from __future__ import annotations
 
 from fmd.eval.drift import compare_reports, ks_two_sample, population_stability_index
-from fmd.eval.golden import GoldenEntry, GoldenError, GoldenSet, GoldenValue, load_golden
+from fmd.eval.golden import (
+    Disambiguation,
+    GoldenEntry,
+    GoldenError,
+    GoldenSet,
+    GoldenValue,
+    RowContext,
+    load_golden,
+)
 from fmd.eval.metrics import (
     ExtractionMetrics,
     IntervalReport,
@@ -39,6 +47,8 @@ __all__ = [
     "IntervalReport",
     "ProvenanceReport",
     "RejectionMetrics",
+    "RowContext",
+    "Disambiguation",
     "apply_gate",
     "compare_reports",
     "ks_two_sample",

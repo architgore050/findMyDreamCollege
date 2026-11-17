@@ -7,6 +7,11 @@ public source. The loader enforces that mechanically:
 * ``status: verified`` + ``expectation: value`` requires a non-null value, a
   verbatim quote, and either a ``fixture`` whose text contains that quote or a
   ``source_url`` together with ``retrieved_at``;
+* ``expectation: value`` + a non-empty ``context`` must declare
+  ``disambiguation`` (``unique`` | ``context_row`` | ``context_window``). The
+  context must occur exactly once in the committed fixture; a ``context_row``
+  claim must leave exactly one quote occurrence inside its block, and a quote
+  that is already globally unique is rejected as mislabelled;
 * ``status: unverified`` forbids a value (``expected`` must be null). Unverified
   rows are counted separately and never enter accuracy metrics;
 * ``expectation: abstain`` records that the source is silent about a field; the
@@ -29,12 +34,20 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from fmd.eval.rowctx import (
+    inside,
+    occurrence_spans,
+    row_block,
+    window_occurrences,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_GOLDEN_DIR = REPO_ROOT / "data" / "golden"
 
 Status = Literal["verified", "unverified"]
 Expectation = Literal["value", "abstain", "reject"]
 Traceability = Literal["fixture", "citation", "unverified"]
+Disambiguation = Literal["unique", "context_row", "context_window"]
 
 
 class GoldenError(ValueError):
@@ -44,6 +57,28 @@ class GoldenError(ValueError):
         self.problems = list(problems)
         joined = "\n".join(f"  - {problem}" for problem in self.problems)
         super().__init__("golden set is invalid. Fix the following and re-run:\n" + joined)
+
+
+class RowContext(BaseModel):
+    """Which table row a value belongs to, as the extractor reported it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    row_label: str | None = None
+    column_header: str | None = None
+    value_cell: str | None = None
+    table_page: int | None = None
+
+    @model_validator(mode="after")
+    def _row_rules(self) -> RowContext:
+        if not any(
+            value is not None and (not isinstance(value, str) or value.strip())
+            for value in (self.row_label, self.column_header, self.value_cell, self.table_page)
+        ):
+            raise ValueError("row context needs at least one non-empty field")
+        if self.table_page is not None and self.table_page < 1:
+            raise ValueError("row.table_page is 1-based; it must be >= 1")
+        return self
 
 
 class GoldenValue(BaseModel):
@@ -61,9 +96,22 @@ class GoldenValue(BaseModel):
     reason: str | None = None
     absent_terms: list[str] = Field(default_factory=list)
     note: str | None = None
+    context: str | None = None
+    row: RowContext | None = None
+    disambiguation: Disambiguation | None = None
 
     @model_validator(mode="after")
     def _status_rules(self) -> GoldenValue:
+        if self.context is not None and not self.context.strip():
+            raise ValueError("context must be null or a non-empty string")
+        if self.context is not None and self.disambiguation is None:
+            raise ValueError("a non-empty context must declare disambiguation")
+        if self.disambiguation in {"context_row", "context_window"} and self.context is None:
+            raise ValueError(
+                f"disambiguation: {self.disambiguation} requires a non-empty context"
+            )
+        if self.disambiguation == "unique" and self.context is not None:
+            raise ValueError("disambiguation: unique contradicts a row context; drop the context")
         if self.status == "unverified":
             if self.value is not None:
                 raise ValueError(
@@ -158,6 +206,18 @@ class GoldenSet:
                 kind: sum(1 for trace in self.traces if trace.traceability == kind)
                 for kind in ("fixture", "citation", "unverified")
             },
+            "row_context_rows": sum(
+                1
+                for entry in self.entries
+                for row in entry.expected.values()
+                if row.context is not None
+            ),
+            "row_context_verified_rows": sum(
+                1
+                for entry in self.entries
+                for row in entry.verified_rows.values()
+                if row.context is not None
+            ),
             "ids": [entry.id for entry in self.entries],
         }
 
@@ -260,8 +320,14 @@ def _check_row(
     if entry.fixture:
         if fixture_text is None:
             problems.append(f"{prefix}: verified row has no readable fixture text")
-        elif row.quote not in fixture_text:
-            problems.append(f"{prefix}: quote is not verbatim in {entry.fixture}: {row.quote!r}")
+        else:
+            quote_spans = occurrence_spans(fixture_text, row.quote)
+            if not quote_spans:
+                problems.append(
+                    f"{prefix}: quote is not verbatim in {entry.fixture}: {row.quote!r}"
+                )
+            else:
+                problems.extend(_check_context(entry, name, row, fixture_text, quote_spans))
     if not entry.fixture:
         if not entry.source_url:
             problems.append(
@@ -269,6 +335,74 @@ def _check_row(
             )
         if not entry.retrieved_at:
             problems.append(f"{prefix}: a cited public source needs retrieved_at (YYYY-MM-DD)")
+    return problems
+
+
+def _check_context(
+    entry: GoldenEntry,
+    name: str,
+    row: GoldenValue,
+    fixture_text: str,
+    quote_spans: list[tuple[int, int]],
+) -> list[str]:
+    """Verify a context claim the same way the extractor resolves it.
+
+    The loader has no Docling tables, so the fixture text is the source of
+    truth. A context that is absent or ambiguous fails; a ``context_row`` claim
+    whose quote is already globally unique is rejected because the extractor
+    labels that ``unique``, not ``context_row``.
+    """
+
+    prefix = f"{entry.id}.{name}"
+    problems: list[str] = []
+    if row.context is None:
+        return problems
+    context_spans = occurrence_spans(fixture_text, row.context)
+    if len(context_spans) != 1:
+        problems.append(
+            f"{prefix}: context {row.context!r} occurs {len(context_spans)} times in "
+            f"{entry.fixture}; it must resolve exactly once"
+        )
+        return problems
+
+    if row.disambiguation == "unique":
+        if len(quote_spans) != 1:
+            problems.append(
+                f"{prefix}: disambiguation: unique but the quote occurs "
+                f"{len(quote_spans)} times"
+            )
+        return problems
+
+    if row.disambiguation == "context_row":
+        if len(quote_spans) < 2:
+            problems.append(
+                f"{prefix}: disambiguation: context_row but the quote is already unique; "
+                "the extractor would report disambiguation: unique"
+            )
+            return problems
+        block = row_block(fixture_text, context_spans[0])
+        in_block = inside(quote_spans, block)
+        if len(in_block) != 1:
+            problems.append(
+                f"{prefix}: context {row.context!r} leaves {len(in_block)} quote occurrences "
+                "in its row block; it must leave exactly one"
+            )
+        if row.row is not None and row.row.row_label:
+            labels = occurrence_spans(fixture_text, row.row.row_label)
+            if len(inside(labels, block)) != 1:
+                problems.append(
+                    f"{prefix}: row label {row.row.row_label!r} does not resolve exactly once "
+                    "inside the quoted context block"
+                )
+        return problems
+
+    if row.disambiguation == "context_window":
+        near = window_occurrences(fixture_text, quote_spans, context_spans[0])
+        if len(near) != 1:
+            problems.append(
+                f"{prefix}: context {row.context!r} is next to {len(near)} quote "
+                "occurrences; it must be next to exactly one"
+            )
     return problems
 
 
@@ -283,10 +417,12 @@ def _trace(entry: GoldenEntry, name: str, row: GoldenValue) -> RowTrace:
 __all__ = [
     "DEFAULT_GOLDEN_DIR",
     "REPO_ROOT",
+    "Disambiguation",
     "GoldenEntry",
     "GoldenError",
     "GoldenSet",
     "GoldenValue",
+    "RowContext",
     "RowTrace",
     "Traceability",
     "load_golden",

@@ -75,6 +75,7 @@ def _versions() -> dict[str, Any]:
 
 
 def _golden_row(name: str, row: GoldenValue) -> GoldenRow:
+    identity = row.row
     return GoldenRow(
         field=name,
         value=row.value,
@@ -85,6 +86,36 @@ def _golden_row(name: str, row: GoldenValue) -> GoldenRow:
         printed_value=row.printed_value,
         printed_unit=row.printed_unit,
         reason=row.reason,
+        context=row.context,
+        disambiguation=row.disambiguation,
+        row_label=identity.row_label if identity else None,
+        column_header=identity.column_header if identity else None,
+        value_cell=identity.value_cell if identity else None,
+        table_page=identity.table_page if identity else None,
+    )
+
+
+def _prediction_from_claim(claim: Any) -> Prediction:
+    qualifier = getattr(claim, "qualifier", None) or {}
+    if not isinstance(qualifier, Mapping):
+        qualifier = {}
+    identity = qualifier.get("row")
+    if not isinstance(identity, Mapping):
+        identity = {}
+    return Prediction(
+        field=claim.predicate,
+        value=claim.value,
+        unit=claim.unit,
+        quote=claim.quote,
+        char_start=claim.char_start,
+        char_end=claim.char_end,
+        method=claim.method,
+        context=qualifier.get("context_quote"),
+        disambiguation=qualifier.get("disambiguation"),
+        row_label=identity.get("row_label"),
+        column_header=identity.get("column_header"),
+        value_cell=identity.get("value_cell"),
+        table_page=identity.get("table_page"),
     )
 
 
@@ -128,18 +159,7 @@ def _evaluate_entry(
         entity_id=entity_id,
         bands=bands,
     )
-    predictions = [
-        Prediction(
-            field=claim.predicate,
-            value=claim.value,
-            unit=claim.unit,
-            quote=claim.quote,
-            char_start=claim.char_start,
-            char_end=claim.char_end,
-            method=claim.method,
-        )
-        for claim in validation.claims
-    ]
+    predictions = [_prediction_from_claim(claim) for claim in validation.claims]
     rows = _entry_rows(entry)
     unverified = sum(1 for row in rows if row.status != "verified")
     results = [
@@ -198,7 +218,10 @@ def run_evaluation(
             entry, base, bands=bands, entity_id=index
         )
         measured_entries += 1
-        predictions = {claim.predicate: claim for claim in claims}
+        predictions = {
+            prediction.field: prediction
+            for prediction in (_prediction_from_claim(claim) for claim in claims)
+        }
         entry_results = [
             score_field(row, predictions.get(row.field), text)
             for row in rows
@@ -329,6 +352,14 @@ def render_summary(report: Mapping[str, Any], *, report_path: Path | None = None
             value_accuracy=extraction.get("value_accuracy"),
             unit=extraction.get("unit_normalisation_accuracy"),
             abstention=extraction.get("abstention_correctness"),
+        ),
+        "  row attribution: checks {checks} correct {correct} accuracy {accuracy} "
+        "wrong {wrong} (row-context rows {rows})".format(
+            checks=extraction.get("row_attribution_checks", 0),
+            correct=extraction.get("row_attribution_correct", 0),
+            accuracy=extraction.get("row_attribution_accuracy"),
+            wrong=extraction.get("wrong_attributions", 0),
+            rows=extraction.get("row_context_rows", 0),
         ),
         "  provenance coverage: {coverage} "
         "({resolved}/{total}, modelled excluded {modelled})".format(

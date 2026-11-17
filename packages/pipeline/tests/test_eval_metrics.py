@@ -233,3 +233,119 @@ def test_interval_coverage_hand_computed() -> None:
     assert report.coverage == pytest.approx(0.5)
     assert report.nominal == pytest.approx(0.8)
     assert interval_coverage([]).coverage is None
+
+
+# ------------------------------------------------------------------- row context
+
+ROW_TEXT = (
+    "Inst A\n"
+    "3. B.Sc. Medical Laboratory Technology 20\n"
+    "\n"
+    "Inst B\n"
+    "3. B.Sc. Medical Laboratory Technology 20\n"
+)
+
+
+def _row_context_row() -> GoldenRow:
+    return GoldenRow(
+        field="seats.total",
+        value=20,
+        unit="count",
+        quote="B.Sc. Medical Laboratory Technology 20",
+        context="Inst A",
+        disambiguation="context_row",
+        row_label="3. B.Sc. Medical Laboratory Technology",
+        column_header="Intake",
+        value_cell="20",
+        table_page=1,
+    )
+
+
+def _row_prediction(at: int) -> Prediction:
+    quote = "B.Sc. Medical Laboratory Technology 20"
+    return Prediction(
+        field="seats.total",
+        value=20,
+        unit="count",
+        quote=quote,
+        char_start=at,
+        char_end=at + len(quote),
+        disambiguation="context_row",
+        row_label="3. B.Sc. Medical Laboratory Technology",
+    )
+
+
+def test_correct_value_in_the_correct_row_is_a_true_positive() -> None:
+    first = ROW_TEXT.index("B.Sc. Medical Laboratory Technology 20")
+    metrics = score_extraction([_row_context_row()], [_row_prediction(first)], ROW_TEXT)
+
+    assert metrics.true_positives == 1
+    assert metrics.false_positives == 0
+    assert metrics.false_negatives == 0
+    assert metrics.row_context_rows == 1
+    assert metrics.row_attribution_checks == 1
+    assert metrics.row_attribution_correct == 1
+    assert metrics.row_attribution_accuracy == pytest.approx(1.0)
+    assert metrics.wrong_attributions == 0
+    assert metrics.per_field[0].attribution_ok is True
+
+
+def test_correct_value_in_the_wrong_row_is_catastrophic_not_a_miss() -> None:
+    first = ROW_TEXT.index("B.Sc. Medical Laboratory Technology 20")
+    second = ROW_TEXT.index("B.Sc. Medical Laboratory Technology 20", first + 1)
+    metrics = score_extraction([_row_context_row()], [_row_prediction(second)], ROW_TEXT)
+
+    assert metrics.true_positives == 0
+    assert metrics.false_positives == 1
+    assert metrics.false_negatives == 0, "wrong attribution must not be counted as a miss"
+    assert metrics.row_attribution_checks == 1
+    assert metrics.row_attribution_correct == 0
+    assert metrics.row_attribution_accuracy == pytest.approx(0.0)
+    assert metrics.wrong_attributions == 1
+    result = metrics.per_field[0]
+    assert result.value_ok is True
+    assert result.attribution_ok is False
+    assert result.wrong_attribution is True
+    assert "wrong row attribution" in result.detail
+
+
+def test_row_attribution_is_unmeasured_when_no_row_context_prediction_exists() -> None:
+    metrics = score_extraction([_row_context_row()], [], ROW_TEXT)
+    assert metrics.false_negatives == 1
+    assert metrics.row_context_rows == 1
+    assert metrics.row_attribution_checks == 0
+    assert metrics.row_attribution_accuracy is None
+    assert metrics.wrong_attributions == 0
+
+
+def test_row_context_is_ignored_for_rows_without_context() -> None:
+    row = GoldenRow(field="placement.eligible_count", value=120, unit="count", quote="120")
+    prediction = Prediction(
+        field=row.field,
+        value=120,
+        unit="count",
+        quote="120",
+        char_start=0,
+        char_end=3,
+        context="some unrelated heading",
+        row_label="some unrelated row",
+    )
+    metrics = score_extraction([row], [prediction], "120")
+    assert metrics.true_positives == 1
+    assert metrics.row_context_rows == 0
+    assert metrics.row_attribution_accuracy is None
+
+
+def test_unverified_row_with_context_is_excluded_from_attribution() -> None:
+    row = GoldenRow(
+        field="seats.total",
+        value=None,
+        status="unverified",
+        context="Inst A",
+        disambiguation="context_row",
+    )
+    metrics = score_extraction([row], [], ROW_TEXT, unverified_excluded=1)
+    assert metrics.evaluated == 0
+    assert metrics.row_context_rows == 0
+    assert metrics.unverified_excluded == 1
+    assert metrics.row_attribution_accuracy is None

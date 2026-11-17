@@ -25,11 +25,14 @@ gates, not a measurement of model quality.
 committed fixture (or a cited, dated source). Each expected field carries
 `value`, `unit`, `quote`, `status`, and `expectation`.
 
-**Current committed state (2026-11-16): 4 entries, 14 verified rows, 1
+**Current committed state (2026-11-18): 5 entries, 16 verified rows, 1
 unverified row, 0 citation-only rows.** Every verified quote was checked
 verbatim against its committed fixture by the loader. Six verified rows are
 inventory/ranking facts with no extraction replay (UGC, RUHS, NIRF); only the
-placement-report entry is measured for extraction accuracy.
+placement-report entry is measured for extraction accuracy. The two Stanley
+seat-matrix rows are fixture-checked but not replayed. One of them
+(`tnmgrmu-ahs-ug-seat-matrix-2024-25.seats.total`) carries row context, so its
+attribution metric is `null`.
 
 A row is one of:
 
@@ -39,6 +42,44 @@ A row is one of:
 | verified | abstain | The document is silent; `absent_terms` must really be absent. |
 | verified | reject | The value must be rejected; `reason` is recorded. |
 | unverified | value (value null) | Not checked by a human yet. Counted, excluded from accuracy. |
+
+A row may also carry optional row context, matching what the extractor emits
+from the seat-matrix contract:
+
+```yaml
+context: "Govt. Stanley Medical College & Hospital, Chennai - 600 001"
+disambiguation: context_row          # unique | context_row | context_window
+row:
+  row_label: "3. B.Sc. Medical Laboratory Technology"
+  column_header: "Intake"
+  value_cell: "20"
+  table_page: 1
+```
+
+`context` is the anchor cell (institution/heading/row label). `disambiguation`
+says how the extractor proved the span: `unique` (one occurrence), `context_row`
+(ambiguous quote, exactly one occurrence inside the context's row block), or
+`context_window` (same line / ±200 characters). `row` records the extractor's
+`RowIdentity`; `table_page` is 1-based. All three fields are optional and default
+to absent, so older rows load unchanged.
+
+The loader is stricter than the old presence check. For a verified row with a
+non-empty `context` it requires:
+
+1. exactly one occurrence of the context in the committed fixture (exact first,
+   then the extractor's canonicalisation);
+2. `disambiguation` present and consistent — a contextless row may not claim
+   `context_row`, and `unique` may not carry a context;
+3. for `context_row`: the quote must be ambiguous globally (otherwise it is
+   mislabelled) and exactly once inside the context's row block; if `row_label`
+   is present it must also resolve exactly once inside that block;
+4. for `context_window`: exactly one quote occurrence on the context line or
+   within the same ±200-character window.
+
+A committed fixture is text, not a Docling table, so the block is the anchor
+line plus its following lines until a blank line, form feed, or next serial
+number. This is deliberately conservative: a context that does not disambiguate
+fails the load rather than becoming ground truth.
 
 `status: unverified` with a non-null value is a loader error. So is a verified
 quote that does not occur in its fixture. That is the point: a typo cannot
@@ -51,9 +92,29 @@ number.
 **Extraction span accuracy / P/R/F1.** A field is a true positive only when
 (a) the predicted quote resolves exactly at `[char_start, char_end)` in the
 extraction text, (b) it equals the golden quote, (c) the value matches
-(numeric tolerance `1e-9`), and (d) the normalised unit matches. Precision =
+(numeric tolerance `1e-9`), (d) the normalised unit matches, and (e) for a
+row-context claim, the span lands in the golden row's block. Precision =
 TP/(TP+FP), recall = TP/(TP+FN). Missing predictions are false negatives, never
 zeros.
+
+**Row-attribution accuracy.** Only applies to verified value rows with a
+`context`. For each such row that received a prediction, the prediction is
+correct when its span is inside the unique context block; if the prediction
+publishes `context_quote` or a row label, that metadata must also match. Report
+`row_context_rows`, `row_attribution_checks`, `row_attribution_correct`,
+`row_attribution_accuracy` (null until checks > 0), and `wrong_attributions`.
+
+`wrong_attributions` is the catastrophic case: the value is real but the span is
+in another row. It is a false positive, not a false negative — the run found the
+number, it attributed it to the wrong institution. This is the error the seat
+matrix previously could not measure.
+
+**What row attribution does not prove.** The loader can only check the
+committed text fixture, not the original table structure; a block boundary is a
+deterministic text convention. And if a row-context golden row has no recorded
+prediction (as with the Stanley seat row today), attribution is `null`, not
+`1.0`. The metric proves attribution only for replayed entries, never for the
+curated row by itself.
 
 **Unit normalisation accuracy.** Among predicted fields with an expected unit,
 the share whose unit normalises to the golden unit (`percent` → `ratio`, `inr` →
@@ -100,7 +161,9 @@ JSON so consecutive runs diff cleanly.
 ## What this proves
 
 - Every claim the harness publishes from the committed fixtures has a quote that
-  resolves at its exact span, and extraction agrees with 14 curated rows.
+  resolves at its exact span, and extraction agrees with 16 curated rows.
+- A verified row that names a context has that context re-checked against the
+  fixture; a fabricated or non-disambiguating context fails the load.
 - The golden loader cannot silently accept a fabricated verified value.
 - The provenance gate is wired to the process exit code.
 - Drift logic distinguishes a claims change from an unexplained movement.
@@ -109,7 +172,10 @@ JSON so consecutive runs diff cleanly.
 ## What it does not prove
 
 - It does **not** measure model extraction quality: only one recorded response is
-  replayed. Six verified rows are not measured at all.
+  replayed. Eight verified rows are not measured at all, including the
+  row-context Stanley seat row.
+- It does **not** measure row attribution for entries that are not replayed. The
+  Stanley row is load-checked, but its `row_attribution_accuracy` is `null`.
 - It is **not** the brief's 120–150 programme, two-annotator, α ≥ 0.7 golden set.
   It is a truthful seed and a working harness; the set must grow before release.
 - It does **not** prove salary intervals are calibrated; there are no interval
@@ -124,9 +190,12 @@ JSON so consecutive runs diff cleanly.
 2. Copy the quote character-for-character. Expected values are the normalised
    claim values; put the printed form in `printed_value`/`printed_unit`.
 3. Fill `fixture:` (repo-relative) or `source_url` + a real `retrieved_at`.
-4. Leave `status: unverified`, `value: null` if you cannot do 2–3. Do not guess.
-5. Run `make eval`; the loader fails on a quote that is not verbatim.
-6. Update the verified/unverified counts in this document and the committed
+4. If the value comes from a table row, add `context`, `disambiguation`, and
+   `row` exactly as the extractor reported them. Do not hand-write a context
+   that the fixture does not contain; the loader will reject it.
+5. Leave `status: unverified`, `value: null` if you cannot do 2–4. Do not guess.
+6. Run `make eval`; the loader fails on a quote/context that is not provable.
+7. Update the verified/unverified counts in this document and the committed
    fixture citation if needed.
 
 If a metric is `null`, the harness is saying it could not measure it. That is
