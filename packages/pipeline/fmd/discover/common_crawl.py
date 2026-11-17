@@ -28,6 +28,12 @@ DEFAULT_INDEX_GLOB = (
     "https://data.commoncrawl.org/cc-index/table/cc-main/warc/crawl=*/subset=warc/*.parquet"
 )
 DEFAULT_SOURCE_ID = "common_crawl"
+#: duckdb's httpfs settings. A cold parquet scan can otherwise sit in a socket
+#: read for minutes after the link drops. `http_retries` is deliberately small:
+#: a retried HTTP range is expensive and the index query is resumable by row.
+DUCKDB_HTTP_TIMEOUT_S = 20
+DUCKDB_HTTP_RETRIES = 2
+DUCKDB_HTTP_RETRY_WAIT_MS = 1000
 
 QueryRunner = Callable[[str, Sequence[str], int], Iterable[tuple[Any, ...]]]
 
@@ -101,13 +107,20 @@ class CommonCrawlIndex:
             f"LIMIT {int(limit)}"
         )
 
-    def _run_duckdb(self, domains: Sequence[str], limit: int) -> list[tuple[Any, ...]]:
+    def _run_duckdb(
+        self, _index_glob: str, domains: Sequence[str], limit: int
+    ) -> list[tuple[Any, ...]]:
+        # `_index_glob` satisfies the QueryRunner signature; `_sql` reads the
+        # instance's glob so an injected runner can ignore it.
         duckdb = _import_duckdb()
         try:
             conn = duckdb.connect()
             try:
                 conn.execute("INSTALL httpfs")
                 conn.execute("LOAD httpfs")
+                conn.execute(f"SET http_timeout={int(DUCKDB_HTTP_TIMEOUT_S)}")
+                conn.execute(f"SET http_retries={int(DUCKDB_HTTP_RETRIES)}")
+                conn.execute(f"SET http_retry_wait_ms={int(DUCKDB_HTTP_RETRY_WAIT_MS)}")
             except Exception as exc:  # pragma: no cover - extension/network dependent
                 logger.warning("duckdb httpfs unavailable: %s", exc)
                 raise DiscoveryUnavailable(

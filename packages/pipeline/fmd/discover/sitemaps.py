@@ -56,19 +56,38 @@ class SitemapDiscovery:
         max_sitemaps: int = MAX_SITEMAPS_PER_DOMAIN,
         max_urls: int = MAX_URLS_PER_DOMAIN,
         max_depth: int = MAX_DEPTH,
+        max_consecutive_failures: int = 3,
     ) -> None:
         self.fetch = fetch
         self.source_id = source_id
         self.max_sitemaps = max_sitemaps
         self.max_urls = max_urls
         self.max_depth = max_depth
+        # A dead host returns an error for every sitemap. After this many in a
+        # row, stop expanding instead of walking the whole queue.
+        self.max_consecutive_failures = max(1, max_consecutive_failures)
+        self.consecutive_failures = 0
+        self.aborted_reason: str | None = None
 
     def _fetch_text(self, url: str) -> str | None:
         try:
             body = self.fetch(url)
         except Exception as exc:
-            logger.warning("sitemap fetch failed for %s: %s", url, exc)
+            self.consecutive_failures += 1
+            logger.warning(
+                "sitemap fetch failed for %s (%d in a row): %s",
+                url,
+                self.consecutive_failures,
+                exc,
+            )
+            if self.consecutive_failures >= self.max_consecutive_failures:
+                self.aborted_reason = f"network_unavailable: {exc}"
+                logger.warning(
+                    "sitemap discovery aborted after %d consecutive failures",
+                    self.consecutive_failures,
+                )
             return None
+        self.consecutive_failures = 0
         if body is None:
             return None
         return _decode(body)
@@ -85,6 +104,8 @@ class SitemapDiscovery:
         refs: list[DocumentRef] = []
 
         while queue and len(visited) < self.max_sitemaps and len(refs) < self.max_urls:
+            if self.aborted_reason is not None:
+                break
             url, depth = queue.pop(0)
             if url in visited:
                 continue

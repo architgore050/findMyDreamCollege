@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -10,6 +14,19 @@ from typing import Any, Protocol
 import httpx
 
 from fmd.config.models import ProfileConfig, ProviderConfig
+from fmd.net.policy import (
+    DEFAULT_RETRY,
+    NetworkGuard,
+    NetworkUnavailable,
+    RetryPolicy,
+    Timeouts,
+    classify_exception,
+    classify_status,
+    is_local_endpoint,
+    llm_timeouts,
+    make_client,
+    request_with_retries,
+)
 
 
 class LLMError(RuntimeError):
@@ -32,6 +49,13 @@ class FixtureMissing(LLMError):
 
 class ProfileUnresolved(LLMError):
     reason = "profile_unresolved"
+
+
+class NetworkOutage(ProviderError):
+    """The endpoint stopped answering; the router aborts the remaining batch."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("network_unavailable", message)
 
 
 @dataclass(frozen=True)
@@ -70,24 +94,52 @@ def _post_json(
     headers: dict[str, str],
     payload: dict[str, Any],
     name: str,
-    timeout: float,
+    timeouts: Timeouts | None = None,
+    retry: RetryPolicy = DEFAULT_RETRY,
     transport: httpx.BaseTransport | None,
+    guard: NetworkGuard | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """POST JSON and map transport/HTTP failures to provider reasons.
 
+    Retries only transient faults (connect/read timeout, 429, 5xx) and honours
+    ``Retry-After``. ``max_tokens``-scaled timeouts arrive via ``timeouts``.
     Errors never echo headers or the request URL: a provider key must not leak
     into logs through an exception message.
     """
+    if guard is not None:
+        guard.check()
     try:
-        with httpx.Client(timeout=timeout, transport=transport) as client:
-            response = client.post(url, headers=headers, json=payload)
+        with make_client(
+            timeouts=timeouts or Timeouts(), transport=transport, follow_redirects=False
+        ) as client:
+            response = request_with_retries(
+                client,
+                "POST",
+                url,
+                retry=retry,
+                headers=headers,
+                json=payload,
+                guard=guard,
+                sleep=sleeper,
+            )
+    except NetworkUnavailable as exc:
+        raise NetworkOutage(str(exc)) from exc
     except httpx.TimeoutException as exc:
         raise ProviderError("timeout", f"{name}: request timed out") from exc
     except httpx.HTTPError as exc:
-        raise ProviderError("connection_error", f"{name}: connection failed: {exc}") from exc
-    if response.status_code >= 400:
+        fault = classify_exception(exc)
         raise ProviderError(
-            "http_error",
+            fault.reason if fault.reason != "unexpected_error" else "connection_error",
+            f"{name}: connection failed ({fault.kind})",
+        ) from exc
+    if response.status_code >= 400:
+        fault = classify_status(response.status_code)
+        reason = "http_error"
+        if fault.retryable:
+            reason = fault.reason
+        raise ProviderError(
+            reason,
             f"{name}: HTTP {response.status_code}: {response.text[:500]}",
         )
     try:
@@ -102,21 +154,51 @@ def _post_json(
 
 
 def _probe_get(
-    *, url: str, headers: dict[str, str], name: str, timeout: float,
+    *,
+    url: str,
+    headers: dict[str, str],
+    name: str,
     transport: httpx.BaseTransport | None,
 ) -> tuple[bool, str]:
+    """Cheap reachability probe: 2 s connect, 5 s read, one attempt.
+
+    A doctor run must not inherit the completion timeout: probing an endpoint
+    that is merely asleep should report in seconds, not minutes.
+    """
     try:
-        with httpx.Client(timeout=timeout, transport=transport) as client:
+        with make_client(
+            timeouts=Timeouts(connect=2.0, read=5.0, write=5.0, pool=2.0),
+            transport=transport,
+            follow_redirects=False,
+        ) as client:
             response = client.get(url, headers=headers)
     except httpx.TimeoutException:
         return False, "timed out"
     except httpx.HTTPError as exc:
-        return False, f"connection failed: {exc}"
+        return False, f"connection failed: {classify_exception(exc).kind}"
     if response.status_code == 401 or response.status_code == 403:
         return False, f"HTTP {response.status_code}: key rejected"
     if response.status_code >= 400:
         return False, f"HTTP {response.status_code}"
     return True, "ok"
+
+
+#: One in-flight request per local llama.cpp/vLLM endpoint. The host has one
+#: GPU; parallel completions do not go faster, they thrash the KV cache and make
+#: a flaky link look like a model failure.
+_ENDPOINT_SLOTS: dict[str, threading.Lock] = {}
+_ENDPOINT_SLOTS_GUARD = threading.Lock()
+
+
+def _endpoint_slot(url: str):
+    if not is_local_endpoint(url):
+        return nullcontext()
+    with _ENDPOINT_SLOTS_GUARD:
+        lock = _ENDPOINT_SLOTS.get(url)
+        if lock is None:
+            lock = threading.Lock()
+            _ENDPOINT_SLOTS[url] = lock
+    return lock
 
 
 def json_instruction(schema: type) -> str:
@@ -155,6 +237,13 @@ def _clean_gemini_schema(value: Any, root: dict[str, Any] | None = None) -> Any:
     return cleaned
 
 
+def _completion_timeouts(profile: ProfileConfig, override: float | None) -> Timeouts:
+    """Scaled timeouts for one completion (never a fixed 120 s)."""
+    if override is not None:
+        return Timeouts(connect=4.0, read=float(override), write=60.0, pool=4.0)
+    return llm_timeouts(profile.max_tokens)
+
+
 class OpenAICompatibleProvider:
     """vLLM/SGLang/OpenAI-compatible chat completions with guided JSON."""
 
@@ -165,9 +254,12 @@ class OpenAICompatibleProvider:
         self,
         name: str,
         config: ProviderConfig,
-        timeout: float = 60.0,
+        timeout: float | None = None,
         *,
         transport: httpx.BaseTransport | None = None,
+        guard: NetworkGuard | None = None,
+        retry: RetryPolicy | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         if not config.base_url:
             raise ProviderError(
@@ -180,6 +272,9 @@ class OpenAICompatibleProvider:
         self.config = config
         self.timeout = timeout
         self.transport = transport
+        self.guard = guard
+        self.retry = retry or DEFAULT_RETRY
+        self._sleeper = sleeper or time.sleep
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -217,14 +312,18 @@ class OpenAICompatibleProvider:
                     "strict": True,
                 },
             }
-        body = _post_json(
-            url=url,
-            headers=self._headers(),
-            payload=payload,
-            name=self.name,
-            timeout=self.timeout,
-            transport=self.transport,
-        )
+        with _endpoint_slot(url):
+            body = _post_json(
+                url=url,
+                headers=self._headers(),
+                payload=payload,
+                name=self.name,
+                timeouts=_completion_timeouts(profile, self.timeout),
+                retry=self.retry,
+                transport=self.transport,
+                guard=self.guard,
+                sleeper=self._sleeper,
+            )
         try:
             raw = body["choices"][0]["message"]["content"]
             usage = body.get("usage", {})
@@ -247,7 +346,6 @@ class OpenAICompatibleProvider:
             url=self.config.base_url.rstrip("/") + "/models",
             headers=self._headers(),
             name=self.name,
-            timeout=self.timeout,
             transport=self.transport,
         )
 
@@ -262,9 +360,12 @@ class AnthropicProvider:
         self,
         name: str,
         config: ProviderConfig,
-        timeout: float = 60.0,
+        timeout: float | None = None,
         *,
         transport: httpx.BaseTransport | None = None,
+        guard: NetworkGuard | None = None,
+        retry: RetryPolicy | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         if not config.base_url:
             raise ProviderError(
@@ -276,6 +377,9 @@ class AnthropicProvider:
         self.config = config
         self.timeout = timeout
         self.transport = transport
+        self.guard = guard
+        self.retry = retry or DEFAULT_RETRY
+        self._sleeper = sleeper or time.sleep
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -318,8 +422,11 @@ class AnthropicProvider:
             headers=self._headers(),
             payload=payload,
             name=self.name,
-            timeout=self.timeout,
+            timeouts=_completion_timeouts(profile, self.timeout),
+            retry=self.retry,
             transport=self.transport,
+            guard=self.guard,
+            sleeper=self._sleeper,
         )
         usage = body.get("usage", {})
         blocks = body.get("content")
@@ -356,7 +463,6 @@ class AnthropicProvider:
             url=self.config.base_url.rstrip("/") + "/models",
             headers=self._headers(),
             name=self.name,
-            timeout=self.timeout,
             transport=self.transport,
         )
 
@@ -371,9 +477,12 @@ class GeminiProvider:
         self,
         name: str,
         config: ProviderConfig,
-        timeout: float = 60.0,
+        timeout: float | None = None,
         *,
         transport: httpx.BaseTransport | None = None,
+        guard: NetworkGuard | None = None,
+        retry: RetryPolicy | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         if not config.base_url:
             raise ProviderError(
@@ -385,6 +494,9 @@ class GeminiProvider:
         self.config = config
         self.timeout = timeout
         self.transport = transport
+        self.guard = guard
+        self.retry = retry or DEFAULT_RETRY
+        self._sleeper = sleeper or time.sleep
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -404,10 +516,7 @@ class GeminiProvider:
         prompt_sha256: str,
         purpose: str,
     ) -> ProviderResult:
-        url = (
-            self.config.base_url.rstrip("/")
-            + f"/models/{model}:generateContent"
-        )
+        url = self.config.base_url.rstrip("/") + f"/models/{model}:generateContent"
         generation: dict[str, Any] = {
             "temperature": profile.temperature,
             "maxOutputTokens": profile.max_tokens,
@@ -425,8 +534,11 @@ class GeminiProvider:
             headers=self._headers(),
             payload=payload,
             name=self.name,
-            timeout=self.timeout,
+            timeouts=_completion_timeouts(profile, self.timeout),
+            retry=self.retry,
             transport=self.transport,
+            guard=self.guard,
+            sleeper=self._sleeper,
         )
         usage = body.get("usageMetadata", {})
         try:
@@ -574,19 +686,20 @@ def build_provider(
     config: ProviderConfig,
     *,
     transport: httpx.BaseTransport | None = None,
+    guard: NetworkGuard | None = None,
+    retry: RetryPolicy | None = None,
 ) -> Provider:
     """Construct the adapter for a provider registry entry (``kind`` selects it)."""
     if config.kind == "replay":
         return MockProvider(name, config) if name == "mock" else ReplayProvider(name, config)
     if config.kind == "openai_compatible":
-        return OpenAICompatibleProvider(name, config, transport=transport)
+        return OpenAICompatibleProvider(name, config, transport=transport, guard=guard, retry=retry)
     if config.kind == "anthropic":
-        return AnthropicProvider(name, config, transport=transport)
+        return AnthropicProvider(name, config, transport=transport, guard=guard, retry=retry)
     if config.kind == "gemini":
-        return GeminiProvider(name, config, transport=transport)
+        return GeminiProvider(name, config, transport=transport, guard=guard, retry=retry)
     raise ProviderError(
         "unresolved_provider",
         f"provider {name!r} has unknown kind {config.kind!r}; expected "
         "openai_compatible|anthropic|gemini|replay",
     )
-

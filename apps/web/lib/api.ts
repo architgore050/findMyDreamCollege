@@ -72,6 +72,73 @@ const unknownPayloadSchema = z.unknown();
 
 type ZodSchema<T> = z.ZodType<T, z.ZodTypeDef, unknown>;
 
+/** Wall-clock ceiling for one API attempt (no infinite spinner). */
+export const API_TIMEOUT_MS = 20_000;
+/** Extra attempts for idempotent GETs only. POSTs (profile payloads) never retry. */
+export const API_GET_RETRIES = 2;
+const RETRY_BASE_MS = 300;
+const RETRY_MAX_DELAY_MS = 3_000;
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+function retryAfterMs(headers: Headers): number | null {
+  const raw = headers.get("retry-after");
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds)) return Math.min(RETRY_MAX_DELAY_MS, Math.max(0, seconds * 1000));
+  const when = Date.parse(raw);
+  if (Number.isNaN(when)) return null;
+  return Math.min(RETRY_MAX_DELAY_MS, Math.max(0, when - Date.now()));
+}
+
+function backoffMs(attempt: number): number {
+  const ceiling = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_MS * 2 ** (attempt - 1));
+  return Math.round(ceiling / 2 + Math.random() * (ceiling / 2));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function offline(): boolean {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+}
+
+interface TransportFailure {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+function classifyFetchError(error: unknown, external: AbortSignal | undefined, timedOut: boolean): TransportFailure {
+  if (timedOut) {
+    return {
+      code: "network_timeout",
+      message: `The API at ${apiBaseUrl()} did not answer within ${Math.round(API_TIMEOUT_MS / 1000)} s. The connection is slow or the API is down.`,
+      retryable: true,
+    };
+  }
+  if (external?.aborted) {
+    return { code: "request_cancelled", message: "The request was cancelled.", retryable: false };
+  }
+  if (offline()) {
+    return {
+      code: "network_unavailable",
+      message: `This device is offline. Reconnect and retry; nothing was sent to ${apiBaseUrl()}.`,
+      retryable: false,
+    };
+  }
+  return {
+    code: "network_error",
+    message: `Could not reach the API at ${apiBaseUrl()}: ${
+      error instanceof Error ? error.message : "network error"
+    }`,
+    retryable: true,
+  };
+}
+
 interface RequestOptions {
   /** Test seam only. Production paths never pass a fetch implementation. */
   fetchImpl?: typeof fetch;
@@ -152,6 +219,11 @@ async function request<T>(
 ): Promise<ApiResult<T>> {
   const endpoint = path.split("?")[0] ?? path;
   const fetchImpl = options.fetchImpl ?? fetch;
+  const method = options.method ?? "GET";
+  // Only GETs are retried. A profile POST may be expensive and is not proven
+  // idempotent; a blind retry could double-submit if the API ever grows effects.
+  const idempotent = method === "GET";
+  const maxAttempts = idempotent ? 1 + API_GET_RETRIES : 1;
 
   if (options.bodySchema !== undefined) {
     const checked = options.bodySchema.safeParse(options.body);
@@ -170,24 +242,63 @@ async function request<T>(
     }
   }
 
-  let response: Response;
-  try {
-    response = await fetchImpl(`${apiBaseUrl()}${path}`, {
-      method: options.method ?? "GET",
-      headers: {
-        accept: "application/json",
-        ...(options.body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      cache: "no-store",
-      signal: options.signal,
-    });
-  } catch (error) {
+  let response: Response | null = null;
+  let transportFailure: TransportFailure | null = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, API_TIMEOUT_MS);
+    const onExternalAbort = () => controller.abort();
+    options.signal?.addEventListener("abort", onExternalAbort);
+
+    try {
+      const attemptResponse = await fetchImpl(`${apiBaseUrl()}${path}`, {
+        method,
+        headers: {
+          accept: "application/json",
+          ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        cache: "no-store",
+        signal: controller.signal,
+      });
+
+      if (
+        idempotent &&
+        attempt < maxAttempts &&
+        isRetryableStatus(attemptResponse.status)
+      ) {
+        const delay = retryAfterMs(attemptResponse.headers) ?? backoffMs(attempt);
+        await attemptResponse.body?.cancel().catch(() => undefined);
+        response = null;
+        transportFailure = null;
+        await sleep(delay);
+        continue;
+      }
+
+      response = attemptResponse;
+      transportFailure = null;
+      break;
+    } catch (error) {
+      const failure = classifyFetchError(error, options.signal, timedOut);
+      transportFailure = failure;
+      if (!idempotent || !failure.retryable || attempt >= maxAttempts) break;
+      await sleep(backoffMs(attempt));
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onExternalAbort);
+    }
+  }
+
+  if (response === null) {
     return failure<T>(endpoint, 0, null, {
-      code: "network_error",
-      message: `Could not reach the API at ${apiBaseUrl()}: ${
-        error instanceof Error ? error.message : "network error"
-      }`,
+      code: transportFailure?.code ?? "network_error",
+      message:
+        transportFailure?.message ?? `Could not reach the API at ${apiBaseUrl()}.`,
     });
   }
 
@@ -233,6 +344,23 @@ async function request<T>(
   }
 
   return { state: "ok", data: parsed.data, meta };
+}
+
+/**
+ * True when the result means the network/API was unreachable (status 0), as
+ * distinct from a 4xx/5xx that actually reached the server. Screens should
+ * offer "retry when online" for this state and "something went wrong" for 5xx.
+ */
+export function isNetworkUnavailable(
+  result: ApiResult<unknown>,
+): result is Extract<ApiResult<unknown>, { state: "error" }> {
+  return (
+    result.state === "error" &&
+    result.status === 0 &&
+    (result.code === "network_unavailable" ||
+      result.code === "network_timeout" ||
+      result.code === "network_error")
+  );
 }
 
 // --------------------------------------------------------------------------- endpoints

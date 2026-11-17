@@ -25,12 +25,17 @@ from urllib.parse import urlsplit
 
 from fmd.fetch.types import TierUnavailable
 from fmd.frontier.state import DomainState, DomainStateStore, InMemoryDomainStateStore
+from fmd.net.policy import parse_retry_after
 
 logger = logging.getLogger(__name__)
 
 FIVE_XX_QUARANTINE_HOURS = 6
 MAX_CONSECUTIVE_5XX = 5
 DEFAULT_CRAWL_DELAY_WHEN_NO_ROBOTS = 1.0
+#: Repeated timeouts to one host back that host off instead of raising global
+#: concurrency or lowering its rate limit. 2 s, 4 s, 8 s … capped at 5 min.
+HOST_BACKOFF_BASE_S = 2.0
+HOST_BACKOFF_MAX_S = 300.0
 
 
 class Clock(Protocol):
@@ -128,6 +133,9 @@ class PolitenessManager:
         self._random = random_fn or random.random
         self.quarantine_hours = quarantine_hours
         self._buckets: dict[str, TokenBucket] = {}
+        #: domain -> (consecutive timeout count, monotonic time the host may be
+        #: retried). In memory only: a restart should try again immediately.
+        self._host_backoff: dict[str, tuple[int, float]] = {}
 
     # ------------------------------------------------------------------ helpers
     def state(self, domain: str) -> DomainState:
@@ -205,7 +213,35 @@ class PolitenessManager:
                 last = last.replace(tzinfo=UTC)
             since_last = (now - last).total_seconds()
             delay = max(delay, state.crawl_delay - since_last)
+        delay = max(delay, self._backoff_remaining(domain))
         return self._jittered(max(0.0, delay))
+
+    # ------------------------------------------------------ adaptive backoff
+    def _backoff_remaining(self, domain: str) -> float:
+        entry = self._host_backoff.get(domain)
+        if entry is None:
+            return 0.0
+        _count, until = entry
+        return max(0.0, until - self.clock.monotonic())
+
+    def note_timeout(self, url: str) -> float:
+        """Back off one host after a transport timeout, exponentially.
+
+        This is deliberately per-domain. A slow host is not a reason to raise
+        global concurrency or to lower a rate limit another host granted.
+        """
+        domain = registrable_domain(url)
+        if not domain:
+            return 0.0
+        count = self._host_backoff.get(domain, (0, 0.0))[0] + 1
+        delay = min(HOST_BACKOFF_MAX_S, HOST_BACKOFF_BASE_S * (2 ** (count - 1)))
+        self._host_backoff[domain] = (count, self.clock.monotonic() + delay)
+        logger.warning("host %s timed out %d time(s); backing off %.0fs", domain, count, delay)
+        return delay
+
+    def note_host_success(self, url: str) -> None:
+        """Any HTTP answer (even 5xx) proves the host is reachable again."""
+        self._host_backoff.pop(registrable_domain(url), None)
 
     def note_request(self, url: str, *, at: datetime | None = None) -> float:
         """Consume a token and return the wait that was applied."""
@@ -236,6 +272,10 @@ class PolitenessManager:
             return False
         state = self.state(domain)
         now = self.clock.now()
+        if status != 0:
+            # An HTTP answer proves the host is reachable; reset its timeout
+            # backoff even when the answer is a 5xx.
+            self._host_backoff.pop(domain, None)
         if 500 <= status < 600:
             state.consecutive_5xx += 1
         elif status != 0:
@@ -262,25 +302,18 @@ class PolitenessManager:
         state = self.state(domain)
         state.quarantined_until = None
         state.consecutive_5xx = 0
+        self._host_backoff.clear()
         self._save(state)
 
 
-def parse_retry_after(value: str | None, *, now: datetime | None = None) -> float | None:
-    """Parse ``Retry-After`` as delta-seconds or an HTTP date."""
-    if not value:
-        return None
-    value = value.strip()
-    try:
-        return max(0.0, float(value))
-    except ValueError:
-        pass
-    from email.utils import parsedate_to_datetime
-
-    try:
-        when = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    now = now or datetime.now(UTC)
-    return max(0.0, (when - now).total_seconds())
+# ``parse_retry_after`` lives in fmd.net.policy so every outbound client reads
+# ``Retry-After`` identically; the re-export keeps the existing import path.
+__all__ = [
+    "HOST_BACKOFF_BASE_S",
+    "HOST_BACKOFF_MAX_S",
+    "PolitenessManager",
+    "SystemClock",
+    "TokenBucket",
+    "parse_retry_after",
+    "registrable_domain",
+]

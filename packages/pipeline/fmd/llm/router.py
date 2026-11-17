@@ -28,12 +28,33 @@ from fmd.llm.providers import (
     BudgetExhausted,
     FixtureMissing,
     LLMError,
+    NetworkOutage,
     ProfileUnresolved,
     Provider,
     ProviderError,
     ProviderResult,
     build_provider,
     json_instruction,
+)
+from fmd.net.policy import NetworkGuard
+
+#: Consecutive transient failures after which the endpoint is treated as gone.
+#: Two is too eager (one dropped packet), five wastes a minute on a dead link.
+MAX_CONSECUTIVE_NETWORK_FAILURES = 3
+
+#: Provider reasons that mean "the endpoint is unreachable", not "this
+#: document is bad". A 5xx is host-specific and does not trip the run breaker.
+OUTAGE_REASONS = frozenset(
+    {
+        "network_unavailable",
+        "dns_failure",
+        "timeout",
+        "connect_timeout",
+        "read_timeout",
+        "write_timeout",
+        "connection_error",
+        "network_unreachable",
+    }
 )
 
 
@@ -82,6 +103,41 @@ class ModelRouter:
         self._daily_cost = daily_spent_usd
         self._cache: dict[tuple[str, str, str, str], ProviderResult] = {}
         self._provider_instances: dict[str, Provider] = dict(providers or {})
+        # One breaker per router (i.e. per run). When the local server vanishes
+        # mid-batch, remaining items fail immediately instead of each waiting
+        # out a full read timeout; the caller keeps the claims it already saved.
+        self.guard = NetworkGuard(threshold=MAX_CONSECUTIVE_NETWORK_FAILURES)
+        self._network_failures = 0
+        self._outage: str | None = None
+
+    # ------------------------------------------------------------------ network
+    def network_state(self) -> dict[str, Any]:
+        """Expose the outage state so a run summary can report it honestly."""
+        return {
+            "outage": self._outage,
+            "consecutive_failures": self._network_failures,
+            "guard": self.guard.state(),
+        }
+
+    def _check_outage(self) -> None:
+        if self._outage is not None:
+            raise NetworkOutage(self._outage)
+
+    def _record_provider_failure(self, reason: str, exc: LLMError) -> None:
+        if reason not in OUTAGE_REASONS:
+            return
+        self._network_failures += 1
+        if self._network_failures < MAX_CONSECUTIVE_NETWORK_FAILURES:
+            return
+        self._outage = (
+            f"endpoint stopped answering after {self._network_failures} consecutive "
+            f"transient failures (last: {reason}). Aborting the remaining batch; "
+            "documents already persisted stay persisted and the rest are left "
+            "unverified rather than reported as extracted."
+        )
+        raise NetworkOutage(
+            self._outage,
+        ) from exc
 
     # ------------------------------------------------------------------ public API
 
@@ -128,6 +184,7 @@ class ModelRouter:
         provider_name = profile.provider
         tried: set[str] = set()
         last_error: LLMError | None = None
+        self._check_outage()
 
         while provider_name and provider_name not in tried:
             tried.add(provider_name)
@@ -150,6 +207,7 @@ class ModelRouter:
                 )
                 latency_ms = int((time.perf_counter() - started) * 1000)
                 validated = self._validate(schema, result.content, purpose)
+                self._network_failures = 0
                 cost = _pricing_cost(profile.pricing, result.tokens_in, result.tokens_out)
                 self._run_cost += cost
                 self._daily_cost += cost
@@ -168,9 +226,12 @@ class ModelRouter:
                     cache_hit=False,
                 )
                 return validated
+            except NetworkOutage:
+                raise
             except (ProviderError, BudgetExhausted, FixtureMissing) as exc:
                 last_error = exc
                 reason = _reason(exc)
+                self._record_provider_failure(reason, exc)
                 fallback = self._fallback_for(provider_name, reason)
                 if fallback is None:
                     raise
@@ -249,7 +310,7 @@ class ModelRouter:
             raise ProviderError(
                 "unresolved_provider", f"provider {name!r} is not declared in models.yaml"
             )
-        instance = build_provider(name, config)
+        instance = build_provider(name, config, guard=self.guard)
         self._provider_instances[name] = instance
         return instance
 
@@ -274,9 +335,7 @@ class ModelRouter:
         effective = profile.model_copy(update={"guided_json": False})
         return effective, system + "\n\n" + json_instruction(schema)
 
-    def doctor(
-        self, *, live: bool = False, transport: Any | None = None
-    ) -> dict[str, Any]:
+    def doctor(self, *, live: bool = False, transport: Any | None = None) -> dict[str, Any]:
         """Per-profile diagnostics; secrets are never included."""
         return doctor_report(self.models, live=live, transport=transport)
 

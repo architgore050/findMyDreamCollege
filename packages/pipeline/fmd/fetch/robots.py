@@ -58,6 +58,7 @@ from fmd.fetch.types import (
     TierUnavailable,
 )
 from fmd.frontier.state import DomainStateStore, InMemoryDomainStateStore
+from fmd.net.policy import NetworkUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,10 @@ class RobotsCache:
             except TierUnavailable as exc:
                 logger.info("robots tier %s unavailable for %s: %s", fetcher.name, url, exc)
                 continue
+            except NetworkUnavailable:
+                # A total outage is not "this robots.txt is unreachable":
+                # abstaining per domain would mark every domain blocked.
+                raise
             except Exception as exc:  # transport failure -> abstain, no escalate
                 logger.warning("robots fetch failed for %s via %s: %s", url, fetcher.name, exc)
                 return 0, ""
@@ -322,6 +327,8 @@ class RobotsCache:
             robots = _robots_url(url)
             try:
                 status, text = self._fetch_robots(robots)
+            except NetworkUnavailable:
+                raise
             except Exception as exc:  # network failure -> abstain, never allow
                 logger.warning("robots.txt fetch failed for %s: %s", robots, exc)
                 status, text = 0, ""

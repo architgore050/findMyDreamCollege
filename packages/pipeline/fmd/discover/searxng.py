@@ -11,7 +11,19 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import httpx
+
 from fmd.discover.base import DocumentRef, dedupe_refs, params_from_source
+from fmd.net.policy import (
+    DEFAULT_RETRY,
+    NetworkGuard,
+    NetworkUnavailable,
+    RetryPolicy,
+    Timeouts,
+    classify_exception,
+    make_client,
+    request_with_retries,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +61,9 @@ class SearxngClient:
         time_range: str | None = None,
         results_per_query: int = 10,
         timeout: float = 20.0,
+        guard: NetworkGuard | None = None,
+        retry: RetryPolicy | None = None,
+        sleeper=None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.query_templates = list(query_templates)
@@ -59,6 +74,9 @@ class SearxngClient:
         self.time_range = time_range
         self.results_per_query = results_per_query
         self.timeout = timeout
+        self.guard = guard
+        self.retry = retry or DEFAULT_RETRY
+        self._sleeper = sleeper
 
     @classmethod
     def from_source(cls, source: Any, **kwargs: Any) -> SearxngClient:
@@ -77,14 +95,13 @@ class SearxngClient:
     # ------------------------------------------------------------------- client
     def _get_client(self):
         if self._client is None:
-            import httpx
-
             from fmd.settings import get_settings
 
-            self._client = httpx.Client(
+            self._client = make_client(
                 base_url=self.base_url,
-                timeout=self.timeout,
+                timeouts=Timeouts(connect=4.0, read=self.timeout, write=20.0, pool=4.0),
                 headers={"User-Agent": get_settings().user_agent},
+                follow_redirects=False,
             )
         return self._client
 
@@ -105,9 +122,32 @@ class SearxngClient:
         if self.time_range:
             params["time_range"] = self.time_range
         try:
-            response = self._get_client().get("/search", params=params)
+            response = request_with_retries(
+                self._get_client(),
+                "GET",
+                "/search",
+                retry=self.retry,
+                params=params,
+                guard=self.guard,
+                **({"sleep": self._sleeper} if self._sleeper is not None else {}),
+            )
             response.raise_for_status()
             payload = response.json()
+        except NetworkUnavailable:
+            # Total outage: the stage must abort, not record one empty query
+            # per template.
+            raise
+        except httpx.HTTPStatusError as exc:
+            raise SearxngUnavailable(
+                f"SearXNG query failed ({self.base_url}): HTTP {exc.response.status_code}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            fault = classify_exception(exc)
+            raise SearxngUnavailable(
+                f"SearXNG query failed ({self.base_url}): {fault.kind}"
+            ) from exc
+        except ValueError as exc:
+            raise SearxngUnavailable(f"SearXNG returned a non-JSON body ({self.base_url})") from exc
         except Exception as exc:
             raise SearxngUnavailable(f"SearXNG query failed ({self.base_url}): {exc}") from exc
 

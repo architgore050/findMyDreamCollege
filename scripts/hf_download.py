@@ -9,6 +9,13 @@ from urllib.parse import quote
 import requests
 
 
+# Hugging Face Hub uses these for its own metadata calls. Defaults are sized for
+# a slow link: a dead endpoint reports in 10 s, not the 10-minute default.
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "10")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
+
 # ============================================================
 # CONFIG
 # ============================================================
@@ -59,10 +66,21 @@ CHUNK_SIZE = 8 * 1024 * 1024          # 8 MiB
 CONNECT_TIMEOUT = 30
 READ_TIMEOUT = 120
 
+# Stall detection. A body that trickles below this rate for this long is not a
+# slow link, it is a dead one: abort the attempt so the resume logic runs again
+# instead of sleeping on a socket for hours. Mirrors curl's --speed-limit /
+# --speed-time pair used by scripts/fetch_model.sh.
+STALL_SPEED_BPS = 8 * 1024            # 8 KiB/s
+STALL_TIME_S = 60
+
 # Retry behavior for individual download attempts.
 MAX_RETRIES_PER_FILE = 20
 INITIAL_RETRY_DELAY = 5
 MAX_RETRY_DELAY = 120
+
+# A server Retry-After is honoured, but capped so a bad header cannot park the
+# downloader for an hour.
+MAX_RETRY_AFTER = 300
 
 # Metadata retries.
 MAX_METADATA_RETRIES = 10
@@ -106,6 +124,87 @@ except ImportError:
 # ============================================================
 # DISPLAY HELPERS
 # ============================================================
+
+class RetryAfterError(RuntimeError):
+    """The server asked us to wait (429/503). The outer loop sleeps and retries."""
+
+    def __init__(self, delay):
+        self.delay = delay
+        super().__init__(f"server asked to retry after {delay:.0f}s")
+
+
+def parse_retry_after(value):
+    """``Retry-After`` as delta-seconds or an HTTP date, capped."""
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        return min(MAX_RETRY_AFTER, max(0.0, float(value)))
+    except ValueError:
+        pass
+    from email.utils import parsedate_to_datetime
+
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    from datetime import UTC, datetime
+
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return min(
+        MAX_RETRY_AFTER,
+        max(0.0, (when - datetime.now(UTC)).total_seconds()),
+    )
+
+
+def parse_content_range(value):
+    """Return ``(start, end, total)`` from ``bytes start-end/total``."""
+    if not value:
+        return None
+    value = value.strip()
+    if not value.lower().startswith("bytes "):
+        return None
+    try:
+        span, total = value[6:].split("/", 1)
+        start, end = span.split("-", 1)
+        return int(start), int(end), (None if total == "*" else int(total))
+    except (ValueError, TypeError):
+        return None
+
+
+def plan_resume(existing, status, content_range, expected_size):
+    """Decide what to do with a ranged response. Never append blind.
+
+    Returns ``(action, reason)`` where action is ``append``, ``restart`` or
+    ``error``. A 206 whose ``Content-Range`` does not start at the local size,
+    or names a different total, is an error: assembling those chunks would
+    corrupt the file.
+    """
+    if status == 206:
+        if existing <= 0:
+            return "error", "HTTP 206 without a local partial file"
+        parsed = parse_content_range(content_range)
+        if parsed is None:
+            return "error", "HTTP 206 without a usable Content-Range"
+        start, _end, total = parsed
+        if start != existing:
+            return "error", (
+                f"Content-Range starts at {start}, local file is {existing} bytes"
+            )
+        if expected_size and total is not None and total != expected_size:
+            return "error", (
+                f"Content-Range total {total} != expected {expected_size}"
+            )
+        return "append", "server accepted resume"
+    if status == 200:
+        if existing > 0:
+            return "restart", "server ignored Range (HTTP 200)"
+        return "append", "fresh download"
+    if status == 416:
+        return "restart", "HTTP 416 Range Not Satisfiable"
+    return "error", f"unexpected HTTP {status}"
+
 
 def format_bytes(num_bytes):
     """Return a human-readable byte size."""
@@ -399,12 +498,31 @@ def get_repository_files(token):
                 f" {type(e).__name__}: {e}"
             )
 
+            # Auth / missing repo will never improve: fail now rather than
+            # backing off ten times on a dead link.
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status in (401, 403, 404):
+                print()
+                print(
+                    f"HTTP {status} is not retryable: check HF_REPO_ID, "
+                    "HF_REVISION and HF_TOKEN."
+                )
+                sys.exit(1)
+
             if attempt < MAX_METADATA_RETRIES:
 
                 delay = min(
                     INITIAL_RETRY_DELAY * (2 ** (attempt - 1)),
                     MAX_RETRY_DELAY,
                 )
+                if status == 429:
+                    hinted = parse_retry_after(
+                        getattr(getattr(e, "response", None), "headers", {}).get(
+                            "Retry-After"
+                        )
+                    )
+                    if hinted is not None:
+                        delay = max(delay, hinted)
 
                 print(
                     f"Retrying in {delay} seconds..."
@@ -851,107 +969,119 @@ def download_with_https_once(
     ) as response:
 
         # ----------------------------------------------------
+        # RATE LIMIT / RETRY-AFTER
+        # ----------------------------------------------------
+
+        if response.status_code in (429, 503):
+            raise RetryAfterError(
+                parse_retry_after(response.headers.get("Retry-After"))
+                or INITIAL_RETRY_DELAY
+            )
+
+        # ----------------------------------------------------
         # RANGE RESPONSE HANDLING
         # ----------------------------------------------------
 
-        if existing > 0:
+        action, reason = plan_resume(
+            existing,
+            response.status_code,
+            response.headers.get("Content-Range"),
+            expected_size,
+        )
 
-            if response.status_code == 206:
+        if action == "error":
+            response.raise_for_status()
+            raise RuntimeError(
+                f"Unsafe resume for {filename}: {reason}"
+            )
 
-                # Correct resume response.
-                mode = "ab"
-                received = existing
-
-                content_range = response.headers.get(
-                    "Content-Range"
-                )
-
-                print(
-                    f"Server accepted resume: HTTP 206"
-                )
-
-                if content_range:
-
+        if action == "restart":
+            print()
+            print(f"{reason}.")
+            print("Restarting this file from byte 0.")
+            response.close()
+            if response.status_code == 416 and output_path.exists():
+                if output_path.stat().st_size == expected_size:
                     print(
-                        f"Content-Range: "
-                        f"{content_range}"
+                        "HTTP 416 received, but local file "
+                        "is already complete."
                     )
+                    return True
+            if output_path.exists():
+                output_path.unlink()
+            # Retry the same file from scratch; existing is now 0.
+            return download_with_https_once(token, file_info)
 
-            elif response.status_code == 200:
-
-                # Server ignored our Range request.
-                #
-                # NEVER append a full file to the partial
-                # file because that would corrupt it.
-
-                print()
-                print(
-                    "Server ignored the Range request "
-                    "(HTTP 200)."
-                )
-
-                print(
-                    "Restarting this file from byte 0."
-                )
-
-                response.close()
-
-                if output_path.exists():
-                    output_path.unlink()
-
-                # Retry the same file from scratch.
-                return download_with_https_once(
-                    token,
-                    file_info,
-                )
-
-            elif response.status_code == 416:
-
-                # Range Not Satisfiable.
-                #
-                # This can happen if the local size changed
-                # between our check and the request.
-                #
-                # Re-check the file.
-
-                response.close()
-
-                if output_path.exists():
-
-                    current_size = (
-                        output_path.stat().st_size
-                    )
-
-                    if current_size == expected_size:
-
-                        print(
-                            "HTTP 416 received, but "
-                            "local file is already complete."
-                        )
-
-                        return True
-
-                raise RuntimeError(
-                    "HTTP 416 Range Not Satisfiable."
-                )
-
-            else:
-
-                response.raise_for_status()
-
+        if existing > 0 and response.status_code == 206:
+            mode = "ab"
+            received = existing
+            print(f"Server accepted resume: HTTP 206 ({reason})")
+            print(
+                f"Content-Range: {response.headers.get('Content-Range')}"
+            )
         else:
-
-            if response.status_code != 200:
-
-                response.raise_for_status()
-
             mode = "wb"
             received = 0
+            print(f"Server response: HTTP {response.status_code}")
 
-            print(
-                f"Server response: HTTP "
-                f"{response.status_code}"
-            )
+        # ----------------------------------------------------
+        # SIZE AGREEMENT BEFORE WRITING A BYTE
+        # ----------------------------------------------------
+
+        declared = response.headers.get("Content-Length")
+        if declared is not None and expected_size:
+            try:
+                declared_int = int(declared)
+            except ValueError:
+                declared_int = None
+            if declared_int is not None:
+                want = expected_size - received
+                if declared_int != want:
+                    raise RuntimeError(
+                        f"Refusing to write {filename}: server declares "
+                        f"{declared_int} bytes, expected {want}. "
+                        "The file changed upstream or the range is wrong."
+                    )
+
+        # ----------------------------------------------------
+        # DOWNLOAD
+        # ----------------------------------------------------
+
+        start_time = time.time()
+
+        last_progress = received
+
+        stall_started = time.monotonic()
+        stall_bytes = 0
+
+        with open(output_path, mode) as f:
+
+            for chunk in response.iter_content(
+                chunk_size=CHUNK_SIZE
+            ):
+
+                if not chunk:
+                    continue
+
+                f.write(chunk)
+
+                received += len(chunk)
+                stall_bytes += len(chunk)
+
+                # --------------------------------------------------
+                # STALL DETECTION (curl --speed-limit/--speed-time)
+                # --------------------------------------------------
+                stall_elapsed = time.monotonic() - stall_started
+                if stall_elapsed >= STALL_TIME_S:
+                    rate = stall_bytes / stall_elapsed
+                    if rate < STALL_SPEED_BPS:
+                        raise ConnectionError(
+                            f"Transfer stalled at {format_bytes(rate)}/s "
+                            f"for {stall_elapsed:.0f}s; resuming from "
+                            f"{format_bytes(received)}."
+                        )
+                    stall_started = time.monotonic()
+                    stall_bytes = 0
 
         # ----------------------------------------------------
         # DOWNLOAD
@@ -1148,6 +1278,20 @@ def download_file(token, file_info):
             )
 
             raise
+
+        except RetryAfterError as e:
+
+            # Honor the server's own pacing instead of guessing at backoff.
+            if attempt >= MAX_RETRIES_PER_FILE:
+                print()
+                print("Maximum retry count reached.")
+                return False
+            delay = min(MAX_RETRY_DELAY, max(e.delay, INITIAL_RETRY_DELAY))
+            print()
+            print(f"Rate limited: {e}.")
+            print(f"Waiting {delay:.0f} seconds before retry...")
+            time.sleep(delay)
+            continue
 
         except Exception as e:
 
