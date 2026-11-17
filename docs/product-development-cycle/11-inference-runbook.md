@@ -1314,18 +1314,158 @@ Audit of those 73 documents:
   122 stored PDFs gives 1,905/7,381 pairs ≤3. Unrelated PDFs collide by
   construction, so raising/lowering `simhash_threshold` cannot fix it.
 
-Verdict: **false positives, material (≥72/73, 98.6%)**. Applied config fix:
-`institution_sites.params.dedupe.mode: exact` — byte-identical mirrors are
-still caught by sha256; distinct PDFs are no longer collapsed. The durable fix
-is to fingerprint *extracted text* in `fmd/fetch` (out of this workstream).
+Verdict: **false positives, material (≥72/73, 98.6%)**. The durable fix landed in
+`fmd/fetch` + `fmd/orchestrate/crawl.py` on 2026-11-18: a PDF fingerprint is now
+computed over a bounded **extracted-text** sample (T0 pdftext, first
+`text_max_pages` pages, `text_max_chars` characters), never over container
+bytes. `exact` remains the fallback when no text layer can be read. The config
+temporary mitigation (`mode: exact`) was reverted to `mode: simhash` once the
+tests and the recovery run below proved the new basis. See
+§Dedupe basis and evidence recovery.
 
 Re-run the audit offline against a run summary that carries
-`metadata.dedupe` (URL, compared_url, similarity, hamming_distance):
+`metadata.dedupe` (URL, compared_url, similarity, hamming_distance, mode,
+basis, text_sha256):
 
 ```python
 from fmd.ingest.dedupe_audit import audit
 print(audit(entries).as_dict())   # boilerplate vs false_positive, by_source
 ```
+
+## Dedupe basis and evidence recovery (2026-11-18)
+
+### What a decision is computed over
+
+| `basis` | computed from | used when |
+|---|---|---|
+| `raw_bytes` | `sha256` of the fetched bytes | exact mode, and the fail-safe for a PDF with no readable text layer |
+| `extracted_text` | `sha256` + 64-bit simhash of normalised **document text** | PDFs (T0 pdftext sample) and HTML/plain bodies |
+| `identity` | row identities from configured fields | structured/paginated listings (`identity` mode) |
+
+Every decision is persisted on the `documents` row (migration 0007) —
+`text_sha256`, `dedupe_mode`, `dedupe_basis`, `dedupe_similarity`,
+`dedupe_reason`, `dedupe_compared_document_id`, `dedupe_simhash` — because a
+dropped document has no snapshot row. A stored snapshot also carries
+`text_sha256` + `dedupe_basis`. A later decision replaces the previous one
+wholesale, so a document that was dropped and later stored cannot keep showing
+the old reason.
+
+Order of decisions: same URL + same bytes (`unchanged_content`) → same bytes
+under another URL (`duplicate_sha256`) → same extracted text under different
+bytes (`duplicate_text_sha256`) → text simhash ≤ `simhash_threshold`
+(`near_duplicate_simhash`, **non-PDF only**) → row identities
+(`near_duplicate_identity`).
+
+**PDFs are never dropped on approximate similarity.** Two editions of one
+template differ in a handful of tokens (a year, a seat count). The first
+recovery run dropped AdaMAS `PLACEMENT-INTERNSHIP-POLICY-2021-22` and
+`…-2023-24` at Hamming distance 0 even though their extracted text differed.
+The rule now is: a PDF is dropped only when its full normalised text digest
+matches. The simhash is still computed and stored, so a review can see the near
+miss. When extraction fails (scan, encrypted/broken PDF, missing extract extra)
+the comparison degrades to `sha256` and the document is stored.
+
+Registry keys (`config/sources.yaml → institution_sites.params.dedupe`):
+
+```yaml
+dedupe:
+  mode: simhash
+  simhash_threshold: 3
+  text_max_pages: 3     # bounded read: first N pages
+  text_max_chars: 20000 # bounded read: first N characters
+```
+
+### Recovery command
+
+Re-crawling a dropped document is not `crawl` again: the frontier keeps
+`done`, and the stored validator makes the retry a `304`. A revalidation is only
+useful once a snapshot exists; for a document that was never snapshotted the
+conditional headers must be cleared first (the replay shape persists them by
+design, so they survive clearing `etag`/`last_modified`). Bounded recovery, same
+caps:
+
+```bash
+export DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd
+export FMD_SNAPSHOT_DIR=$HOME/fmd-snap2
+cd packages/pipeline
+
+# 1. pick the affected URLs: fetched 200/304, PDF, no snapshot row
+psql "$DATABASE_URL" <<'SQL'
+UPDATE documents d
+   SET etag = NULL, last_modified = NULL,
+       request_headers = COALESCE(d.request_headers,'{}'::jsonb)
+                         - 'If-Modified-Since' - 'If-None-Match'
+ WHERE d.source_id = 'institution_sites'
+   AND d.url ~* '\.pdf'
+   AND d.http_status IN (200, 304)
+   AND NOT EXISTS (SELECT 1 FROM snapshots s WHERE s.document_id = d.id);
+
+UPDATE crawl_frontier f
+   SET state = 'queued', attempts = 0, next_allowed_at = now(), updated_at = now()
+  FROM documents d
+ WHERE f.url = d.url
+   AND d.source_id = 'institution_sites'
+   AND d.url ~* '\.pdf'
+   AND d.http_status IN (200, 304)
+   AND NOT EXISTS (SELECT 1 FROM snapshots s WHERE s.document_id = d.id);
+SQL
+
+# 2. drain only (no re-planning, so no new domains/documents enter the run)
+uv run python - <<'PY'
+import json
+from fmd.config import load_registry
+from fmd.db import Database
+from fmd.orchestrate import Orchestrator
+from fmd.orchestrate.crawl import Crawler
+from fmd.orchestrate.ledger import RunSummary, SqlLedger, utcnow
+db = Database(); reg = load_registry(None); o = Orchestrator(registry=reg, database=db)
+src = reg.sources.by_id("institution_sites")
+c = Crawler(frontier=o.frontier, fetcher=o.fetcher, store=o._store(),
+            documents=o.documents, snapshots=o.snapshots,
+            adapter_factory=o.adapter_factory,
+            denylisted_domains=reg.sources.denied_domains(), sources=[src])
+s = RunSummary(run_id="dedupe-recovery-0007", stage="crawl", started_at=utcnow())
+c.drain(summary=s, limit=300); s.finish(); SqlLedger(db).record(s)
+print(json.dumps(s.counts, sort_keys=True))
+print(json.dumps(s.metadata.get("dedupe", []), indent=2))
+db.close()
+PY
+```
+
+Inspect the result without trusting the counters:
+
+```sql
+SELECT dedupe_basis, dedupe_reason, count(*) FROM documents GROUP BY 1,2 ORDER BY 3 DESC;
+SELECT count(*) FROM snapshots;  -- must rise by the stored count
+```
+
+### Measured recovery (2026-11-18)
+
+98 affected PDF URLs across 34 institution domains (all `http_status` 200,
+no snapshot). Four bounded runs (`dedupe-recovery-0007`, `…b`, `…c`, `…d`, no
+new planning) fetched **100**, stored **96**, deduped **3**. Of the 3 drops, 1
+was a genuine byte-identical circular under two URLs and 2 were the AdaMAS
+edition pair (false positives; fixed above, re-run and stored).
+
+| metric | before | after |
+|---|---|---|
+| documents | 147 | 147 (same inventory) |
+| snapshots | 39 | **135** (+96) |
+| institution-site snapshots | 27 | **123** |
+| evidence PDFs recovered | — | **96** |
+| extractions | 16 | 22 |
+| claims | 12 | **14** (1 `supported`, 1 `rejected:unresolved_span`) |
+| claims verified | 12 | 13 |
+
+The only 3 PDFs still without a snapshot are accounted for: 1 `404`
+(`sau.int`), 1 genuine byte-identical duplicate of a stored circular
+(`sindhucu.ac.in`, two URLs, same bytes), and 1 robots/timeout abstention
+(`annamacharyauniversity.edu.in`, still queued). The other 9 documents without
+a snapshot are not evidence (7 inventory, 2 HTML with `family_undetected`).
+Extraction is bounded and resumable; the API `deepseek-v4.1-flash-free` profile
+returned `429 FreeUsageLimitError` during the recovery extract, so the targeted
+pass used the local `gemma-4-26b-a4b-gguf` profile. The two new claims come from
+recovered NIRF reports (`cus.ac.in`, `aus.ac.in`).
 
 ## `hard_pdf` abstention semantics (2026-11-18)
 

@@ -11,6 +11,21 @@ one listing look near-identical to simhash. Those payloads therefore dedupe on
 exact bytes only, unless a source opts into ``identity`` mode: row identities
 extracted from configured fields let disjoint pages of the same listing remain
 distinct even at maximum structural similarity.
+
+**Dedupe basis.** A decision is only defensible if the bytes hashed are the
+document's text. ``FetchResult.text`` is the raw body decoded as UTF-8, which
+for a PDF is ``%PDF`` headers, object streams and font boilerplate. Hashing that
+collapsed 73 distinct PDFs in the 2026-11-18 crawl. PDFs therefore hash a
+bounded *extracted text* sample (the T0 ``pdftext`` path, first
+``text_max_pages`` pages, at most ``text_max_chars`` characters). HTML/plain
+bodies keep hashing their decoded text. When extraction is unavailable the
+policy fails safe: the comparison degrades to exact ``sha256`` and the document
+is stored, never dropped on a hash of container bytes. Every decision records
+its ``basis`` so a later review can see what was compared:
+
+``raw_bytes``      the decision used the sha256 of the fetched bytes;
+``extracted_text`` the decision used text extracted/decoded from the document;
+``identity``       the decision used row identities from a structured payload.
 """
 
 from __future__ import annotations
@@ -18,9 +33,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import tempfile
 import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 _WHITESPACE = re.compile(r"\s+")
@@ -29,7 +46,13 @@ _MASK_64 = (1 << 64) - 1
 
 #: Closed set of dedupe policies (registry ``dedupe.mode``).
 DEDUPE_MODES: tuple[str, ...] = ("exact", "simhash", "identity")
+#: Closed set of justifications for a dedupe decision (persisted with it).
+DEDUPE_BASES: tuple[str, ...] = ("raw_bytes", "extracted_text", "identity")
 DEFAULT_SIMHASH_THRESHOLD = 3
+#: A PDF's fingerprint is bounded to the first pages/characters: enough prose to
+#: be discriminating, cheap enough to sit inside the fetch path.
+DEFAULT_PDF_TEXT_MAX_PAGES = 3
+DEFAULT_PDF_TEXT_MAX_CHARS = 20_000
 
 #: Content types that carry a machine-structured listing, not prose.
 _STRUCTURED_CONTENT_MARKERS = (
@@ -60,6 +83,81 @@ def sha256_hex(body: bytes) -> str:
 def normalise_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).lower()
     return _WHITESPACE.sub(" ", text).strip()
+
+
+def text_sha256(text: str) -> str:
+    """Content hash of normalised *document text* (the text-level dedupe key).
+
+    Distinct from :func:`sha256_hex`, which hashes fetched bytes: a PDF mirrored
+    with different object-stream compression has different bytes but the same
+    text, and this is the key that recognises it.
+    """
+    return hashlib.sha256(normalise_text(text).encode("utf-8")).hexdigest()
+
+
+def is_pdf_payload(content_type: str | None, body: bytes) -> bool:
+    """True when the payload is a PDF, by declared type or by magic bytes.
+
+    Content type wins when it says PDF. The magic-byte probe covers the common
+    ``application/octet-stream`` answer from misconfigured file handlers, which
+    is exactly where the raw-bytes defect hid.
+    """
+    if "pdf" in (content_type or "").lower():
+        return True
+    return body[:1024].lstrip()[:5] == b"%PDF-"
+
+
+def pdf_text_sample(
+    body: bytes,
+    *,
+    max_pages: int = DEFAULT_PDF_TEXT_MAX_PAGES,
+    max_chars: int = DEFAULT_PDF_TEXT_MAX_CHARS,
+) -> str | None:
+    """Bounded text layer of *body* for fingerprinting, or ``None``.
+
+    Uses the same T0 library path as :func:`fmd.acquire.tiers.t0_extract`
+    (``pdftext`` over pdfium) but reads only the first ``max_pages`` and keeps
+    at most ``max_chars`` characters, because dedupe must stay inside the fetch
+    path. Any failure — missing extra, malformed/encrypted PDF, empty text layer
+    (a scan) — returns ``None``. Callers must treat that as "no text basis" and
+    fall back to exact bytes; it is never a reason to drop a document.
+    """
+    if not body or max_pages <= 0 or max_chars <= 0:
+        return None
+    path: Path | None = None
+    try:
+        import pdftext.extraction as extraction  # lazy: an extract-extra import
+        import pypdfium2 as pdfium
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
+            handle.write(body)
+            handle.flush()
+            path = Path(handle.name)
+
+        document = pdfium.PdfDocument(str(path))
+        try:
+            page_count = len(document)
+        finally:
+            document.close()
+        if page_count <= 0:
+            return None
+
+        # pdftext errors on an out-of-range page index, so the count is bounded
+        # here rather than relying on the reader to clip the range.
+        text = extraction.plain_text_output(
+            str(path),
+            sort=True,
+            page_range=range(min(page_count, max_pages)),
+            flatten_pdf=False,
+        )
+    except Exception:  # any reader failure means "no text basis", not a drop
+        return None
+    finally:
+        if path is not None:
+            path.unlink(missing_ok=True)
+
+    text = text.strip()
+    return text[:max_chars] if text else None
 
 
 def _tokens(text: str) -> Iterable[str]:
@@ -118,6 +216,8 @@ class DedupeSettings:
     mode: str | None = None
     simhash_threshold: int = DEFAULT_SIMHASH_THRESHOLD
     identity_fields: tuple[str, ...] = ()
+    pdf_text_max_pages: int = DEFAULT_PDF_TEXT_MAX_PAGES
+    pdf_text_max_chars: int = DEFAULT_PDF_TEXT_MAX_CHARS
 
 
 def _params_of(source: Any) -> Mapping[str, Any]:
@@ -162,7 +262,20 @@ def dedupe_settings(source: Any) -> DedupeSettings:
         mode=mode,
         simhash_threshold=threshold_int,
         identity_fields=clean_fields,
+        pdf_text_max_pages=_bounded_int(block, "text_max_pages", DEFAULT_PDF_TEXT_MAX_PAGES),
+        pdf_text_max_chars=_bounded_int(block, "text_max_chars", DEFAULT_PDF_TEXT_MAX_CHARS),
     )
+
+
+def _bounded_int(block: Mapping[str, Any], key: str, default: int) -> int:
+    value = block.get(key, default)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"dedupe.{key} {value!r} is not an integer") from exc
+    if parsed < 1:
+        raise ValueError(f"dedupe.{key} {parsed} must be a positive integer")
+    return parsed
 
 
 def is_structured_payload(content_type: str | None, text: str) -> bool:

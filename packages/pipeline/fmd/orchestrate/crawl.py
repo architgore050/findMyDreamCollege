@@ -39,9 +39,12 @@ from fmd.fetch.dedupe import (
     dedupe_settings,
     effective_mode,
     hamming,
+    is_pdf_payload,
+    pdf_text_sample,
     row_identities,
     simhash64,
     similarity,
+    text_sha256,
 )
 from fmd.fetch.politeness import registrable_domain
 from fmd.fetch.types import FetchRequest, FetchResult, TierUnavailable, http_date
@@ -175,6 +178,9 @@ class Crawler:
         # sha256 -> (url, document_id); identities are scoped per source so a
         # mirrored listing on another host cannot suppress a real page.
         self._seen_sha: dict[str, tuple[str, int]] = {}
+        # text-sha256 -> (url, document_id): identical extracted text under a
+        # different byte representation (recompressed/mirrored PDF).
+        self._seen_text_sha: dict[str, tuple[str, int]] = {}
         self._fingerprints: list[tuple[int, str, int, str]] = []
         self._identities: dict[str, set[str]] = {}
         self._identity_owner: dict[str, tuple[str, int, str]] = {}
@@ -499,9 +505,13 @@ class Crawler:
                 "reason": reason,
                 "sha256": sha,
                 "mode": mode,
+                "basis": decision["basis"],
                 "similarity": decision["similarity"],
                 "compared_document_id": decision["compared_document_id"],
                 "compared_url": decision["compared_url"],
+                "text_sha256": decision["text_sha256"],
+                "payload_kind": decision["payload_kind"],
+                "text_extraction": decision["text_extraction"],
             }
             if decision["hamming_distance"] is not None:
                 entry["hamming_distance"] = decision["hamming_distance"]
@@ -509,7 +519,8 @@ class Crawler:
                 entry["source_id"] = source_id
             summary.outcomes.append(entry)
             # A near-duplicate must never look like "sparse data" in a run
-            # summary: keep the threshold, the compared document and the mode.
+            # summary: keep the threshold, the compared document, the basis and
+            # the text hash so a review can tell boilerplate from a real mirror.
             summary.metadata.setdefault("dedupe", []).append(dict(entry))
         else:
             self.snapshots.create(
@@ -521,17 +532,24 @@ class Crawler:
                     fetcher_tier=result.fetcher_tier,
                     content_type=content_type,
                     headers=dict(result.headers),
+                    text_sha256=decision["text_sha256"],
+                    dedupe_basis=decision["basis"],
                 )
             )
             summary.bump("stored")
             self._remember(
                 sha=sha,
+                text_sha=decision["text_sha256"],
                 url=record.url,
                 document_id=document.id,
                 fingerprint=decision["fingerprint"],
                 identities=decision["identities"],
                 source_id=source_id,
             )
+
+        # Persist the decision on the document row itself. A dropped document
+        # has no snapshot, so this is the only durable answer to "why".
+        document = self._record_decision(document, decision)
 
         self.frontier.complete(
             record.url,
@@ -561,18 +579,61 @@ class Crawler:
         matching because simhash on a paginated JSON wrapper compares
         boilerplate, not rows. ``identity`` mode additionally compares row
         identities so two pages of one listing stay distinct.
+
+        A PDF is never fingerprinted from ``result.text``: that is the container
+        bytes decoded as UTF-8. Its fingerprint is a bounded extracted-text
+        sample. If that sample is unavailable the decision degrades to exact
+        sha256 (``basis='raw_bytes'``) and the document is stored. A PDF is only
+        dropped on *identical* extracted text: two editions of one template are
+        a few tokens apart and must both survive.
         """
         settings: DedupeSettings = dedupe_settings(self.sources_by_id.get(source_id))
-        text = result.text
+        payload_kind = "pdf" if is_pdf_payload(content_type, result.body) else "text"
+        text: str
+        text_digest: str | None
+        if payload_kind == "pdf":
+            sample = pdf_text_sample(
+                result.body,
+                max_pages=settings.pdf_text_max_pages,
+                max_chars=settings.pdf_text_max_chars,
+            )
+            if sample is None:
+                text = ""
+                text_digest = None
+                text_extraction = "unavailable"
+            else:
+                text = sample
+                text_digest = text_sha256(sample)
+                text_extraction = "extracted"
+        else:
+            text = result.text
+            text_digest = text_sha256(text) if text.strip() else None
+            text_extraction = "decoded" if text_digest else "unavailable"
+
         mode = effective_mode(settings, content_type=content_type, text=text)
+        # No text basis: the only defensible comparison is the exact bytes.
+        if mode == "simhash" and not text:
+            mode = "exact"
         fingerprint = simhash64(text) if mode == "simhash" else None
         identities = (
             row_identities(text, settings.identity_fields) if mode == "identity" else frozenset()
         )
+        if mode == "identity":
+            basis = "identity"
+        elif mode == "simhash":
+            basis = "extracted_text"
+        else:
+            basis = "raw_bytes"
+
         decision: dict[str, Any] = {
             "mode": mode,
+            "basis": basis,
             "fingerprint": fingerprint,
+            "simhash_hex": f"{fingerprint:016x}" if fingerprint is not None else None,
             "identities": identities,
+            "text_sha256": text_digest,
+            "text_extraction": text_extraction,
+            "payload_kind": payload_kind,
             "duplicate": False,
             "reason": "",
             "similarity": None,
@@ -586,6 +647,7 @@ class Crawler:
                 {
                     "duplicate": True,
                     "reason": "unchanged_content",
+                    "basis": "raw_bytes",
                     "similarity": 1.0,
                     "compared_document_id": latest.document_id,
                     "compared_url": record.url,
@@ -599,6 +661,7 @@ class Crawler:
                 {
                     "duplicate": True,
                     "reason": "duplicate_sha256",
+                    "basis": "raw_bytes",
                     "similarity": 1.0,
                     "compared_document_id": owner[1],
                     "compared_url": owner[0],
@@ -606,7 +669,28 @@ class Crawler:
             )
             return decision
 
-        if mode == "simhash" and fingerprint is not None:
+        # Same text under different bytes: a recompressed or mirrored PDF. Only
+        # meaningful when the mode actually uses text.
+        if mode == "simhash" and text_digest is not None:
+            text_owner = self._seen_text_sha.get(text_digest)
+            if text_owner is not None:
+                decision.update(
+                    {
+                        "duplicate": True,
+                        "reason": "duplicate_text_sha256",
+                        "similarity": 1.0,
+                        "compared_document_id": text_owner[1],
+                        "compared_url": text_owner[0],
+                    }
+                )
+                return decision
+
+        # A PDF is only dropped when its *full* extracted text matches. Simhash
+        # is still computed and recorded, but a different edition of the same
+        # template differs in a handful of tokens (a year, a seat count), which
+        # sits at distance 0 and is nonetheless a different document. Approximate
+        # similarity may never authorise dropping document evidence.
+        if mode == "simhash" and fingerprint is not None and payload_kind != "pdf":
             closest = min(
                 self._fingerprints,
                 key=lambda row: hamming(fingerprint, row[0]),
@@ -646,10 +730,30 @@ class Crawler:
 
         return decision
 
+    def _record_decision(
+        self, document: DocumentRecord, decision: dict[str, Any]
+    ) -> DocumentRecord:
+        """Persist the dedupe decision on the document row (migration 0007)."""
+        payload = DocumentUpsert(
+            **document.model_copy(
+                update={
+                    "text_sha256": decision["text_sha256"],
+                    "dedupe_mode": decision["mode"],
+                    "dedupe_basis": decision["basis"],
+                    "dedupe_similarity": decision["similarity"],
+                    "dedupe_reason": decision["reason"] or None,
+                    "dedupe_compared_document_id": decision["compared_document_id"],
+                    "dedupe_simhash": decision["simhash_hex"],
+                }
+            ).model_dump()
+        )
+        return self.documents.upsert(payload)
+
     def _remember(
         self,
         *,
         sha: str,
+        text_sha: str | None,
         url: str,
         document_id: int,
         fingerprint: int | None,
@@ -658,6 +762,8 @@ class Crawler:
     ) -> None:
         """Record what a stored snapshot represents, for future comparisons."""
         self._seen_sha.setdefault(sha, (url, document_id))
+        if text_sha is not None:
+            self._seen_text_sha.setdefault(text_sha, (url, document_id))
         if fingerprint is not None:
             self._fingerprints.append((fingerprint, url, document_id, source_id))
         if identities:

@@ -820,15 +820,19 @@ sources:
           deemed: 30
           state: 20
           private: 5
-      # Dedupe policy: `exact` only. Raw PDF bytes decoded as text are
-      # dominated by %PDF/object-stream/font boilerplate, so text simhash
-      # collapses *distinct* PDFs (audit 2026-11-18: 73/73 dropped documents in
-      # the 19:22 run were PDFs; 31/66 full-body PDF pairs sat at Hamming <= 3).
-      # Exact sha256 still catches byte-identical mirrors without false
-      # positives. Text-fingerprint dedupe belongs in fmd/fetch once it hashes
-      # extracted text, not the container bytes.
+      # Dedupe policy: text fingerprint, computed over *extracted document
+      # text*. `simhash` here fingerprints a bounded text sample (first
+      # `text_max_pages` pages, `text_max_chars` characters) taken through the
+      # T0 pdftext path; it never hashes raw PDF container bytes. Exact sha256
+      # still runs first and catches byte-identical mirrors; identical extracted
+      # text under different bytes is caught by its own text hash. If extraction
+      # fails (scan, encrypted/broken PDF) the fetch degrades to exact-only and
+      # the document is stored (audit 2026-11-18; migration 0007 records basis).
       dedupe:
-        mode: exact
+        mode: simhash
+        simhash_threshold: 3
+        text_max_pages: 3
+        text_max_chars: 20000
       # Programme materialisation (migration 0006). Predicate names, the
       # credential rules, recognition vocabulary and the name-alias table are
       # data: the stage in fmd/orchestrate/ingest.py contains no programme

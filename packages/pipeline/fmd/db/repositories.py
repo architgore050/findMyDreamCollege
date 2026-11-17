@@ -196,6 +196,16 @@ class DocumentUpsert(RowModel):
     # "leave the stored role alone"; a fresh insert becomes ``evidence``.
     role: DocumentRole | None = None
 
+    # Dedupe decision (migration 0007). Written after the decision is made so a
+    # dropped document keeps the justification even though it has no snapshot.
+    text_sha256: str | None = None
+    dedupe_mode: Literal["exact", "simhash", "identity"] | None = None
+    dedupe_basis: Literal["raw_bytes", "extracted_text", "identity"] | None = None
+    dedupe_similarity: float | None = None
+    dedupe_reason: str | None = None
+    dedupe_compared_document_id: int | None = None
+    dedupe_simhash: str | None = None
+
     @classmethod
     def from_document_ref(cls, ref: Any, *, domain: str | None = None) -> DocumentUpsert:
         """Accept a ``DocumentRef`` (keeping POST shape from ``metadata``).
@@ -257,6 +267,10 @@ class SnapshotCreate(RowModel):
     fetcher_tier: str | None = None
     content_type: str | None = None
     headers: dict[str, Any] | None = None
+    #: sha256 of the normalised text the dedupe decision used (migration 0007).
+    text_sha256: str | None = None
+    #: Which bytes the decision was made over: raw_bytes | extracted_text | identity.
+    dedupe_basis: str | None = None
 
 
 class SnapshotRecord(SnapshotCreate):
@@ -1422,9 +1436,12 @@ class DocumentsRepo:
                     (url, domain, kind, first_seen, last_seen, etag, last_modified,
                      robots_decision, robots_checked_at, http_status, http_method, http_body,
                      request_headers, source_id, extraction_family, entity_id, plan_state,
-                     plan_confidence, plan_reason, role)
+                     plan_confidence, plan_reason, role, text_sha256, dedupe_mode, dedupe_basis,
+                     dedupe_similarity, dedupe_reason, dedupe_compared_document_id,
+                     dedupe_simhash)
                 VALUES (%s, %s, %s, COALESCE(%s, now()), COALESCE(%s, now()), %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'evidence'))
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, 'evidence'),
+                        %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (url) DO UPDATE SET
                     domain = EXCLUDED.domain,
                     kind = COALESCE(EXCLUDED.kind, documents.kind),
@@ -1450,7 +1467,30 @@ class DocumentsRepo:
                     plan_confidence = COALESCE(EXCLUDED.plan_confidence,
                                                documents.plan_confidence),
                     plan_reason = COALESCE(EXCLUDED.plan_reason, documents.plan_reason),
-                    role = COALESCE(EXCLUDED.role, documents.role)
+                    role = COALESCE(EXCLUDED.role, documents.role),
+                    -- A recorded decision replaces the previous one wholesale:
+                    -- a stored document whose reason is now '' must not keep
+                    -- showing the earlier drop. Rows with no decision (304,
+                    -- terminal) carry dedupe_mode NULL and leave it untouched.
+                    text_sha256 = CASE WHEN EXCLUDED.dedupe_mode IS NOT NULL
+                                       THEN EXCLUDED.text_sha256 ELSE documents.text_sha256 END,
+                    dedupe_mode = CASE WHEN EXCLUDED.dedupe_mode IS NOT NULL
+                                       THEN EXCLUDED.dedupe_mode ELSE documents.dedupe_mode END,
+                    dedupe_basis = CASE WHEN EXCLUDED.dedupe_mode IS NOT NULL
+                                        THEN EXCLUDED.dedupe_basis ELSE documents.dedupe_basis END,
+                    dedupe_similarity = CASE WHEN EXCLUDED.dedupe_mode IS NOT NULL
+                                             THEN EXCLUDED.dedupe_similarity
+                                             ELSE documents.dedupe_similarity END,
+                    dedupe_reason = CASE WHEN EXCLUDED.dedupe_mode IS NOT NULL
+                                         THEN EXCLUDED.dedupe_reason
+                                         ELSE documents.dedupe_reason END,
+                    dedupe_compared_document_id = CASE
+                        WHEN EXCLUDED.dedupe_mode IS NOT NULL
+                        THEN EXCLUDED.dedupe_compared_document_id
+                        ELSE documents.dedupe_compared_document_id END,
+                    dedupe_simhash = CASE WHEN EXCLUDED.dedupe_mode IS NOT NULL
+                                          THEN EXCLUDED.dedupe_simhash
+                                          ELSE documents.dedupe_simhash END
                 RETURNING *
                 """,
                 (
@@ -1474,6 +1514,13 @@ class DocumentsRepo:
                     document.plan_confidence,
                     document.plan_reason,
                     document.role,
+                    document.text_sha256,
+                    document.dedupe_mode,
+                    document.dedupe_basis,
+                    document.dedupe_similarity,
+                    document.dedupe_reason,
+                    document.dedupe_compared_document_id,
+                    document.dedupe_simhash,
                 ),
             ).fetchone()
         assert row is not None
@@ -1715,10 +1762,12 @@ class SnapshotsRepo:
                 """
                 INSERT INTO snapshots
                     (document_id, sha256, bytes_path, fetched_at, fetcher_tier,
-                     content_type, headers_json)
-                VALUES (%s, %s, %s, COALESCE(%s, now()), %s, %s, %s)
+                     content_type, headers_json, text_sha256, dedupe_basis)
+                VALUES (%s, %s, %s, COALESCE(%s, now()), %s, %s, %s, %s, %s)
                 ON CONFLICT (document_id, sha256) DO UPDATE SET
-                    bytes_path = EXCLUDED.bytes_path
+                    bytes_path = EXCLUDED.bytes_path,
+                    text_sha256 = COALESCE(EXCLUDED.text_sha256, snapshots.text_sha256),
+                    dedupe_basis = COALESCE(EXCLUDED.dedupe_basis, snapshots.dedupe_basis)
                 RETURNING *
                 """,
                 (
@@ -1729,6 +1778,8 @@ class SnapshotsRepo:
                     snapshot.fetcher_tier,
                     snapshot.content_type,
                     _json(snapshot.headers),
+                    snapshot.text_sha256,
+                    snapshot.dedupe_basis,
                 ),
             ).fetchone()
         assert row is not None
@@ -3053,6 +3104,8 @@ def _snapshot(row: dict[str, Any]) -> SnapshotRecord:
         fetcher_tier=row["fetcher_tier"],
         content_type=row["content_type"],
         headers=row["headers_json"],
+        text_sha256=row.get("text_sha256"),
+        dedupe_basis=row.get("dedupe_basis"),
         id=row["id"],
     )
 
