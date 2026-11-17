@@ -80,7 +80,8 @@ Rules that make this safe:
 * **Serving is given an absolute directory**, never a Hub id, so vLLM cannot fall
   back to a network fetch. `scripts/serve_local.sh` / `serve_ocr.sh` refuse to
   start when the directory is absent and name the prefetch command.
-* `scripts/fetch_model.sh` is the only downloader, run by a human on the host.
+* Downloads happen only in `scripts/hf_download.py` (preferred, §2.2) or
+  `scripts/fetch_model.sh` (fallback), run by a human on the host.
 
 **Container → host connectivity.** Linux Docker has no `host.docker.internal`;
 every client service declares
@@ -132,17 +133,57 @@ closest genuine AWQ conversion is `QuantTrio/Qwen3.5-9B-AWQ` (quant_method awq,
 4-bit, group 128), served under the alias `Qwen3.5-9B-AWQ` so
 `config/models.yaml` stays stable.
 
+**Preferred downloader.** `scripts/hf_download.py` — a verbatim copy of the
+operator's `~/AI/hf_downloader.py` (read-only original), whose only changes are
+the four constants below, which now come from the environment. It is a single
+process, plain `requests`, no xet/aria2 dependency; one file at a time,
+HTTP `Range` resume, 20 attempts per file with backoff 5 s → 120 s.
+
 ```bash
-# one command, resumable, into the host weight root (never into an image):
-scripts/fetch_model.sh QuantTrio/Qwen3.5-9B-AWQ
-ls -l "$MODEL_DIR/Qwen3.5-9B-AWQ"       # expect 5 safetensors + configs
+cd ~/projects/findMyDreamCollege
+setsid nohup env \
+  HF_REPO_ID=QuantTrio/Qwen3.5-9B-AWQ \
+  HF_REPO_SUBDIR= \
+  HF_REVISION=main \
+  HF_OUTPUT_DIR="$HOME/models/Qwen3.5-9B-AWQ" \
+  ~/.venvs/hf-downloader/bin/python -u scripts/hf_download.py \
+  </dev/null >/tmp/opencode/hf-dl.log 2>&1 &
+tail -f /tmp/opencode/hf-dl.log
 ```
 
-**Fresh fetch.**
+| variable | meaning | original default (kept) |
+|---|---|---|
+| `HF_REPO_ID` | Hub repo | `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF` |
+| `HF_REPO_SUBDIR` | subfolder to mirror; empty ⇒ repo root | `IQ3_XXS` |
+| `HF_REVISION` | branch/tag/sha | `main` |
+| `HF_OUTPUT_DIR` | destination directory | `/media/archit/Windows/AI/Models/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS` |
+
+It needs `huggingface_hub` for the file listing (`uv venv ~/.venvs/hf-downloader
+&& uv pip install huggingface_hub requests`). `HF_TOKEN` is read from the
+environment if present and never printed; with no token and no tty it proceeds
+anonymously, which is correct for `QuantTrio/Qwen3.5-9B-AWQ` (public).
+
+What it resumes: files are written under their real names (no `.part`), and
+every retry re-`stat`s the file and asks for `Range: bytes=<size>-`; a server
+that answers `200` to a `Range` request causes a restart from byte 0 rather
+than an append. Re-running the same command is the resume: complete files
+(byte size == Hub size) are skipped, short files continue, oversized files are
+deleted and re-fetched. It never writes a `.done` or manifest file — completion
+is size equality only, and `VERIFY_SHA256 = False` by default.
+
+Verify afterwards, and trust `fetch_model.sh` for the authoritative check:
+
+```bash
+scripts/fetch_model.sh verify ~/models/Qwen3.5-9B-AWQ     # exit 0 before serving
+```
+
+**Fallback downloader.** `scripts/fetch_model.sh` remains supported for
+everything else (mirrors, `speed`, `repair`, gated repos, byte-range `curlx4`).
+Use it when the preferred downloader cannot be used:
 
 ```bash
 scripts/fetch_model.sh QuantTrio/Qwen3.5-9B-AWQ
-ls -l "$MODEL_DIR/Qwen3.5-9B-AWQ"       # 5 safetensors + configs
+ls -l "$MODEL_DIR/Qwen3.5-9B-AWQ"       # expect 5 safetensors + configs
 ```
 
 The Hub file listing — `/api/models/<repo>/tree/<rev>?recursive=true` — is the
