@@ -105,6 +105,7 @@ def test_0003_applies_over_0001_and_0002_and_is_idempotent(schema_database, tmp_
         "0003_document_plans_and_pipeline_runs",
         "0004_document_roles_and_inventory_targets",
         "0005_claim_verification",
+        "0006_programme_materialisation",
     ]
     assert run_migrations(schema_database) == []
     assert applied_migrations(schema_database) == {

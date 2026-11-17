@@ -112,6 +112,16 @@ profiles:
     # shared FMD_API_MODEL directly — one variable for the hosted fallback.
     # Unset => model is None => this optional profile degrades per document with
     # `vision_unavailable`; text PDFs still extract.
+    #
+    # OPTIONAL-TIER SEMANTICS (verified 2026-11-18): an unconfigured `api`
+    # provider (no FMD_API_LLM_URL / KEY / MODEL) is caught by profile_blockers
+    # *before* a provider is built, so the router reports
+    # `vision_unavailable`, not `unresolved_provider`. `unresolved_provider` can
+    # only mean the environment named a provider that is not declared under
+    # `providers:` — that is a misconfiguration, not an optional-tier state.
+    # Keep the env switch (tests and operators rely on it); if a deployment does
+    # not use the hosted fallback, leave FMD_API_MODEL unset and the tier
+    # degrades per document.
     provider: ${FMD_HARD_PDF_PROVIDER:-api}
     # No `:-` default: an unset FMD_API_MODEL must interpolate to None, which is
     # what "unset => degrades per document" means. `:-` would yield "" and make

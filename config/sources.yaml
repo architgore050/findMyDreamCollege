@@ -820,6 +820,83 @@ sources:
           deemed: 30
           state: 20
           private: 5
+      # Dedupe policy: `exact` only. Raw PDF bytes decoded as text are
+      # dominated by %PDF/object-stream/font boilerplate, so text simhash
+      # collapses *distinct* PDFs (audit 2026-11-18: 73/73 dropped documents in
+      # the 19:22 run were PDFs; 31/66 full-body PDF pairs sat at Hamming <= 3).
+      # Exact sha256 still catches byte-identical mirrors without false
+      # positives. Text-fingerprint dedupe belongs in fmd/fetch once it hashes
+      # extracted text, not the container bytes.
+      dedupe:
+        mode: exact
+      # Programme materialisation (migration 0006). Predicate names, the
+      # credential rules, recognition vocabulary and the name-alias table are
+      # data: the stage in fmd/orchestrate/ingest.py contains no programme
+      # vocabulary. Aliases collapse only provable synonyms; MLT and MLS stay
+      # separate canonical programmes and are flagged `needs_review` when both
+      # appear at one institution.
+      programme_mapping:
+        name_predicates:
+          - curriculum.programme_name
+          - seats.programme_name
+          - accreditation.programme_name
+        duration_month_predicates:
+          - curriculum.duration_months
+        internship_month_predicates:
+          - curriculum.internship_months
+        seats_predicates:
+          - seats.total
+        medium_predicates:
+          - curriculum.medium
+          - programme.medium
+        affiliated_university_predicates:
+          - curriculum.affiliated_university
+          - accreditation.affiliated_university
+        recognition_predicates:
+          - accreditation.recognition_status
+          - recognition.status
+        credential_default: degree
+        credential_rules:
+          - level: certificate
+            terms: [certificate]
+          - level: diploma
+            terms: [diploma, dmlt]
+          - level: lateral_entry
+            terms: [lateral entry, lateral]
+          - level: degree
+            terms: [bachelor, "b sc", bsc, "b mls", bmls, "b mlt", bmlt, degree]
+        recognition_values:
+          recognised: [recognised, recognized]
+          conditional: [conditional, provisional]
+          unrecognised: [unrecognised, unrecognized, not recognised, not recognized,
+                         not approved]
+        name_aliases:
+          - key: bsc mlt
+            label: B.Sc. Medical Laboratory Technology
+            aliases:
+              - B.Sc. MLT
+              - BSc MLT
+              - B.Sc. Medical Laboratory Technology
+              - BSc Medical Laboratory Technology
+              - Bachelor of Medical Laboratory Technology
+              - Bachelor of Medical Laboratory Technology (BMLT)
+              - BMLT
+          - key: bsc mls
+            label: Bachelor of Medical Laboratory Sciences
+            aliases:
+              - Bachelor of Medical Laboratory Sciences
+              - Bachelor of Medical Laboratory Sciences (B.MLS)
+              - Bachelor of Medical Laboratory Sciences(B.MLS)
+              - B.Sc. Medical Laboratory Science
+              - BSc Medical Laboratory Science
+              - B.MLS
+              - BMLS
+          - key: dmlt
+            label: Diploma in Medical Laboratory Technology
+            aliases:
+              - DMLT
+              - Diploma in Medical Laboratory Technology
+              - Diploma in Medical Laboratory Technician
     notes: Placement PDFs usually live in NAAC SSR/AQAR/NIRF DCS annexures. Self-reported, promotional; treat as low trust.
 
 # Confirmed impersonators (spec §4.2.2). A trust registered under the Indian

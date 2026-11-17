@@ -346,6 +346,15 @@ class ProgrammeCreate(RowModel):
     recognition_status: Literal["recognised", "conditional", "unrecognised", "unknown"] = "unknown"
     seats: int | None = None
     medium: str | None = None
+    #: ER-normalised grouping key; the repo derives a stable fallback when a
+    #: caller predates migration 0006.
+    normalised_name: str | None = None
+    #: Published attribute -> claim id that proves it (migration 0006).
+    field_sources: dict[str, str] = {}
+    needs_review: bool = False
+    review_reasons: list[str] = []
+    #: Predicate family that supplied the programme name (curriculum/seats/…).
+    source_family: str | None = None
 
 
 class ProgrammeRecord(ProgrammeCreate):
@@ -1919,8 +1928,7 @@ class ClaimsRepo:
     ) -> list[ClaimRecord]:
         """Persist a batch in the given order; one statement per claim."""
         return [
-            self.record_verification(claim_id, verification)
-            for claim_id, verification in items
+            self.record_verification(claim_id, verification) for claim_id, verification in items
         ]
 
     def list_unverified(self, limit: int = 500) -> list[ClaimRecord]:
@@ -2097,14 +2105,16 @@ class ProgrammesRepo:
         self.db = database
 
     def create(self, programme: ProgrammeCreate) -> ProgrammeRecord:
+        normalised = programme.normalised_name or _fallback_normalised_name(programme.name)
         with self.db.connection() as conn:
             row = conn.execute(
                 """
                 INSERT INTO programmes
                     (institution_id, name, credential_level, duration_months,
                      internship_months, affiliated_university_id, recognition_status, seats,
-                     medium)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     medium, normalised_name, field_sources, needs_review, review_reasons,
+                     source_family)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
                 (
@@ -2117,10 +2127,114 @@ class ProgrammesRepo:
                     programme.recognition_status,
                     programme.seats,
                     programme.medium,
+                    normalised,
+                    _json(programme.field_sources),
+                    programme.needs_review,
+                    _json(programme.review_reasons),
+                    programme.source_family,
                 ),
             ).fetchone()
         assert row is not None
         return _programme(row)
+
+    def upsert(self, programme: ProgrammeCreate) -> tuple[ProgrammeRecord, bool]:
+        """Insert or refresh one (institution, normalised name) row.
+
+        Refresh means *replace with the materialised draft*, including NULLs:
+        an attribute whose claim disappeared must not linger. Returns
+        ``(record, created)``. Deterministic and idempotent over the same
+        evidence.
+        """
+        normalised = programme.normalised_name or _fallback_normalised_name(programme.name)
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO programmes
+                    (institution_id, name, credential_level, duration_months,
+                     internship_months, affiliated_university_id, recognition_status, seats,
+                     medium, normalised_name, field_sources, needs_review, review_reasons,
+                     source_family)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (institution_id, normalised_name) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    credential_level = EXCLUDED.credential_level,
+                    duration_months = EXCLUDED.duration_months,
+                    internship_months = EXCLUDED.internship_months,
+                    affiliated_university_id = EXCLUDED.affiliated_university_id,
+                    recognition_status = EXCLUDED.recognition_status,
+                    seats = EXCLUDED.seats,
+                    medium = EXCLUDED.medium,
+                    field_sources = EXCLUDED.field_sources,
+                    needs_review = EXCLUDED.needs_review,
+                    review_reasons = EXCLUDED.review_reasons,
+                    source_family = EXCLUDED.source_family
+                RETURNING *, (xmax = 0) AS inserted
+                """,
+                (
+                    programme.institution_id,
+                    programme.name,
+                    programme.credential_level,
+                    programme.duration_months,
+                    programme.internship_months,
+                    programme.affiliated_university_id,
+                    programme.recognition_status,
+                    programme.seats,
+                    programme.medium,
+                    normalised,
+                    _json(programme.field_sources),
+                    programme.needs_review,
+                    _json(programme.review_reasons),
+                    programme.source_family,
+                ),
+            ).fetchone()
+        assert row is not None
+        created = bool(row.pop("inserted", False))
+        return _programme(row), created
+
+    def materialisation_claims(self) -> list[dict[str, Any]]:
+        """Evidence claims a programme may be materialised from.
+
+        Only positively verified, unsuperseded, non-modelled claims whose
+        document is ``role='evidence'`` and whose entity is an institution.
+        A navigation/inventory payload is an index, never evidence.
+        """
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.id, c.entity_id, c.predicate, c.value_json AS value, c.unit,
+                       c.qualifier_json AS qualifier, c.confidence, c.observed_at,
+                       c.method, c.extraction_id, c.superseded_by,
+                       c.verification_status, d.role AS document_role
+                FROM claims c
+                JOIN extractions x ON x.id = c.extraction_id
+                JOIN snapshots s ON s.id = x.snapshot_id
+                JOIN documents d ON d.id = s.document_id
+                JOIN entities e ON e.id = c.entity_id
+                WHERE c.verification_status = 'supported'
+                  AND c.superseded_by IS NULL
+                  AND c.method <> 'modelled'
+                  AND d.role = 'evidence'
+                  AND e.kind = 'institution'
+                ORDER BY c.id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def counts(self) -> dict[str, int]:
+        """Programme totals used by a run summary (not by scoring)."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT count(*) AS total,
+                       count(*) FILTER (WHERE needs_review) AS needs_review,
+                       count(*) FILTER (WHERE duration_months IS NOT NULL) AS with_duration,
+                       count(*) FILTER (WHERE internship_months IS NOT NULL) AS with_internship,
+                       count(*) FILTER (WHERE seats IS NOT NULL) AS with_seats,
+                       count(*) FILTER (WHERE recognition_status <> 'unknown') AS with_recognition
+                FROM programmes
+                """
+            ).fetchone()
+        return {key: int(value or 0) for key, value in dict(row).items()}
 
     def get(self, programme_id: int) -> ProgrammeRecord | None:
         with self.db.connection() as conn:
@@ -2185,6 +2299,16 @@ class ProgrammesRepo:
                     for row in rows
                 }
         return facets
+
+
+def _fallback_normalised_name(name: str) -> str:
+    """Stable grouping key for callers that predate migration 0006.
+
+    The materialisation stage supplies the real ER-normalised key; this is only
+    a deterministic fallback so a legacy ``create()`` cannot blow up on the
+    ``normalised_name NOT NULL`` constraint.
+    """
+    return " ".join(str(name or "").casefold().split())
 
 
 def _programme_where(filters: ProgrammeFilter) -> tuple[str, list[Any]]:

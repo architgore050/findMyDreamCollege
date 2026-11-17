@@ -13,6 +13,7 @@ snapshot store, so a re-run over the same evidence produces the same rows.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -21,14 +22,20 @@ from fmd.db.repositories import (
     AliasCreate,
     EntityCreate,
     InstitutionDomainSeed,
+    ProgrammeCreate,
 )
-from fmd.er.normalise import blocking_key
+from fmd.er.normalise import blocking_key, normalise_name
 from fmd.ingest.inventory import (
     InventoryFieldMap,
     InventoryPayloadError,
     domain_from_website,
     records_from_payload,
     seed_url,
+)
+from fmd.ingest.programmes import (
+    ProgrammeDraft,
+    ProgrammeMapping,
+    programme_drafts,
 )
 from fmd.ingest.targeting import TargetWeights, priority_for, select_targets
 from fmd.orchestrate.ledger import RunSummary
@@ -376,6 +383,154 @@ class InventoryStage:
         return select_targets(targets, weights=weights, naac_domains=naac)
 
 
+class ProgrammeStage:
+    """Verified claims -> ``programmes`` rows (idempotent, sourced).
+
+    Scoring selects from ``programmes``, so an un-materialised evidence table
+    produces an empty shortlist by construction. This stage is the missing
+    link. It refuses:
+
+    * unverified/rejected/superseded claims (``materialisation_claims`` filters
+      them in SQL, the pure mapper re-checks);
+    * claims from navigation/inventory documents (same SQL filter);
+    * claims whose entity is not a resolvable institution;
+    * any attribute without a claim (the column stays NULL).
+
+    The registry block is ``params.programme_mapping`` on the institution-site
+    source; predicate names, credential rules, recognition values and the
+    name-alias table are all data.
+    """
+
+    def __init__(
+        self,
+        *,
+        programmes: Any,
+        entities: Any,
+        registry: Any | None = None,
+        sources: Any | None = None,
+        mapping: ProgrammeMapping | None = None,
+    ) -> None:
+        self.programmes = programmes
+        self.entities = entities
+        self.registry = registry
+        self.sources = {str(getattr(source, "id", "")): source for source in (sources or ())}
+        self._mapping = mapping
+
+    @classmethod
+    def from_database(cls, database: Any, registry: Any) -> ProgrammeStage:
+        from fmd.db.repositories import EntitiesRepo, ProgrammesRepo
+
+        return cls(
+            programmes=ProgrammesRepo(database),
+            entities=EntitiesRepo(database),
+            registry=registry,
+            sources=getattr(getattr(registry, "sources", None), "sources", ()) or (),
+        )
+
+    def mapping(self) -> ProgrammeMapping:
+        if self._mapping is not None:
+            return self._mapping
+        source = self._institution_source()
+        if source is None:
+            # No registry: use the committed defaults (they are data, not logic).
+            return ProgrammeMapping.from_params(None)
+        return ProgrammeMapping.from_source(source)
+
+    def _institution_source(self) -> Any | None:
+        source = next(
+            (
+                candidate
+                for candidate in self.sources.values()
+                if getattr(candidate, "adapter", None) == INSTITUTION_ADAPTER
+            ),
+            None,
+        )
+        if source is not None:
+            return source
+        if self.registry is None:
+            return None
+        return next(
+            (
+                candidate
+                for candidate in self.registry.sources.sources
+                if getattr(candidate, "adapter", None) == INSTITUTION_ADAPTER
+            ),
+            None,
+        )
+
+    def _resolve_institution(self, entity_id: int) -> Any | None:
+        getter = getattr(self.entities, "get", None)
+        entity = getter(entity_id) if getter is not None else None
+        if entity is None or getattr(entity, "kind", None) != "institution":
+            return None
+        return entity
+
+    def _resolve_university(self, name: str | None) -> int | None:
+        if not name:
+            return None
+        finder = getattr(self.entities, "find", None)
+        entity = finder("institution", name) if finder is not None else None
+        if entity is None:
+            normalised_finder = getattr(self.entities, "find_normalised", None)
+            if normalised_finder is not None:
+                entity = normalised_finder("institution", normalise_name(name).text)
+        return getattr(entity, "id", None) if entity is not None else None
+
+    def run(self, *, summary: RunSummary) -> list[Any]:
+        inputs = self.programmes.materialisation_claims()
+        summary.bump("programme_claims", len(inputs))
+        mapping = self.mapping()
+        drafts, rejected = programme_drafts(
+            inputs, mapping, resolve_institution=self._resolve_institution
+        )
+        summary.bump("programmes_rejected", len(rejected))
+        if rejected:
+            summary.metadata["programme_rejections"] = rejected[:50]
+
+        written: list[Any] = []
+        for draft in drafts:
+            resolved = self._with_affiliation(draft)
+            record, created = self.programmes.upsert(_programme_create(resolved))
+            written.append(record)
+            summary.bump("programmes_created" if created else "programmes_updated")
+            if resolved.needs_review:
+                summary.bump("programmes_needs_review")
+        summary.bump("programmes", len(written))
+        counter = getattr(self.programmes, "counts", None)
+        if counter is not None:
+            with contextlib.suppress(Exception):  # observability only
+                summary.metadata["programmes"] = dict(counter())
+        return written
+
+    def _with_affiliation(self, draft: ProgrammeDraft) -> ProgrammeDraft:
+        university_id = self._resolve_university(draft.affiliated_university_name)
+        return draft.with_affiliation(
+            university_id,
+            review="affiliated_university_unresolved"
+            if draft.affiliated_university_name and university_id is None
+            else None,
+        )
+
+
+def _programme_create(draft: ProgrammeDraft) -> ProgrammeCreate:
+    return ProgrammeCreate(
+        institution_id=draft.institution_id,
+        name=draft.name,
+        credential_level=draft.credential_level,
+        duration_months=draft.duration_months,
+        internship_months=draft.internship_months,
+        affiliated_university_id=draft.affiliated_university_id,
+        recognition_status=draft.recognition_status,
+        seats=draft.seats,
+        medium=draft.medium,
+        normalised_name=draft.normalised_name,
+        field_sources=dict(draft.field_sources),
+        needs_review=draft.needs_review,
+        review_reasons=list(draft.review_reasons),
+        source_family=draft.source_family,
+    )
+
+
 def _safe_counts(repo: Any) -> dict[str, int]:
     counter = getattr(repo, "counts_by_state", None)
     if counter is None:
@@ -386,4 +541,4 @@ def _safe_counts(repo: Any) -> dict[str, int]:
         return {}
 
 
-__all__ = ["DEFAULT_INVENTORY_LIMIT", "INSTITUTION_ADAPTER", "InventoryStage"]
+__all__ = ["DEFAULT_INVENTORY_LIMIT", "INSTITUTION_ADAPTER", "InventoryStage", "ProgrammeStage"]

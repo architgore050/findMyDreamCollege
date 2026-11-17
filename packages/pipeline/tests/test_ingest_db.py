@@ -77,6 +77,7 @@ def test_0004_adds_roles_and_the_institution_domain_queue(schema_database, tmp_p
     assert run_migrations(schema_database) == [
         "0004_document_roles_and_inventory_targets",
         "0005_claim_verification",
+        "0006_programme_materialisation",
     ]
     assert run_migrations(schema_database) == []
 
