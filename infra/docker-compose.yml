@@ -140,6 +140,10 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile.pipeline
+      # BuildKit's default bridge has no resolvable DNS on this host (2026-11-16:
+      # download.pytorch.org -> "dns error"), which aborts the torch layer. Host
+      # networking for the build only; the runtime container still uses compose DNS.
+      network: host
       args:
         VCS_REF: ${VCS_REF:-unknown}
     image: findmydreamcollege/pipeline:${FMD_IMAGE_TAG:-local}
@@ -160,8 +164,8 @@ services:
       FMD_T2_URL: ${FMD_T2_URL_COMPOSE:-http://ocr:8110}
       FMD_T2B_URL: ${FMD_T2B_URL:-}
       # One name for the host text model. The Linux default works because of
-      # extra_hosts below; on the host itself use http://localhost:8000/v1.
-      FMD_LOCAL_LLM_URL: ${FMD_LOCAL_LLM_URL:-http://host.docker.internal:8000/v1}
+      # extra_hosts below; on the host itself use http://localhost:8010/v1.
+      FMD_LOCAL_LLM_URL: ${FMD_LOCAL_LLM_URL:-http://host.docker.internal:8010/v1}
     ports: ["${API_PORT:-8000}:8000"]
     # Linux has no built-in host.docker.internal. This alias (Docker >= 20.10)
     # is what makes the host vLLM reachable from any container without an IP.
@@ -198,6 +202,10 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile.pipeline
+      # BuildKit's default bridge has no resolvable DNS on this host (2026-11-16:
+      # download.pytorch.org -> "dns error"), which aborts the torch layer. Host
+      # networking for the build only; the runtime container still uses compose DNS.
+      network: host
       args:
         VCS_REF: ${VCS_REF:-unknown}
     image: findmydreamcollege/pipeline:${FMD_IMAGE_TAG:-local}
@@ -213,7 +221,7 @@ services:
       FMD_AUTO_SEED: "0"
       FMD_T2_URL: ${FMD_T2_URL_COMPOSE:-http://ocr:8110}
       FMD_T2B_URL: ${FMD_T2B_URL:-}
-      FMD_LOCAL_LLM_URL: ${FMD_LOCAL_LLM_URL:-http://host.docker.internal:8000/v1}
+      FMD_LOCAL_LLM_URL: ${FMD_LOCAL_LLM_URL:-http://host.docker.internal:8010/v1}
     extra_hosts: ["host.docker.internal:host-gateway"]
     dns: ["${FMD_DNS_1:-1.1.1.1}", "${FMD_DNS_2:-8.8.8.8}"]
     volumes:

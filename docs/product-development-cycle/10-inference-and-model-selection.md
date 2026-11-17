@@ -312,7 +312,7 @@ invented by the harness; omit them and the `$/page` column reads `n/a`.
 |---|---|---|---|
 | `bulk_extract` | `local` / `Qwen3.5-9B-AWQ`, 32k, int4, thinking off | `FMD_EXTRACT_PROVIDER`, `FMD_EXTRACT_MODEL` | Guided JSON on |
 | `hard_pdf` | `api` / unset (escalation only) | `FMD_HARD_PDF_PROVIDER`, `FMD_HARD_PDF_MODEL` | Optional; degrades per document |
-| `ocr_vlm` | `local` / `Qwen3-VL-8B-Instruct` | `FMD_OCR_PROVIDER`, `FMD_OCR_MODEL` | Optional; T3 adjudication degrades |
+| `ocr_vlm` | **retired 2026-11-16** — OCR is an acquisition stage, not a router profile | `FMD_T2_URL` (T2 PaddleOCR-VL), `FMD_T2B_URL` (T2b Qwen3-VL) in `config/acquire.yaml` | Optional; when unset the tier raises `TierUnavailable` and the page goes to the human queue |
 | `adjudicate` | `gemini` / `gemini-2.5-flash` | `FMD_ADJUDICATE_PROVIDER`, `FMD_ADJUDICATE_MODEL` | Documented example; reroute 2026-12-01 |
 | `entity_adjudication` | `local` / `Qwen3.5-9B-AWQ` | `FMD_ENTITY_ADJUDICATE_PROVIDER`, `FMD_ENTITY_ADJUDICATE_MODEL` | Pairwise only |
 | `nlp_rubric` | `gemini` / `gemini-2.5-flash` | `FMD_NLP_PROVIDER`, `FMD_NLP_MODEL` | Quote required |
@@ -321,6 +321,8 @@ invented by the harness; omit them and the `$/page` column reads `n/a`.
 **Guided JSON / architecture caveat.** `guided_json: true` is kept, but xgrammar (or the served backend's constrained decoder) must support the Qwen3.5 architecture in the pinned vLLM/SGLang build. If it does not, the router degrades to JSON-instruct plus schema validation; the bake-off must then report the degraded path's schema-valid rate, because it is not the same candidate. Verify the xgrammar/backend version before recording results.
 
 **Thinking-disable caveat.** `thinking: false` is recorded in `config/models.yaml` as intent, but `fmd/llm/providers.py` does not yet forward it. Enforce it in the served chat template (for example a chat-template kwarg) until the provider adapter carries it. If the model thinks by default, token counts, latency, and cost in §6 are wrong.
+
+**Model-id caveat (2026-11-16).** No `Qwen/Qwen3.5-9B-AWQ` repository existed on the Hub; the local default is a community int4 AWQ conversion served under the alias `Qwen3.5-9B-AWQ`. The alias is what `config/models.yaml` pins, so the id is stable, but the weights are not the vendor's. Record which conversion the bake-off used.
 
 ---
 
