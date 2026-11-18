@@ -113,8 +113,14 @@ class AliasCreate(RowModel):
     confirmed_at: datetime | None = None
 
 
+AliasReviewStatus = Literal["pending", "confirmed", "rejected"]
+
+
 class AliasRecord(AliasCreate):
     id: int
+    # Review-console state machine (migration 0008). Pending is the default for
+    # every mined suggestion; only a human action moves it.
+    review_status: AliasReviewStatus = "pending"
 
 
 class ERAuditCreate(RowModel):
@@ -343,11 +349,56 @@ class ClaimEvidence(ClaimRecord):
     fetched_at: datetime | None = None
     sha256: str
     snapshot_id: int
+    # Which fetch tier produced the snapshot (ladder diagnostic, review console).
+    fetcher_tier: str | None = None
 
 
 class ClaimEvidencePage(RowModel):
     items: list[ClaimEvidence]
     total: int
+
+
+class ClaimReviewPage(RowModel):
+    """Low-confidence claims first; the human decides, nothing is dropped."""
+
+    items: list[ClaimRecord]
+    total: int
+
+
+class AliasReviewPage(RowModel):
+    items: list[AliasRecord]
+    total: int
+
+
+class DocumentReviewPage(RowModel):
+    items: list[DocumentRecord]
+    total: int
+
+
+ReviewKind = Literal["claim", "alias", "document"]
+
+
+class ReviewAuditCreate(RowModel):
+    """One human review action, append-only (migration 0008).
+
+    ``previous_state`` is the mutable review-relevant fields of the subject
+    *before* the action, so every decision is reversible by inspection even
+    though the console itself never rewrites history. ``decided_by`` is pinned
+    to ``'human'``: machine verdicts live in ``er_audit`` and
+    ``claims.verification_*``, never in this table.
+    """
+
+    kind: ReviewKind
+    subject_id: int
+    action: str
+    previous_state: dict[str, Any] = Field(default_factory=dict)
+    details: dict[str, Any] | None = None
+    decided_by: Literal["human"] = "human"
+
+
+class ReviewAuditRecord(ReviewAuditCreate):
+    id: int
+    created_at: datetime | None = None
 
 
 class ProgrammeCreate(RowModel):
@@ -1377,12 +1428,82 @@ class AliasesRepo:
         return AliasRecord.model_validate(row)
 
     def list_for_entity(self, entity_id: int) -> list[AliasRecord]:
+        """Aliases that still count for resolution, oldest first.
+
+        This is the read the ER candidate universe consumes, so an alias a
+        human *rejected* (review_status, migration 0008) stops resolving
+        mentions immediately: a rejected suggestion must not keep boosting
+        similarity or locking a pair. Confirmed and still-pending rows stay
+        visible — pending is the pre-review default, not a distrust verdict.
+        """
         with self.db.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM entity_aliases WHERE entity_id = %s ORDER BY id",
+                "SELECT * FROM entity_aliases WHERE entity_id = %s "
+                "AND review_status <> 'rejected' ORDER BY id",
                 (entity_id,),
             ).fetchall()
         return [AliasRecord.model_validate(row) for row in rows]
+
+    def get(self, alias_id: int) -> AliasRecord | None:
+        with self.db.connection() as conn:
+            row = conn.execute("SELECT * FROM entity_aliases WHERE id = %s", (alias_id,)).fetchone()
+        return AliasRecord.model_validate(row) if row else None
+
+    def review_queue(self, limit: int = 100, offset: int = 0) -> AliasReviewPage:
+        """Alias suggestions awaiting a human decision, oldest first."""
+        with self.db.connection() as conn:
+            total = conn.execute(
+                "SELECT count(*) AS n FROM entity_aliases WHERE review_status = 'pending'"
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT * FROM entity_aliases WHERE review_status = 'pending' "
+                "ORDER BY id LIMIT %s OFFSET %s",
+                (limit, offset),
+            ).fetchall()
+        return AliasReviewPage(
+            items=[AliasRecord.model_validate(row) for row in rows],
+            total=int(total["n"]) if total else 0,
+        )
+
+    def confirm(self, alias_id: int, *, confirmed_by: str) -> AliasRecord:
+        """Record the human approval of an alias suggestion.
+
+        For a ``manual`` alias this is what arms the ER lock (types.py:
+        manual aliases are authoritative). Raises ``ValueError`` for a missing
+        or already-decided row so a stale console cannot silently flip a
+        decision that was already taken.
+        """
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE entity_aliases SET
+                    review_status = 'confirmed',
+                    confirmed_by = %s,
+                    confirmed_at = COALESCE(confirmed_at, now())
+                WHERE id = %s AND review_status IN ('pending', 'confirmed')
+                RETURNING *
+                """,
+                (confirmed_by, alias_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"alias {alias_id} does not exist or was rejected")
+        return AliasRecord.model_validate(row)
+
+    def reject(self, alias_id: int) -> AliasRecord:
+        """Record the human refusal of an alias suggestion (append-only audit
+        lives in ``review_audit``; the row keeps its evidence columns)."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE entity_aliases SET review_status = 'rejected'
+                WHERE id = %s AND review_status IN ('pending', 'rejected')
+                RETURNING *
+                """,
+                (alias_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"alias {alias_id} does not exist or was confirmed")
+        return AliasRecord.model_validate(row)
 
     def create_if_missing(self, create: AliasCreate) -> AliasRecord | None:
         """Idempotent alias write; returns ``None`` when the alias already exists."""
@@ -1638,6 +1759,79 @@ class DocumentsRepo:
             ).fetchall()
         return [_document(row) for row in rows]
 
+    def review_queue(self, limit: int = 100, offset: int = 0) -> DocumentReviewPage:
+        """Ambiguous documents to resolve, least-confident plan first.
+
+        Ordered deterministically: the planner's weakest link comes first, then
+        most-recently-seen, then id, so pagination is stable while the queue
+        changes underneath a reviewer.
+        """
+        with self.db.connection() as conn:
+            total = conn.execute(
+                "SELECT count(*) AS n FROM documents WHERE plan_state = 'needs_review'"
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT * FROM documents WHERE plan_state = 'needs_review' "
+                "ORDER BY plan_confidence ASC NULLS LAST, last_seen DESC NULLS LAST, id "
+                "LIMIT %s OFFSET %s",
+                (limit, offset),
+            ).fetchall()
+        return DocumentReviewPage(
+            items=[_document(row) for row in rows],
+            total=int(total["n"]) if total else 0,
+        )
+
+    def review_link_entity(
+        self,
+        document_id: int,
+        entity_id: int,
+        *,
+        reason: str | None = None,
+    ) -> DocumentRecord | None:
+        """Resolve an ambiguous plan by naming the entity, human-decided.
+
+        Deliberately not :meth:`set_plan`, which would null out
+        ``extraction_family``; a review decision must only write what it
+        decided (entity link + state), never re-decide the extraction plan.
+        ``plan_reason`` records that a human resolved it, keeping the planner's
+        original reason readable in the audit row instead.
+        """
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE documents SET
+                    entity_id = %s,
+                    plan_state = 'linked',
+                    plan_confidence = 1.0,
+                    plan_reason = %s
+                WHERE id = %s AND plan_state IN ('needs_review', 'linked')
+                RETURNING *
+                """,
+                (entity_id, reason or "resolved by human review (link_entity)", document_id),
+            ).fetchone()
+        return _document(row) if row else None
+
+    def review_mark_not_applicable(
+        self,
+        document_id: int,
+        *,
+        reason: str | None = None,
+    ) -> DocumentRecord | None:
+        """Take an ambiguous document out of the extraction plan by decision."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE documents SET
+                    plan_state = 'not_applicable',
+                    plan_confidence = 1.0,
+                    plan_reason = %s
+                WHERE id = %s AND plan_state IN ('needs_review', 'not_applicable')
+                RETURNING *
+                """,
+                (reason or "resolved by human review (mark_not_applicable)", document_id),
+            ).fetchone()
+        return _document(row) if row else None
+
     def get(self, document_id: int) -> DocumentRecord | None:
         with self.db.connection() as conn:
             row = conn.execute("SELECT * FROM documents WHERE id = %s", (document_id,)).fetchone()
@@ -1656,6 +1850,57 @@ class DocumentsRepo:
                 (domain, limit),
             ).fetchall()
         return [_document(row) for row in rows]
+
+
+class ReviewAuditRepo:
+    """Append-only log of every human review action (migration 0008).
+
+    One row per action with the subject's previous review-relevant state, so
+    the console can show the trail next to each item and an operator can
+    reconstruct what the queue looked like when a decision was taken. There is
+    no update and no delete: a mistaken action is corrected by a further
+    action, never by editing the log.
+    """
+
+    def __init__(self, database: Database) -> None:
+        self.db = database
+
+    def record(self, audit: ReviewAuditCreate) -> ReviewAuditRecord:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO review_audit
+                    (kind, subject_id, action, previous_state, details_json, decided_by)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING *
+                """,
+                (
+                    audit.kind,
+                    audit.subject_id,
+                    audit.action,
+                    _json(audit.previous_state) if audit.previous_state else "{}",
+                    _json(audit.details),
+                    audit.decided_by,
+                ),
+            ).fetchone()
+        assert row is not None
+        return ReviewAuditRecord.model_validate(row)
+
+    def list_for_subject(
+        self,
+        kind: str,
+        subject_id: int,
+        *,
+        limit: int = 50,
+    ) -> list[ReviewAuditRecord]:
+        """The trail for one queue item, newest decision first."""
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM review_audit WHERE kind = %s AND subject_id = %s "
+                "ORDER BY id DESC LIMIT %s",
+                (kind, subject_id, limit),
+            ).fetchall()
+        return [ReviewAuditRecord.model_validate(row) for row in rows]
 
 
 class InstitutionDomainsRepo:
@@ -2004,6 +2249,58 @@ class ClaimsRepo:
             ).fetchall()
         return [_claim(row) for row in rows]
 
+    def review_queue(self, limit: int = 100, offset: int = 0) -> ClaimReviewPage:
+        """The human review queue (WS-G): lowest-confidence claims first.
+
+        Everything not positively supported and not superseded queues —
+        including machine-rejected rows, because a verifier can be wrong and
+        the console is the only correction path. Pagination is keyed on the
+        same ordering as the queue index (migration 0008) so pages are stable.
+        """
+        with self.db.connection() as conn:
+            total = conn.execute(
+                "SELECT count(*) AS n FROM claims "
+                "WHERE verification_status <> 'supported' AND superseded_by IS NULL"
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT * FROM claims "
+                "WHERE verification_status <> 'supported' AND superseded_by IS NULL "
+                "ORDER BY confidence ASC, id ASC LIMIT %s OFFSET %s",
+                (limit, offset),
+            ).fetchall()
+        return ClaimReviewPage(
+            items=[_claim(row) for row in rows],
+            total=int(total["n"]) if total else 0,
+        )
+
+    def evidence_with_provenance(self, claim_id: int) -> ClaimEvidence | None:
+        """One claim joined to the snapshot that proves it (review console).
+
+        The console shows the quote next to its URL, fetch time and hash; the
+        chain is the same one :meth:`evidence_page` exposes, read for a single
+        claim without scanning an entity.
+        """
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT c.*, d.url, s.fetched_at, s.sha256, s.id AS snapshot_id, "
+                "s.fetcher_tier "
+                "FROM claims c "
+                "JOIN extractions x ON x.id = c.extraction_id "
+                "JOIN snapshots s ON s.id = x.snapshot_id "
+                "JOIN documents d ON d.id = s.document_id "
+                "WHERE c.id = %s",
+                (claim_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ClaimEvidence(
+            **_claim(row).model_dump(),
+            url=row["url"],
+            fetched_at=row["fetched_at"],
+            sha256=row["sha256"],
+            snapshot_id=row["snapshot_id"],
+        )
+
     def list_for_entity(
         self,
         entity_id: int,
@@ -2045,7 +2342,7 @@ class ClaimsRepo:
         where = " AND ".join(conditions)
         count_sql = f"SELECT count(*) AS n FROM claims c WHERE {where}"  # noqa: S608
         page_sql = (
-            "SELECT c.*, d.url, s.fetched_at, s.sha256, s.id AS snapshot_id "
+            "SELECT c.*, d.url, s.fetched_at, s.sha256, s.id AS snapshot_id, s.fetcher_tier "
             "FROM claims c "
             "JOIN extractions x ON x.id = c.extraction_id "
             "JOIN snapshots s ON s.id = x.snapshot_id "
@@ -2063,6 +2360,7 @@ class ClaimsRepo:
                 fetched_at=row["fetched_at"],
                 sha256=row["sha256"],
                 snapshot_id=row["snapshot_id"],
+                fetcher_tier=row.get("fetcher_tier"),
             )
             for row in rows
         ]
@@ -2096,6 +2394,74 @@ class ClaimsRepo:
             if row is None:
                 raise ValueError(f"claim {old_claim_id} is already superseded")
         return _claim(row)
+
+    def correct_claim(
+        self,
+        old_claim_id: int,
+        replacement: ClaimCreate,
+        *,
+        verified_by: str,
+        notes: dict[str, Any] | None = None,
+    ) -> tuple[ClaimRecord, ClaimRecord]:
+        """Human correction (review console): INSERT the replacement, link, done.
+
+        One connection, one transaction: either the replacement exists and the
+        old row points at it, or neither happened — a half-corrected claim
+        (orphan replacement, or a superseded row with no successor) would be
+        exactly the kind of silent drift the console exists to prevent. The old
+        row's content columns are never touched; only ``superseded_by`` and the
+        verification columns are written, and the replacement is born
+        ``supported`` with ``verified_by`` naming who decided.
+        """
+        if replacement.quote == "" or replacement.char_end <= replacement.char_start:
+            raise ValueError("the replacement claim must carry a resolvable quote span")
+        with self.db.connection() as conn:
+            old_row = conn.execute(
+                "SELECT entity_id FROM claims WHERE id = %s", (old_claim_id,)
+            ).fetchone()
+            if old_row is None:
+                raise ValueError(f"claim {old_claim_id} does not exist")
+            if old_row["entity_id"] != replacement.entity_id:
+                raise ValueError("cannot supersede a claim for a different entity")
+            new_row = conn.execute(
+                """
+                INSERT INTO claims
+                    (extraction_id, entity_id, predicate, value_json, unit, qualifier_json,
+                     quote, char_start, char_end, confidence, observed_at, method,
+                     verification_status, verified_by, verified_at, verification_notes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        'supported', %s, now(), %s)
+                RETURNING *
+                """,
+                (
+                    replacement.extraction_id,
+                    replacement.entity_id,
+                    replacement.predicate,
+                    _json(replacement.value),
+                    replacement.unit,
+                    _json(replacement.qualifier),
+                    replacement.quote,
+                    replacement.char_start,
+                    replacement.char_end,
+                    replacement.confidence,
+                    replacement.observed_at,
+                    replacement.method,
+                    verified_by,
+                    _json(notes),
+                ),
+            ).fetchone()
+            assert new_row is not None
+            linked_row = conn.execute(
+                """
+                UPDATE claims SET superseded_by = %s
+                WHERE id = %s AND superseded_by IS NULL
+                RETURNING *
+                """,
+                (new_row["id"], old_claim_id),
+            ).fetchone()
+            if linked_row is None:
+                raise ValueError(f"claim {old_claim_id} is already superseded")
+        return _claim(new_row), _claim(linked_row)
 
     def count_for_entity(self, entity_id: int, predicate: str | None = None) -> int:
         if predicate is None:

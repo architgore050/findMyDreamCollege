@@ -1625,3 +1625,149 @@ tier degrades per document with `vision_unavailable`; text PDFs still extract.
 A non-empty `FMD_HARD_PDF_PROVIDER` must name a provider declared under
 `providers:` (`api`, `gemini`, …); a typo is the only way to see
 `unresolved_provider` again.
+
+## Review console (2026-11-18, WS-G)
+
+The review console is the correction path for every machine decision: a wrong
+auto-accept, a bad entity merge suggestion, an ambiguous document plan. It is
+the last 501 surface shipped — the endpoints below replace the
+`not_implemented` stubs in `fmd/api.py`, and `/review` in the web app renders
+the queues and submits decisions.
+
+### Endpoints and auth
+
+All review endpoints are admin-token gated (no user accounts, brief §2). The
+token comes from `FMD_ADMIN_TOKEN` and is supplied per request as
+`X-Admin-Token: <token>` or `Authorization: Bearer <token>`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/review/queue?kind=claim\|alias\|document&limit&offset` | One paginated adjudication queue |
+| POST | `/api/review/claims/{id}` | `{action: accept\|reject\|correct, corrected_quote?, note?}` |
+| POST | `/api/review/aliases/{id}` | `{action: confirm\|reject, note?}` |
+| POST | `/api/review/documents/{id}` | `{action: link_entity\|mark_not_applicable, entity_id?, note?}` |
+| GET | `/api/review/audit?kind=...&subject_id=...` | Decision trail for one queue item |
+
+Gate semantics, and why they differ from `/api/scoring/rerun`: a missing or
+wrong token answers **403 `forbidden`** on the review surface — there is no
+login flow to re-attempt, so a failed token is a final permission verdict. The
+scoring-rerun gate keeps its historical 401. With `FMD_ADMIN_TOKEN` unset the
+review surface answers 503 `admin_disabled` (feature off, not forbidden). The
+gate resolves **before** the database dependency, so an unauthorised caller
+never makes the API probe Postgres; a valid token with no database answers 503
+`database_unavailable`.
+
+### Queue semantics
+
+* **claims** — everything with `verification_status <> 'supported'` and
+  `superseded_by IS NULL`: machine-rejected rows stay visible (a verifier can
+  be wrong; the console is the only correction path), still-unverified rows
+  queue, and anything a human accepted leaves the queue. Ordered **confidence
+  ASC** (lowest first), then id; backed by the partial index
+  `claims_review_confidence_idx` (migration 0008). Each item carries the
+  provenance chain (`url`, `fetched_at`, `sha256`, `snapshot_id`,
+  `fetcher_tier`) and the page/bbox recorded in `qualifier_json` by the
+  extractor.
+* **aliases** — `entity_aliases.review_status='pending'` (migration 0008
+  state machine `pending → confirmed | rejected`), oldest first, with the
+  entity's canonical name joined for context.
+* **documents** — `plan_state='needs_review'` (the planner's abstention),
+  least-confident plan first, then most recently seen.
+
+### Claim actions
+
+* **accept** → `verification_status='supported'`, `verified_by='human'`.
+  Repeating an already-applied action returns `already_done: true` and writes
+  **no** second audit row (idempotent double-submit).
+* **reject** → `verification_status='rejected'`, `verified_by='human'`.
+  Rejecting a claim that is currently `supported` **requires `note`** (422
+  `missing_note` otherwise): overturning the verifier silently is exactly the
+  failure mode the console exists to prevent. The verifier's original notes
+  are preserved under `verification_notes.previous_verification`.
+* **correct** → requires `corrected_quote` **and** `note`. The corrected quote
+  must occur verbatim in the extraction's text (422
+  `unresolvable_corrected_quote` otherwise — invariant 3 applies to
+  replacements too). `ClaimsRepo.correct_claim` performs one transaction:
+  INSERT the replacement claim (same predicate/value/entity, corrected quote +
+  resolved span, confidence 1.0, born `supported` with `verified_by='human'`)
+  and point the old row's `superseded_by` at it. The original claim's content
+  columns are **never** mutated. Acting on a superseded claim is 409
+  `already_superseded`.
+
+### Alias actions and the ER lock
+
+Confirming an alias sets `review_status='confirmed'`,
+`confirmed_by='human'`, `confirmed_at=now()`. For a `manual` alias this is
+what arms entity resolution's manual authority (`fmd/er/types.py`):
+a mention that exactly matches the confirmed alias resolves to that entity
+unattended (`decided_by='manual'`, note `manual_alias_authoritative`), and any
+score- or model-based auto-accept **onto** that entity is declined to
+adjudication (`manual_canonical_lock`) — the pair stays with a human.
+`test_review_api.py::test_alias_confirm_blocks_auto_merge` proves this chain
+end-to-end: queue → confirm via the API → candidate universe built exactly the
+way the planner builds it (`AliasesRepo.list_for_entity`) → `resolve_with_audit`.
+
+Rejecting an alias sets `review_status='rejected'`; the ER-facing read
+(`AliasesRepo.list_for_entity`) filters rejected rows, so a refused suggestion
+stops boosting similarity immediately. A decision is terminal: flipping it is
+409 `decision_conflict`, raised before any audit row is written. Producers
+(`er/aliases.py` mining, inventory ingest) still create `pending` rows; nothing
+writes `confirmed` except this console.
+
+### Document actions
+
+`link_entity` (requires `entity_id` of an existing entity) sets
+`plan_state='linked'`, `entity_id`, `plan_confidence=1.0` and a
+`plan_reason` naming the human decision; the planner's own fields
+(`extraction_family`, role) survive. `mark_not_applicable` takes the document
+out of the plan. Both are idempotent on their own target state and 409 on a
+flip (`linked → not_applicable` or vice versa).
+
+### Audit trail
+
+Every applied action appends one `review_audit` row (migration 0008) with
+`kind`, `subject_id`, `action`, `previous_state` (the review-relevant fields
+before the action), `details_json` (note / corrected quote / target entity),
+`decided_by='human'` (CHECK-enforced) and `created_at`. The table has no
+foreign keys on `subject_id` by design: the trail survives subject removal and
+one table serves three subject kinds. There is no UPDATE and no DELETE — a
+mistaken action is corrected by a further action. The web console renders the
+trail under each item after every action.
+
+### Web console
+
+`/review` (apps/web) is an admin surface: it asks for the token once and keeps
+it in React state only — never localStorage, never a cookie, sent only as
+`X-Admin-Token` to the API. It renders the three queues with predicate, quote,
+span, page/bbox, source URL, fetch tier ("evidence tier"), verification status
+and the deciding claim; accept/reject/correct with the reject-a-supported-note
+warning; confirm/reject on aliases (with the ER-lock warning on `manual`);
+link/not-applicable on documents. A 403 renders as a permission failure, never
+a retry-with-credentials prompt. `components/review-console.test.tsx` renders
+the queue offline against fixture data — no API required.
+
+### Run this (copy-paste)
+
+```bash
+export DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd
+export FMD_ADMIN_TOKEN=change-me
+cd packages/pipeline && uv run pytest -q tests/test_review_api.py   # 22 contract tests
+make migrate                                                        # applies 0008_review_actions
+curl -s -H "X-Admin-Token: $FMD_ADMIN_TOKEN" \
+  "http://localhost:8000/api/review/queue?kind=claim&limit=5" | python3 -m json.tool | head -40
+curl -s -X POST -H "X-Admin-Token: $FMD_ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"action":"accept"}' http://localhost:8000/api/review/claims/5 | python3 -m json.tool
+```
+
+Without `DATABASE_URL` the DB-backed review tests skip loudly (same contract
+as `test_db.py`); the gate tests (403/503) run everywhere.
+
+### Known limitations
+
+* The console has no user accounts and no per-person identity: the audit log
+  records `decided_by='human'` for every action, not who. A deployment that
+  needs named reviewers must add an identity layer above the shared token
+  (out of v1 scope, brief §2).
+* The corrected-quote check locates the quote in the stored extraction text;
+  it cannot detect that the *correction itself* is true. Review remains a
+  human judgement — the console only guarantees the span stays resolvable.

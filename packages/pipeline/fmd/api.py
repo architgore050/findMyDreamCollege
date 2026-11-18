@@ -27,12 +27,19 @@ from fmd import __version__
 from fmd.config import ConfigError, Registry, get_registry
 from fmd.db.connection import Database, DatabaseError, get_database
 from fmd.db.repositories import (
+    AliasesRepo,
+    ClaimCreate,
     ClaimsRepo,
+    ClaimVerification,
     CostItemsRepo,
+    DocumentsRepo,
     EntitiesRepo,
     ExamsRepo,
+    ExtractionsRepo,
     ProgrammeFilter,
     ProgrammesRepo,
+    ReviewAuditCreate,
+    ReviewAuditRepo,
     ScoresRepo,
 )
 from fmd.score.config import ScoringConfig
@@ -1259,25 +1266,563 @@ def exclusions(
 
 
 # --------------------------------------------------------------------------- review (WS-G)
+#
+# The review console is the correction path for everything a machine decided on
+# its own (brief §18.7). Three queues, three verbs, one audit log:
+#
+#   * claims   — accept | reject | correct. Accept/reject write only the
+#     verification columns (0005); a correction never mutates content, it
+#     inserts a superseding claim and points superseded_by at the old row
+#     (AGENTS.md data rules).
+#   * aliases  — confirm | reject. Confirming arms the ER manual-alias lock;
+#     rejecting hides the suggestion from the resolution candidate universe.
+#   * documents— link_entity | mark_not_applicable. Resolves a planner
+#     abstention stored as plan_state='needs_review'.
+#
+# Every accepted request appends one review_audit row with decided_by='human',
+# a timestamp and the previous state, so no machine error is unrecoverable.
 
 
-def _not_implemented(endpoint: str, workstream: str, section: str) -> JSONResponse:
-    return _error(
-        501,
-        "not_implemented",
-        f"{endpoint} is not implemented ({workstream}, see brief §{section})",
-        workstream=workstream,
-    )
+REVIEW_DECIDER = "human"
+
+
+def require_review_admin(
+    authorization: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
+) -> None:
+    """Admin gate for the review surface (no user accounts, brief §2).
+
+    Answering **403** (not the scoring-rerun gate's 401) is deliberate: there
+    is no login flow to re-attempt with credentials, so a missing or wrong
+    token is a final permission verdict — "this browser may not decide
+    evidence" — and the console renders it as such. Like ``require_admin``,
+    this resolves before any database dependency so an unauthorised caller
+    never makes the API probe Postgres.
+    """
+    expected = get_settings().admin_token
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "admin_disabled",
+                "message": "review endpoints are disabled: FMD_ADMIN_TOKEN is not set",
+            },
+        )
+    supplied = x_admin_token
+    if supplied is None and authorization and authorization.lower().startswith("bearer "):
+        supplied = authorization[7:].strip()
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "forbidden",
+                "message": "review endpoints require the admin token (X-Admin-Token)",
+            },
+        )
+
+
+class ClaimReviewActionRequest(BaseModel):
+    action: Literal["accept", "reject", "correct"]
+    corrected_quote: str | None = None
+    note: str | None = None
+
+
+class AliasReviewActionRequest(BaseModel):
+    action: Literal["confirm", "reject"]
+    note: str | None = None
+
+
+class DocumentReviewActionRequest(BaseModel):
+    action: Literal["link_entity", "mark_not_applicable"]
+    entity_id: int | None = None
+    note: str | None = None
+
+
+def _review_notes(
+    previous: dict[str, Any] | None,
+    *,
+    action: str,
+    note: str | None,
+    previous_status: str,
+) -> dict[str, Any]:
+    """Compose the verification_notes payload for one human decision.
+
+    Machine notes are preserved under a key instead of overwritten: a reviewer
+    who overturns the verifier must leave the verifier's reasoning readable.
+    """
+    payload: dict[str, Any] = {
+        "human_review": {
+            "action": action,
+            "note": note,
+            "decided_by": REVIEW_DECIDER,
+            "decided_at": datetime.now(UTC).isoformat(),
+            "previous_status": previous_status,
+        }
+    }
+    if previous:
+        payload["previous_verification"] = previous
+    return payload
+
+
+def _previous_claim_state(claim: Any) -> dict[str, Any]:
+    return {
+        "verification_status": claim.verification_status,
+        "verified_by": claim.verified_by,
+        "superseded_by": claim.superseded_by,
+        "confidence": claim.confidence,
+    }
+
+
+def _queue_claim_items(database: Database, items: Sequence[Any]) -> list[dict[str, Any]]:
+    """Claims joined to the snapshot that proves each one (console columns)."""
+    repo = ClaimsRepo(database)
+    enriched: list[dict[str, Any]] = []
+    for claim in items:
+        evidence = repo.evidence_with_provenance(claim.id)
+        payload = (evidence or claim).model_dump(mode="json")
+        enriched.append(payload)
+    return enriched
+
+
+def _queue_alias_items(database: Database, items: Sequence[Any]) -> list[dict[str, Any]]:
+    entities = EntitiesRepo(database)
+    enriched: list[dict[str, Any]] = []
+    for alias in items:
+        payload = alias.model_dump(mode="json")
+        entity = entities.get(alias.entity_id)
+        payload["entity_name"] = entity.canonical_name if entity else None
+        enriched.append(payload)
+    return enriched
 
 
 @app.get("/api/review/queue")
-def review_queue() -> JSONResponse:
-    return _not_implemented("/api/review/queue", "WS-G", "18.7")
+def review_queue(
+    _admin: Annotated[None, Depends(require_review_admin)],
+    database: DatabaseDep,
+    kind: Literal["claim", "alias", "document"] = Query(default="claim"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """One paginated adjudication queue; least-confident work first."""
+    if kind == "claim":
+        page = ClaimsRepo(database).review_queue(limit=limit, offset=offset)
+        items = _queue_claim_items(database, page.items)
+    elif kind == "alias":
+        page = AliasesRepo(database).review_queue(limit=limit, offset=offset)
+        items = _queue_alias_items(database, page.items)
+    else:
+        page = DocumentsRepo(database).review_queue(limit=limit, offset=offset)
+        items = [item.model_dump(mode="json") for item in page.items]
+    return _envelope(
+        {
+            "kind": kind,
+            "items": items,
+            "total": page.total,
+            "limit": limit,
+            "offset": offset,
+            "ordering": (
+                "confidence ASC" if kind == "claim" else "queue position (oldest pending first)"
+            ),
+        }
+    )
+
+
+@app.get("/api/review/audit")
+def review_audit(
+    _admin: Annotated[None, Depends(require_review_admin)],
+    database: DatabaseDep,
+    kind: Literal["claim", "alias", "document"] = Query(...),
+    subject_id: int = Query(..., ge=1),
+) -> dict[str, Any]:
+    """The decision trail for one queue item, newest first."""
+    audits = ReviewAuditRepo(database).list_for_subject(kind, subject_id)
+    return _envelope(
+        {
+            "kind": kind,
+            "subject_id": subject_id,
+            "items": [audit.model_dump(mode="json") for audit in audits],
+        }
+    )
+
+
+def _already_done(
+    claim: Any,
+    *,
+    status: str,
+) -> bool:
+    return claim.verification_status == status and claim.verified_by == REVIEW_DECIDER
 
 
 @app.post("/api/review/claims/{claim_id}")
-def review_claim(claim_id: int, _: None = Depends(require_admin)) -> JSONResponse:
-    return _not_implemented("/api/review/claims/{id}", "WS-G", "18.7")
+def review_claim_action(
+    claim_id: int,
+    request: ClaimReviewActionRequest,
+    _admin: Annotated[None, Depends(require_review_admin)],
+    database: DatabaseDep,
+) -> dict[str, Any]:
+    repo = ClaimsRepo(database)
+    claim = repo.get(claim_id)
+    if claim is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": f"claim {claim_id} not found"},
+        )
+
+    if request.action == "correct":
+        if claim.superseded_by is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "already_superseded",
+                    "message": f"claim {claim_id} was already superseded by "
+                    f"claim {claim.superseded_by}",
+                },
+            )
+        if not request.corrected_quote or not request.corrected_quote.strip():
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "missing_corrected_quote",
+                    "message": "a correction must carry corrected_quote; the original "
+                    "claim is never mutated",
+                },
+            )
+        if not request.note:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "missing_note",
+                    "message": "a correction requires a note explaining what was wrong "
+                    "and why the new quote is right",
+                },
+            )
+        return _correct_claim(database, claim, request)
+
+    target_status = "supported" if request.action == "accept" else "rejected"
+    if claim.superseded_by is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "already_superseded",
+                "message": f"claim {claim_id} was superseded by claim "
+                f"{claim.superseded_by}; review the superseding claim instead",
+            },
+        )
+    if request.action == "reject" and claim.verification_status == "supported" and not request.note:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "missing_note",
+                "message": "rejecting a supported claim requires a note naming the "
+                "reason; the verifier's verdict must not be overturned silently",
+            },
+        )
+    if _already_done(claim, status=target_status):
+        # Idempotent: a repeated click re-reads the queue and must not append
+        # a second audit row for a decision that was already taken.
+        return _envelope(
+            {
+                "claim": claim.model_dump(mode="json"),
+                "action": request.action,
+                "already_done": True,
+                "audit_id": None,
+            },
+            claims_hash=repo.claims_hash(claim.entity_id),
+        )
+
+    audit_repo = ReviewAuditRepo(database)
+    audit = audit_repo.record(
+        ReviewAuditCreate(
+            kind="claim",
+            subject_id=claim_id,
+            action=request.action,
+            previous_state=_previous_claim_state(claim),
+            details={"note": request.note},
+        )
+    )
+    updated = repo.record_verification(
+        claim_id,
+        ClaimVerification(
+            status=target_status,
+            verified_by=REVIEW_DECIDER,
+            notes=_review_notes(
+                claim.verification_notes,
+                action=request.action,
+                note=request.note,
+                previous_status=claim.verification_status,
+            ),
+        ),
+    )
+    return _envelope(
+        {
+            "claim": updated.model_dump(mode="json"),
+            "action": request.action,
+            "already_done": False,
+            "audit_id": audit.id,
+        },
+        claims_hash=repo.claims_hash(claim.entity_id),
+    )
+
+
+def _correct_claim(
+    database: Database,
+    claim: Any,
+    request: ClaimReviewActionRequest,
+) -> dict[str, Any]:
+    """Append a superseding claim with the corrected quote; touch nothing else.
+
+    Invariant 3 (every published number resolves to a span) applies to the
+    replacement too: the corrected quote must locate inside the extraction's
+    text, otherwise there is no honest span and the correction is refused.
+    """
+    corrected = request.corrected_quote or ""
+    extraction = ExtractionsRepo(database).get(claim.extraction_id)
+    char_start: int | None = None
+    if extraction is not None:
+        located = extraction.text.find(corrected)
+        if located >= 0:
+            char_start = located
+    if char_start is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "unresolvable_corrected_quote",
+                "message": "corrected_quote does not occur in the extraction text; a "
+                "correction must stay resolvable to the same snapshot span",
+            },
+        )
+
+    audit = ReviewAuditRepo(database).record(
+        ReviewAuditCreate(
+            kind="claim",
+            subject_id=claim.id,
+            action="correct",
+            previous_state=_previous_claim_state(claim),
+            details={
+                "note": request.note,
+                "corrected_quote": corrected,
+                "superseded_by_created": True,
+            },
+        )
+    )
+    replacement, superseded = ClaimsRepo(database).correct_claim(
+        claim.id,
+        ClaimCreate(
+            extraction_id=claim.extraction_id,
+            entity_id=claim.entity_id,
+            predicate=claim.predicate,
+            value=claim.value,
+            unit=claim.unit,
+            qualifier=claim.qualifier,
+            quote=corrected,
+            char_start=char_start,
+            char_end=char_start + len(corrected),
+            confidence=1.0,
+            observed_at=claim.observed_at,
+            method=claim.method,
+        ),
+        verified_by=REVIEW_DECIDER,
+        notes=_review_notes(
+            claim.verification_notes,
+            action="correct",
+            note=request.note,
+            previous_status=claim.verification_status,
+        ),
+    )
+    return _envelope(
+        {
+            "claim": replacement.model_dump(mode="json"),
+            "superseded_claim": superseded.model_dump(mode="json"),
+            "action": "correct",
+            "already_done": False,
+            "audit_id": audit.id,
+        },
+        claims_hash=ClaimsRepo(database).claims_hash(claim.entity_id),
+    )
+
+
+def _alias_previous_state(alias: Any) -> dict[str, Any]:
+    return {
+        "review_status": alias.review_status,
+        "confirmed_by": alias.confirmed_by,
+        "alias_type": alias.alias_type,
+    }
+
+
+@app.post("/api/review/aliases/{alias_id}")
+def review_alias_action(
+    alias_id: int,
+    request: AliasReviewActionRequest,
+    _admin: Annotated[None, Depends(require_review_admin)],
+    database: DatabaseDep,
+) -> dict[str, Any]:
+    repo = AliasesRepo(database)
+    alias = repo.get(alias_id)
+    if alias is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": f"alias {alias_id} not found"},
+        )
+    target_status = "confirmed" if request.action == "confirm" else "rejected"
+    if alias.review_status == target_status:
+        return _envelope(
+            {
+                "alias": alias.model_dump(mode="json"),
+                "action": request.action,
+                "already_done": True,
+                "audit_id": None,
+            }
+        )
+    # A decision is terminal: flipping it is a conflict, raised before any
+    # audit row is written so the log only ever records applied actions.
+    if alias.review_status in {"confirmed", "rejected"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "decision_conflict",
+                "message": f"alias {alias_id} was already {alias.review_status}; the "
+                "decision trail is in /api/review/audit",
+            },
+        )
+
+    audit = ReviewAuditRepo(database).record(
+        ReviewAuditCreate(
+            kind="alias",
+            subject_id=alias_id,
+            action=request.action,
+            previous_state=_alias_previous_state(alias),
+            details={"note": request.note},
+        )
+    )
+    updated = (
+        repo.confirm(alias_id, confirmed_by=REVIEW_DECIDER)
+        if request.action == "confirm"
+        else repo.reject(alias_id)
+    )
+    return _envelope(
+        {
+            "alias": updated.model_dump(mode="json"),
+            "action": request.action,
+            "already_done": False,
+            "audit_id": audit.id,
+        }
+    )
+
+
+def _document_previous_state(document: Any) -> dict[str, Any]:
+    return {
+        "plan_state": document.plan_state,
+        "entity_id": document.entity_id,
+        "plan_confidence": document.plan_confidence,
+    }
+
+
+def _decision_conflict(document_id: int, state: str) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "decision_conflict",
+            "message": f"document {document_id} was already decided ({state}); the "
+            "decision trail is in /api/review/audit",
+        },
+    )
+
+
+@app.post("/api/review/documents/{document_id}")
+def review_document_action(
+    document_id: int,
+    request: DocumentReviewActionRequest,
+    _admin: Annotated[None, Depends(require_review_admin)],
+    database: DatabaseDep,
+) -> dict[str, Any]:
+    repo = DocumentsRepo(database)
+    document = repo.get(document_id)
+    if document is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": f"document {document_id} not found"},
+        )
+    note = request.note
+    if request.action == "link_entity":
+        if request.entity_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "missing_entity",
+                    "message": "link_entity requires entity_id; the console never guesses "
+                    "an entity link",
+                },
+            )
+        entity = EntitiesRepo(database).get(request.entity_id)
+        if entity is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "unknown_entity",
+                    "message": f"entity {request.entity_id} does not exist",
+                },
+            )
+        if document.plan_state == "linked" and document.entity_id == request.entity_id:
+            return _envelope(
+                {
+                    "document": document.model_dump(mode="json"),
+                    "action": request.action,
+                    "already_done": True,
+                    "audit_id": None,
+                }
+            )
+        if document.plan_state == "not_applicable":
+            raise _decision_conflict(document_id, "not_applicable")
+    elif document.plan_state == "not_applicable":
+        return _envelope(
+            {
+                "document": document.model_dump(mode="json"),
+                "action": request.action,
+                "already_done": True,
+                "audit_id": None,
+            }
+        )
+    elif document.plan_state == "linked":
+        raise _decision_conflict(document_id, "linked")
+
+    audit = ReviewAuditRepo(database).record(
+        ReviewAuditCreate(
+            kind="document",
+            subject_id=document_id,
+            action=request.action,
+            previous_state=_document_previous_state(document),
+            details={"note": note, "entity_id": request.entity_id},
+        )
+    )
+    if request.action == "link_entity":
+        assert request.entity_id is not None
+        reason = f"resolved by human review (link_entity -> entity {request.entity_id})" + (
+            f"; note: {note}" if note else ""
+        )
+        updated = repo.review_link_entity(document_id, request.entity_id, reason=reason)
+    else:
+        reason = "resolved by human review (mark_not_applicable)" + (
+            f"; note: {note}" if note else ""
+        )
+        updated = repo.review_mark_not_applicable(document_id, reason=reason)
+
+    if updated is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "decision_conflict",
+                "message": f"document {document_id} is no longer in a state that allows "
+                f"{request.action}; reload the queue",
+            },
+        )
+    return _envelope(
+        {
+            "document": updated.model_dump(mode="json"),
+            "action": request.action,
+            "already_done": False,
+            "audit_id": audit.id,
+        }
+    )
 
 
 @app.post("/api/scoring/rerun")

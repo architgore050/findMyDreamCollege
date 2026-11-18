@@ -734,6 +734,125 @@ export const sourcesPayloadSchema = z.object({
 });
 export type SourcesPayload = z.infer<typeof sourcesPayloadSchema>;
 
+// --------------------------------------------------------------------------- review console (WS-G)
+
+export const reviewQueueKindSchema = z.enum(["claim", "alias", "document"]);
+export type ReviewQueueKind = z.infer<typeof reviewQueueKindSchema>;
+
+export const reviewStatusSchema = z.enum(["unverified", "supported", "rejected"]);
+export type ReviewStatus = z.infer<typeof reviewStatusSchema>;
+
+/** A queued claim plus the provenance columns the console shows next to it. */
+export const reviewClaimItemSchema = claimSchema.extend({
+  verification_status: reviewStatusSchema,
+  verified_by: z.string().nullable().optional(),
+  verified_at: z.string().nullable().optional(),
+  verification_notes: z.record(z.string(), z.unknown()).nullable().optional(),
+  fetcher_tier: z.string().nullable().optional(),
+});
+export type ReviewClaimItem = z.infer<typeof reviewClaimItemSchema>;
+
+export const reviewAliasItemSchema = z.object({
+  id: z.number(),
+  entity_id: z.number(),
+  entity_name: z.string().nullable().optional(),
+  alias: z.string(),
+  alias_type: z.enum([
+    "acronym",
+    "former_name",
+    "transliteration",
+    "misspelling",
+    "local_name",
+    "manual",
+  ]),
+  source_id: z.string().nullable().optional(),
+  confidence: z.number().nullable().optional(),
+  quote: z.string().nullable().optional(),
+  confirmed_by: z.string().nullable().optional(),
+  confirmed_at: z.string().nullable().optional(),
+  review_status: z.enum(["pending", "confirmed", "rejected"]),
+});
+export type ReviewAliasItem = z.infer<typeof reviewAliasItemSchema>;
+
+export const reviewDocumentItemSchema = z.object({
+  id: z.number(),
+  url: z.string(),
+  domain: z.string(),
+  kind: z.string().nullable().optional(),
+  role: z.string().nullable().optional(),
+  source_id: z.string().nullable().optional(),
+  extraction_family: z.string().nullable().optional(),
+  entity_id: z.number().nullable().optional(),
+  plan_state: z
+    .enum(["planned", "linked", "needs_review", "abstained", "not_applicable"])
+    .nullable()
+    .optional(),
+  plan_confidence: z.number().nullable().optional(),
+  plan_reason: z.string().nullable().optional(),
+  last_seen: z.string().nullable().optional(),
+});
+export type ReviewDocumentItem = z.infer<typeof reviewDocumentItemSchema>;
+
+export const reviewQueuePayloadSchema = z.object({
+  kind: reviewQueueKindSchema,
+  items: z.array(z.union([reviewClaimItemSchema, reviewAliasItemSchema, reviewDocumentItemSchema])),
+  total: z.number(),
+  limit: z.number(),
+  offset: z.number(),
+  ordering: z.string().optional(),
+});
+export type ReviewQueuePayload = z.infer<typeof reviewQueuePayloadSchema>;
+
+export const claimReviewActionRequestSchema = z.object({
+  action: z.enum(["accept", "reject", "correct"]),
+  corrected_quote: z.string().optional(),
+  note: z.string().optional(),
+});
+export type ClaimReviewActionRequest = z.infer<typeof claimReviewActionRequestSchema>;
+
+export const aliasReviewActionRequestSchema = z.object({
+  action: z.enum(["confirm", "reject"]),
+  note: z.string().optional(),
+});
+export type AliasReviewActionRequest = z.infer<typeof aliasReviewActionRequestSchema>;
+
+export const documentReviewActionRequestSchema = z.object({
+  action: z.enum(["link_entity", "mark_not_applicable"]),
+  entity_id: z.number().optional(),
+  note: z.string().optional(),
+});
+export type DocumentReviewActionRequest = z.infer<typeof documentReviewActionRequestSchema>;
+
+export const reviewActionResultSchema = z.object({
+  claim: reviewClaimItemSchema.optional(),
+  superseded_claim: reviewClaimItemSchema.optional(),
+  alias: reviewAliasItemSchema.optional(),
+  document: reviewDocumentItemSchema.optional(),
+  action: z.string(),
+  already_done: z.boolean(),
+  audit_id: z.number().nullable(),
+});
+export type ReviewActionResult = z.infer<typeof reviewActionResultSchema>;
+
+export const reviewAuditRecordSchema = z.object({
+  id: z.number(),
+  kind: reviewQueueKindSchema,
+  subject_id: z.number(),
+  action: z.string(),
+  previous_state: z.record(z.string(), z.unknown()),
+  details: z.record(z.string(), z.unknown()).nullable().optional(),
+  decided_by: z.literal("human"),
+  created_at: z.string(),
+});
+export type ReviewAuditRecord = z.infer<typeof reviewAuditRecordSchema>;
+
+export const reviewAuditPayloadSchema = z.object({
+  kind: reviewQueueKindSchema,
+  subject_id: z.number(),
+  items: z.array(reviewAuditRecordSchema),
+});
+export type ReviewAuditPayload = z.infer<typeof reviewAuditPayloadSchema>;
+
 export const footnotes = {
   provenance: "Every published number must resolve to claim → extraction → snapshot → URL.",
 } as const;

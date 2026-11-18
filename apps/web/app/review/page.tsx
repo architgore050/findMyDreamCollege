@@ -1,7 +1,4 @@
-import Link from "next/link";
-
-import { ApiFailurePanel, EmptyPanel } from "@/components/api-state";
-import { apiReviewQueue, isOk } from "@/lib/api";
+import { ReviewConsole } from "./review-console";
 
 export const dynamic = "force-dynamic";
 
@@ -9,72 +6,66 @@ export const metadata = {
   title: "Review console — findMyDreamCollege",
 };
 
-export default async function ReviewPage() {
-  const queue = await apiReviewQueue();
-
+export default function ReviewPage() {
   return (
     <div className="space-y-5">
       <header className="space-y-2">
-        <p className="kicker">Human adjudication · low-confidence claims</p>
+        <p className="kicker">Human adjudication · low-confidence work first</p>
         <h1 className="text-2xl font-bold tracking-tight">Review console</h1>
         <p className="max-w-3xl text-sm text-stone-700">
-          A claim is accepted, rejected or corrected against the snapshot span that produced it.
-          Corrections are appended as new claims; no reviewed claim is edited in place.
+          A claim is accepted, rejected or corrected against the snapshot span that produced it; an
+          alias suggestion is confirmed or refused; an ambiguous document is linked to its entity or
+          taken out of the plan. Corrections are appended as new claims — no reviewed claim is
+          edited in place — and every decision is written to an append-only audit trail with the
+          previous state.
+        </p>
+        <p className="max-w-3xl text-xs text-stone-600">
+          No profile data is shown or stored here: this surface decides evidence, never applicants.
         </p>
       </header>
 
-      {isOk(queue) ? (
-        <p className="panel px-3 py-3 text-sm text-stone-700">
-          The review queue responded, but this build does not interpret its payload until the
-          response contract is frozen. No claims are rendered and no labels can be submitted.
-        </p>
-      ) : (
-        <ApiFailurePanel result={queue} />
-      )}
+      <ReviewConsole />
 
-      <section className="panel" aria-labelledby="review-workflow-title">
+      <section className="panel" aria-labelledby="review-contract-title">
         <div className="panel-head">
-          <h2 id="review-workflow-title" className="text-sm font-bold">
-            Review contract (not yet interactive)
+          <h2 id="review-contract-title" className="text-sm font-bold">
+            How a decision is recorded
           </h2>
           <span className="text-[11px] text-stone-600">brief §18.7</span>
         </div>
         <div className="space-y-2 px-3 py-3 text-sm text-stone-800">
           <ol className="list-decimal space-y-1 pl-5">
-            <li>Queue low-confidence claims, grouped by source family and predicate.</li>
             <li>
-              Show the snapshot with the claim&apos;s <code className="num">char_start</code>–
-              <code className="num">char_end</code> span highlighted, plus URL, fetched_at and
-              sha256.
+              Queues are served by <code className="num">/api/review/queue?kind=claim|alias|document</code>,
+              lowest confidence first, paginated.
             </li>
-            <li>Accept, reject or correct. Every action is recorded as a human label.</li>
             <li>
-              A correction inserts a claim and sets <code className="num">superseded_by</code>; the
-              old claim remains readable.
+              <strong>Accept / reject</strong> write only the verification columns
+              (<code className="num">verification_status</code>, <code className="num">verified_by=human</code>,
+              notes). Rejecting a machine-supported claim requires a note — the console warns.
+            </li>
+            <li>
+              <strong>Correct</strong> inserts a superseding claim with the corrected quote and sets
+              <code className="num"> superseded_by</code>; the original row is never mutated.
+            </li>
+            <li>
+              <strong>Alias confirm</strong> makes a <code className="num">manual</code> alias
+              authoritative: entity resolution resolves it unattended and stops auto-merging the
+              pair. <strong>Reject</strong> hides the suggestion from resolution.
+            </li>
+            <li>
+              <strong>Documents</strong> resolve a planner abstention
+              (<code className="num">plan_state=needs_review</code>) by linking the entity or
+              marking the document not applicable.
+            </li>
+            <li>
+              Every applied action appends one <code className="num">review_audit</code> row with
+              <code className="num"> decided_by=&apos;human&apos;</code>, the timestamp and the previous
+              state; the trail renders under each item.
             </li>
           </ol>
-          <p className="text-xs text-amber-950">
-            <strong>Actions are disabled:</strong> submitting a label needs the admin-token API,
-            which is 501 in this build. This browser will not hold a shared admin token — no
-            client-side secrets.
-          </p>
-          <p className="text-xs">
-            While waiting, use{" "}
-            <Link className="link" href="/sources">
-              the source registry
-            </Link>{" "}
-            to see which sources drive the queue.
-          </p>
         </div>
       </section>
-
-      <EmptyPanel title="No review queue is being served" showSourcesLink={false}>
-        <p>
-          The queue endpoint, <code className="num">/api/review/queue</code>, is owned by WS-G but
-          sits behind the API layer and the admin token. Nothing is stubbed with fake claims; the
-          console will list real low-confidence rows when the endpoint lands.
-        </p>
-      </EmptyPanel>
     </div>
   );
 }
