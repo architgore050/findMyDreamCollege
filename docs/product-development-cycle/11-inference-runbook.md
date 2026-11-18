@@ -1085,6 +1085,143 @@ at 64k. That is the intended split. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments
 is set automatically only on the CUDA path; it cannot help CPU and is not a
 substitute for stopping the other GPU consumer.
 
+## 8. Embeddings — bge-m3 on CPU (2026-11-18)
+
+Decision: **doc 10 §12**. The `embed` profile used to point at `local`
+(:8010) — the 26B chat server, which does not serve `/v1/embeddings` — so ER
+name matching and insight diversity silently ran on lexical heuristics. They
+now run on **bge-m3 in-process on CPU** (`FMD_EMBED_PROVIDER=cpu`, the
+default), costing **0 MiB VRAM** and leaving the one-GPU-tenant rule intact.
+An OpenAI-compatible `POST {FMD_EMBED_URL}/embeddings` backend
+(`FMD_EMBED_PROVIDER=embed_openai`, provider entry `embed_openai`) and the
+offline `mock` backend are env switches, never code changes.
+
+### 8.1 Cost and footprint
+
+| Item | Value | Class |
+|---|---|---|
+| VRAM for embeddings | **0 MiB** (in-process CPU; the 26B keeps its 1,153 MiB headroom) | structural, not measured |
+| System RAM, bge-m3 fp32 | ~2.2 GB of 32 GB | estimate [U] |
+| System RAM, bge-m3 int8 (ONNX, if later needed) | ~1.1 GB | estimate [U] |
+| Weights on disk (`~/.cache/huggingface`, bge-m3) | ~2.3 GB fp16 | estimate [U] |
+| Throughput | **unverified until the operator runs §8.4** | — |
+
+### 8.2 Install (once, online)
+
+```bash
+cd packages/pipeline
+uv sync --all-extras          # sentence-transformers ships with the `er` extra
+# prefetch the weights once so offline mode (§7) can use them:
+uv run python -c "from sentence_transformers import SentenceTransformer; \
+  SentenceTransformer('BAAI/bge-m3', device='cpu')"
+```
+
+Offline mode (`FMD_OFFLINE=1` / `HF_HUB_OFFLINE=1`) then loads from the local
+cache; a missing cache is a **loud** `embeddings_unavailable` naming exactly
+that, never a network retry loop.
+
+### 8.3 Start / stop / env
+
+Nothing to start or stop: the embedder lives in the pipeline process, lazily,
+on first use. Selection:
+
+```bash
+# default (no env needed)
+FMD_EMBED_PROVIDER=cpu          FMD_EMBED_MODEL=BAAI/bge-m3
+# tuning (process env, read by fmd/llm/embeddings.py)
+FMD_EMBED_DEVICE=cpu            # the only supported device for this backend
+FMD_EMBED_BATCH=32              # texts per encode() batch
+FMD_EMBED_DIM=1024              # must match the model; mismatch is rejected
+# second llama.cpp instance (bge-m3 GGUF, --embedding, port 8011) or hosted:
+FMD_EMBED_PROVIDER=embed_openai FMD_EMBED_URL=http://localhost:8011/v1
+# CI / offline tests:
+FMD_EMBED_PROVIDER=mock
+```
+
+**Never point the embed profile at `local`** (:8010): that process serves the
+gemma-4-26B chat GGUF and cannot embed. `models.yaml` says so at the profile.
+A `cpu` provider entry exists in `models.yaml` only because the registry
+loader cross-checks profile→provider; it is not an HTTP endpoint, and the
+doctor prints `in-process (cpu)` rather than a URL for it.
+
+### 8.4 Verify (copy-paste)
+
+```bash
+cd packages/pipeline
+# 1) doctor: the embed row must say provider=cpu, model=BAAI/bge-m3, no blockers
+uv run python -m fmd.cli llm doctor --live
+# expect: embed row usable, REACHABLE ok (cpu probe = import check, no weights
+# loaded, no download), and `degrades to embeddings_unavailable` only if the
+# `er` extra is missing.
+
+# 2) one real embedding call (the §8.1 throughput row stops being unverified):
+uv run python -m fmd.llm.embed_bench --probe
+# expect JSON: {"backend":"cpu", "kind":"sentence_transformers", "dim":1024,
+#   "vector_dim":1024, "ok":true, ...}; exit code 0.
+# A dimension_mismatch or embeddings_unavailable here is a config error; fix it,
+# do not lower the dimension.
+
+# 3) measurement (VRAM before/after, texts/s, p50/p95, recommendation):
+uv run python -m fmd.llm.embed_bench
+```
+
+`embed_bench` (full run) prints — and this is the **expected output shape**, with
+every number to be filled by the operator's own run; none are pre-filled and
+none may be quoted as measurements until they are:
+
+```json
+{
+  "backend": "cpu",
+  "vram_before": {"used_mib": "<nvidia-smi>", "total_mib": "<nvidia-smi>"},
+  "warmup_s": "<first call, includes model load>",
+  "rows": [
+    {"kind": "names|sentences", "texts": "1|32|256|1024", "wall_s": "<measured>",
+     "texts_per_s": "<measured>", "p50_ms": "<measured>", "p95_ms": "<measured>",
+     "tokens_in": "<measured or \"[not reported]\">"}
+  ],
+  "vram_after": "<same keys as vram_before>",
+  "vram_delta_mib": "<expected ~0 for the CPU path; a nonzero delta is a finding>",
+  "recommendation": {
+    "verdict": "cpu_backend_fit_for_purpose | cpu_backend_misses_budget",
+    "checks": [
+      {"check": "er_names_within_budget",      "measured_s": "<measured>", "budget_s": 60.0},
+      {"check": "insight_sentences_within_budget", "measured_s": "<measured>", "budget_s": 10.0}
+    ]
+  }
+}
+```
+
+Paste the filled JSON into §5 of this runbook; until then the §8.1 throughput
+row stays `unverified`. Exit code 1 means the measured batch missed a budget:
+tune `FMD_EMBED_BATCH` / torch threads before considering a backend switch
+(doc 10 §12.3).
+
+### 8.5 What `embeddings_unavailable` looks like (all surfaces, none silent)
+
+| Surface | What appears |
+|---|---|
+| `fmd llm doctor` | embed row `usable=false`, blockers name the exact env var (`FMD_EMBED_*`), and `degrades to embeddings_unavailable` — the run still exits 0 because the profile is optional |
+| ER audit (`er_audit.features` / resolution notes) | `features.embedding: null`; note `embedding_unavailable: <cause>` (the ER note prefix is the legacy singular token; the canonical `embeddings_unavailable` mode is carried on the scorer) |
+| Insight sets (`insight_sets.coverage_json`) | `embedding_mode: "embeddings_unavailable"` + `embedding_note: <cause>`; `semantic_duplicates: []` — selection ran lexically |
+| Scorer object (`fmd.er.similarity.EmbeddingScorer`) | `mode == "embeddings_unavailable"`, `reason` names the variable to fix; a backend that fails mid-run deactivates once, loudly, instead of retrying per pair |
+
+The lexical fallback itself is the documented heuristic and is unchanged:
+`token_jaccard + char_ratio` blend, acronym scoring, context matches with
+state/city/pincode conflict penalties (`fmd/er/similarity.py`). Insight
+selection without embeddings is predicate-string diversity only — recorded as
+such, so a reviewer can tell which evidence produced a shortlist.
+
+### 8.6 Common failures
+
+| Symptom | Meaning | Action |
+|---|---|---|
+| doctor: `sentence-transformers is not installed` | `er` extra missing from the sync | `uv sync --all-extras`; verify with `uv run python -c "import sentence_transformers"` |
+| `--probe` → `embeddings_unavailable ... weights could not be loaded` | weights never prefetched, or offline mode set without a cache | run the §8.2 prefetch once while online |
+| `dimension_mismatch: ... 768, expected 1024` | `FMD_EMBED_MODEL` or `FMD_EMBED_DIM` changed without the other | align `profiles.embed.dim` with the served model; vectors are never truncated |
+| embed row `embed_openai` + `FMD_EMBED_URL is empty` | URL unset | set it (`llama-server --embedding --pooling cls --port 8011` or a hosted endpoint); it is deliberately not defaulted |
+| `vram_delta_mib` far from 0 on the CPU path | something loaded CUDA (torch picked GPU, or another process moved) | check `nvidia-smi`; `FMD_EMBED_DEVICE=cpu` is load-bearing |
+| hosted endpoint 401/5xx mid-run | key/quota/server | the run records `embeddings_unavailable` with the reason and continues lexically; fix and re-run |
+
 ## Measured: KV budget and context ceiling (2026-11-17, RTX 5080 Laptop 16303 MiB)
 
 Sweep at `-ngl 999 -fa on -ctk q8_0 -ctv q8_0 -np 1 --jinja -rea off`, weights

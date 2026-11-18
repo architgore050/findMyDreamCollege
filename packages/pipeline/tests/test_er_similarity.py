@@ -15,6 +15,7 @@ from fmd.er.similarity import (
     token_jaccard,
 )
 from fmd.er.types import Alias, EntityCandidate, Mention
+from fmd.llm.embeddings import MockEmbeddings
 
 CFG = er_config(blocking={"backend": "deterministic"})
 
@@ -173,3 +174,104 @@ def test_scores_are_bounded_and_deterministic() -> None:
     assert 0.0 <= first.score <= 1.0
     assert first.model_dump() == second.model_dump()
     assert first.similarity_method == similarity_backend()
+
+
+# ----------------------------------------------------------------- W1 embed-provider:
+# the fallback must be visible. When the backend or model is absent the scorer
+# records the canonical `embeddings_unavailable` mode with the exact variable to
+# fix, keeps the lexical features, and leaves features.embedding empty.
+
+
+class _BrokenBackend:
+    """A backend that resolves but explodes on first use (bad URL, dead server)."""
+
+    name = "broken"
+
+    def similarity(self, left: str, right: str) -> float:
+        raise RuntimeError("connection refused")
+
+
+def test_unavailable_mode_names_the_exact_env_variable() -> None:
+    from fmd.config.models import ModelsConfig
+    from fmd.er.similarity import EmbeddingScorer
+
+    models = ModelsConfig.model_validate(
+        {
+            "providers": {},
+            "profiles": {
+                "embed": {
+                    "provider": "ghost",
+                    "model": "bge-m3",
+                    "dim": 1024,
+                    "provider_env": "FMD_EMBED_PROVIDER",
+                }
+            },
+            "budgets": {"daily_usd": 1, "per_run_usd": 1, "hard_stop": True, "cache": True},
+        }
+    )
+    embedder = EmbeddingScorer.from_models(models)
+    assert embedder.available is False
+    assert embedder.mode == "embeddings_unavailable"
+    assert "FMD_EMBED_PROVIDER" in embedder.reason
+
+
+def test_unavailable_embedder_keeps_lexical_features_and_surfaces_mode() -> None:
+    from fmd.config.models import ModelsConfig
+    from fmd.er.similarity import EmbeddingScorer
+
+    models = ModelsConfig.model_validate(
+        {
+            "providers": {},
+            "profiles": {
+                "embed": {
+                    "provider": "ghost",
+                    "model": "bge-m3",
+                    "dim": 1024,
+                    "provider_env": "FMD_EMBED_PROVIDER",
+                }
+            },
+            "budgets": {"daily_usd": 1, "per_run_usd": 1, "hard_stop": True, "cache": True},
+        }
+    )
+    embedder = EmbeddingScorer.from_models(models)
+    scored = score_pair(
+        Mention(text="Alpha Academy"),
+        normalise_name("Alpha Academy", CFG.lexicon),
+        EntityCandidate(entity_id=40, canonical_name="Alpha Academy"),
+        config=SimilarityConfig(use_embeddings=True),
+        lexicon=CFG.lexicon,
+        embedder=embedder,
+    )
+    assert scored.features.embedding is None
+    assert scored.features.token_jaccard == 1.0  # documented lexical features intact
+    assert scored.similarity_method == similarity_backend()
+
+
+def test_runtime_backend_failure_fails_fast_and_becomes_visible() -> None:
+    from fmd.er.similarity import EmbeddingScorer
+
+    embedder = EmbeddingScorer(backend=_BrokenBackend())
+    assert embedder.mode == "embeddings"
+    assert embedder.similarity("a", "b") is None
+    assert embedder.available is False, "one failure deactivates the path for the run"
+    assert embedder.mode == "embeddings_unavailable"
+    assert "connection refused" in embedder.reason
+    assert embedder.similarity("a", "b") is None  # no retry churn, still lexical
+
+
+def test_router_adapter_serves_pairwise_similarity_with_a_vector_cache() -> None:
+    from fmd.er.similarity import RouterEmbeddings
+
+    class _CountingMock(MockEmbeddings):
+        calls = 0
+
+        def embed(self, texts):
+            type(self).calls += 1
+            return super().embed(texts)
+
+    adapter = RouterEmbeddings(_CountingMock(dim=64))
+    first = adapter.similarity("Alpha Academy", "Alpha Academy")
+    assert first == 1.0
+    adapter.similarity("Alpha Academy", "Beta Institute")
+    adapter.similarity("Alpha Academy", "Beta Institute")  # cached pair
+    assert _CountingMock.calls == 2, "one embed call per distinct text, not per pair"

@@ -4,13 +4,23 @@ Insights are chosen to cover *predicates/aspects*, not to please. Hard-filter
 failures, gaming flags and recognition status are always included, separately
 from the greedy budget, and the coverage report is returned so the selection is
 auditable.
+
+Semantic diversity (optional, embeddings-gated): when a caller supplies an
+embedder, a candidate whose text is semantically near-identical (cosine ≥
+``semantic_diversity_min_similarity``) to an already-included insight's text is
+suppressed as a ``semantic_duplicate`` — two predicates phrasing the same fact
+must not both reach the shortlist. When embeddings are absent the gate is
+inactive and the documented lexical behaviour (predicate-string diversity
+only) applies; the ``embedding_mode`` field on the selection always records
+which path ran (``embeddings`` vs ``embeddings_unavailable`` + reason), so the
+degradation is visible in ``insight_sets.coverage_json``, never silent.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
@@ -43,6 +53,12 @@ class InsightSelection:
     covered_units: tuple[str, ...]
     uncovered_units: tuple[str, ...]
     stopped_reason: str
+    # Surfaced embedding mode (W1 embed-provider): "embeddings" when a supplied
+    # embedder actually gated the selection, "embeddings_unavailable" (+ note)
+    # when the semantic gate ran lexically because no backend was resolvable.
+    embedding_mode: str = "embeddings_unavailable"
+    embedding_note: str | None = None
+    semantic_duplicates: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -52,7 +68,22 @@ class InsightSelection:
             "covered_units": list(self.covered_units),
             "uncovered_units": list(self.uncovered_units),
             "stopped_reason": self.stopped_reason,
+            "embedding_mode": self.embedding_mode,
+            "embedding_note": self.embedding_note,
+            "semantic_duplicates": list(self.semantic_duplicates),
         }
+
+
+class DiversityEmbedder(Protocol):
+    """Duck-typed pairwise embedder (``fmd.er.similarity.EmbeddingScorer`` fits).
+
+    ``similarity`` may return ``None`` (backend failed for that pair): the gate
+    then fails open for that pair and the recorded note carries the reason.
+    """
+
+    available: bool
+
+    def similarity(self, left: str, right: str) -> float | None: ...
 
 
 def from_filter_failures(decisions: Iterable[Any]) -> tuple[Insight, ...]:
@@ -140,15 +171,40 @@ def select(
     max_insights: int | None = None,
     min_marginal_gain: float = 0.0,
     require_predicate_diversity: bool = True,
+    embedder: DiversityEmbedder | None = None,
+    semantic_diversity_min_similarity: float = 0.95,
 ) -> InsightSelection:
     """Greedy max-coverage over information units.
 
     The greedy budget applies to optional insights; mandatory insights are
     always included even when they exceed ``max_insights``.
+
+    ``embedder`` (optional) enables the semantic-duplicate gate described in the
+    module docstring. An embedder that is absent, unavailable or erroring keeps
+    the lexical behaviour and records ``embedding_mode="embeddings_unavailable"``
+    with the reason — the fallback is visible in the persisted selection.
     """
 
     if max_insights is not None and max_insights < 0:
         raise ValueError("max_insights must be >= 0")
+
+    semantic_gate = embedder is not None and bool(getattr(embedder, "available", False))
+    if embedder is None:
+        embedding_mode, embedding_note = (
+            "embeddings_unavailable",
+            (
+                "no embedding backend supplied; semantic diversity gate inactive "
+                "(lexical predicate diversity only)"
+            ),
+        )
+    elif not semantic_gate:
+        reason = getattr(embedder, "reason", None)
+        embedding_mode, embedding_note = (
+            "embeddings_unavailable",
+            (f"embedder unavailable: {reason}" if reason else "embedder unavailable"),
+        )
+    else:
+        embedding_mode, embedding_note = "embeddings", None
 
     seen_ids = {item.id for item in mandatory}
     mandatory_tuple = tuple(item for item in mandatory)
@@ -164,6 +220,8 @@ def select(
             covered_units=(),
             uncovered_units=(),
             stopped_reason="no_information_units",
+            embedding_mode=embedding_mode,
+            embedding_note=embedding_note,
         )
 
     covered: set[str] = set()
@@ -173,10 +231,28 @@ def select(
     candidates = [item for item in insights if item.id not in seen_ids]
     selected: list[Insight] = []
     covered_predicates = {item.predicate for item in mandatory_tuple}
+    covered_texts = [item.text for item in mandatory_tuple]
+    semantic_duplicates: list[str] = []
     budget = max_insights if max_insights is not None else len(candidates)
     stopped_reason = "max_insights_reached" if max_insights is not None else "no_candidates_left"
 
     while len(selected) < budget and candidates:
+        if semantic_gate:
+            surviving: list[Insight] = []
+            for candidate in candidates:
+                if _semantic_duplicate(
+                    candidate,
+                    covered_texts,
+                    embedder,
+                    semantic_diversity_min_similarity,
+                ):
+                    semantic_duplicates.append(candidate.id)
+                else:
+                    surviving.append(candidate)
+            candidates = surviving
+            if not candidates:
+                stopped_reason = "semantic_duplicates_suppressed"
+                break
         best: Insight | None = None
         best_gain = -1.0
         for candidate in candidates:
@@ -200,11 +276,16 @@ def select(
         selected.append(best)
         covered.update(best.coverage)
         covered_predicates.add(best.predicate)
+        covered_texts.append(best.text)
         candidates = [item for item in candidates if item.id != best.id]
         if len(selected) >= budget:
             stopped_reason = "max_insights_reached"
 
-    if not candidates and len(selected) < budget:
+    if (
+        not candidates
+        and len(selected) < budget
+        and stopped_reason != "semantic_duplicates_suppressed"
+    ):
         stopped_reason = "no_candidates_left"
 
     return InsightSelection(
@@ -214,4 +295,25 @@ def select(
         covered_units=tuple(sorted(covered)),
         uncovered_units=tuple(sorted(universe - covered)),
         stopped_reason=stopped_reason,
+        embedding_mode=embedding_mode,
+        embedding_note=embedding_note,
+        semantic_duplicates=tuple(semantic_duplicates),
     )
+
+
+def _semantic_duplicate(
+    candidate: Insight,
+    covered_texts: Sequence[str],
+    embedder: DiversityEmbedder,
+    threshold: float,
+) -> bool:
+    """True when ``candidate.text`` is near-identical to an included text.
+
+    A pair the embedder cannot score (returns ``None``) fails open: the
+    candidate stays eligible and the embedder's own note records why.
+    """
+    for text in covered_texts:
+        score = embedder.similarity(candidate.text, text)
+        if score is not None and score >= threshold:
+            return True
+    return False
