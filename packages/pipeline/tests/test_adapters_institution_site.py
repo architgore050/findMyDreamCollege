@@ -1,14 +1,28 @@
 from __future__ import annotations
 
 import pytest
-from test_adapters_support import FakeLadder, failed_result, fixture_text, ok_result
+from test_adapters_support import (
+    FakeLadder,
+    failed_result,
+    fixture_text,
+    ok_result,
+    with_params,
+)
 
 from fmd.adapters.base import SourceUnavailable
 from fmd.adapters.institution_site import InstitutionSiteAdapter
 from fmd.discover.base import DocumentRef
 
 NIRF_LISTING = "institution_site_nirf_listing_snippet.html"
+EVIDENCE_LISTING = "institution_site_evidence_listing_snippet.html"
 SEED = "https://mtct.ac.in/nirf/"
+DEMO_SEED = "https://demoihs.ac.in/downloads"
+#: The real observed negative case (RUHS, 2026-11-17): an administrative order
+#: whose URL contains "Fee" in an unrelated sense.
+ADMIN_FEE_URL = (
+    "https://demoihs.ac.in/files/admin/Guidelines-Fee-for-recognition-of-"
+    "Institution-as-Research-Centre-for-Ph.D-Course.pdf"
+)
 
 
 @pytest.fixture
@@ -137,3 +151,201 @@ def test_navigation_skips_news_events_and_gallery_pages(adapter) -> None:
 
     assert not any(token in url for url in nav for token in ("gallery", "news", "events"))
     assert nav[0].endswith("/naac/ssr")  # evidence-adjacent sections come first
+
+
+# ------------------------------------------------------------------- W1: evidence
+# targeting (2026-11-18). The measured 50-domain run produced fee_structure 0 /
+# seat_matrix 1: the per-domain document cap was spent on SSR/AQAR/NIRF mirrors.
+# These tests pin the evidence-type boost table, the administrative-fee negative
+# case, the PDF-first budget reserve and the family hints — all offline.
+
+
+def _refs_by_filename(refs: list[DocumentRef]) -> dict[str, DocumentRef]:
+    return {ref.url.rsplit("/", 1)[-1]: ref for ref in refs}
+
+
+def test_evidence_type_scoring_ranks_seat_and_fee_above_news_and_galleries(adapter) -> None:
+    refs = adapter.parse_listing(fixture_text(EVIDENCE_LISTING), base_url=DEMO_SEED)
+
+    assert refs, "the fixture must produce document refs"
+    scores = [ref.metadata["link_score"] for ref in refs]
+    assert scores == sorted(scores, reverse=True)
+    names = _refs_by_filename(refs)
+    # Seat and fee structure PDFs outrank everything else on the page.
+    top = {ref.url.rsplit("/", 1)[-1] for ref in refs[:2]}
+    assert top == {"Fee-Structure-2025-26.pdf", "Seat-Matrix-2025-26.pdf"}
+    # News, gallery, tender and staff-circular documents rank last.
+    bottom = [ref.url.rsplit("/", 1)[-1] for ref in refs[-4:]]
+    assert set(bottom) == {
+        "newsletter-january.pdf",
+        "annual-day-photos.pdf",
+        "tender-notice-laboratory.pdf",
+        "staff-circular-duty-roster.pdf",
+    }
+    for name in (
+        "newsletter-january.pdf",
+        "annual-day-photos.pdf",
+        "tender-notice-laboratory.pdf",
+        "staff-circular-duty-roster.pdf",
+    ):
+        assert (
+            names[name].metadata["link_score"] < names["NIRF-2026-Data.pdf"].metadata["link_score"]
+        )
+
+
+def test_admin_fee_order_is_not_a_fee_structure_candidate(adapter) -> None:
+    refs = adapter.parse_listing(fixture_text(EVIDENCE_LISTING), base_url=DEMO_SEED)
+    admin = _refs_by_filename(refs)[
+        "Guidelines-Fee-for-recognition-of-Institution-as-Research-Centre-for-Ph.D-Course.pdf"
+    ]
+
+    # Not classified: no family hint, no evidence-type candidacy.
+    assert "family" not in admin.metadata
+    assert not admin.metadata.get("evidence_types")
+    # Not boosted: an untyped document, never ahead of a real fee structure.
+    generic = _refs_by_filename(refs)["generic-application-form.pdf"]
+    assert admin.metadata["link_score"] == generic.metadata["link_score"]
+    assert admin.metadata["link_score"] < 40
+
+
+def test_seat_and_fee_family_hints_are_discovered_from_anchor_and_filename(adapter) -> None:
+    refs = adapter.parse_listing(fixture_text(EVIDENCE_LISTING), base_url=DEMO_SEED)
+    names = _refs_by_filename(refs)
+
+    assert names["Fee-Structure-2025-26.pdf"].metadata["family"] == "fee_structure"
+    assert names["Seat-Matrix-2025-26.pdf"].metadata["family"] == "seat_matrix"
+    # Types without a declared family boost the queue but never classify.
+    assert "family" not in names["Admission-Brochure-2026.pdf"].metadata
+    assert "family" not in names["NIRF-2026-Data.pdf"].metadata
+    assert "family" not in names["Placement-Report-2024-25.pdf"].metadata
+
+
+def test_registry_declared_family_suppresses_discovery_hints(registry) -> None:
+    source = with_params(
+        registry.sources.by_id("institution_sites"), extraction_family="placement_report"
+    )
+    refs = InstitutionSiteAdapter(source).parse_listing(
+        fixture_text(EVIDENCE_LISTING), base_url=DEMO_SEED
+    )
+
+    assert refs
+    assert all("family" not in ref.metadata for ref in refs)
+
+
+def test_evidence_scoring_table_comes_from_config(registry) -> None:
+    source = registry.sources.by_id("institution_sites")
+    baseline = InstitutionSiteAdapter(source).parse_listing(
+        fixture_text(EVIDENCE_LISTING), base_url=DEMO_SEED
+    )
+    fee_score = _refs_by_filename(baseline)["Fee-Structure-2025-26.pdf"].metadata["link_score"]
+    assert fee_score >= 40  # the configured fee_structure boost is applied
+
+    # Zeroing the fee weight in config drops the fee PDF back to the untyped
+    # pack: the table is registry data, not a constant in the adapter.
+    demoted = InstitutionSiteAdapter(
+        with_params(source, evidence_type_weights={"fee_structure": 0})
+    ).parse_listing(fixture_text(EVIDENCE_LISTING), base_url=DEMO_SEED)
+    demoted_score = _refs_by_filename(demoted)["Fee-Structure-2025-26.pdf"].metadata["link_score"]
+    assert demoted_score < fee_score
+
+    # An added type is data too: a custom hostel fee vocabulary boosts its links.
+    custom = InstitutionSiteAdapter(
+        with_params(
+            source,
+            evidence_types={
+                "hostel": {
+                    "filename": ["(?i)hostel[-_ ]?tariff"],
+                }
+            },
+            evidence_type_weights={"hostel": 60},
+        )
+    ).parse_listing(fixture_text(EVIDENCE_LISTING), base_url=DEMO_SEED)
+    assert custom, "custom evidence types must not break parsing"
+
+
+def test_default_evidence_table_applies_without_registry_params(registry) -> None:
+    source = registry.sources.by_id("institution_sites").model_copy(
+        update={"params": type(registry.sources.by_id("institution_sites").params)()}
+    )
+    html = '<a href="/files/fee/Fee-Structure-2026.pdf">Fee Structure</a>'
+    refs = InstitutionSiteAdapter(source).parse_listing(html, base_url=DEMO_SEED)
+
+    assert refs
+    assert refs[0].metadata["link_score"] >= 40
+    assert refs[0].metadata["family"] == "fee_structure"
+
+
+def test_pdf_first_reserve_keeps_evidence_documents_within_the_cap(registry) -> None:
+    source = with_params(
+        registry.sources.by_id("institution_sites"),
+        max_documents_per_domain=3,
+        pdf_first_reserve_percent=50,
+    )
+    ladder = FakeLadder({DEMO_SEED: ok_result(DEMO_SEED, fixture_text(EVIDENCE_LISTING))})
+    refs = list(InstitutionSiteAdapter(source, ladder=ladder).fetch(domains=[DEMO_SEED]))
+
+    assert len(refs) == 3  # the document cap is respected
+    # The reserved share (ceil(3 * 50%) = 2 slots) held only evidence-typed
+    # documents, and the best evidence filled the whole cap here.
+    assert all(ref.metadata.get("evidence_types") for ref in refs)
+    assert {ref.url.rsplit("/", 1)[-1] for ref in refs} == {
+        "Fee-Structure-2025-26.pdf",
+        "Seat-Matrix-2025-26.pdf",
+        "Admission-Brochure-2026.pdf",
+    }
+
+
+def test_pdf_first_reserve_caps_non_evidence_documents(registry) -> None:
+    source = with_params(
+        registry.sources.by_id("institution_sites"),
+        max_documents_per_domain=3,
+        pdf_first_reserve_percent=50,
+    )
+    html = "".join(f'<a href="/files/news/doc-{i}.pdf">News update {i}</a>' for i in range(5))
+    ladder = FakeLadder({DEMO_SEED: ok_result(DEMO_SEED, html)})
+    refs = list(InstitutionSiteAdapter(source, ladder=ladder).fetch(domains=[DEMO_SEED]))
+
+    # ceil(3 * 50%) = 2 slots are reserved for evidence; news documents may only
+    # fill the remaining one.
+    assert len(refs) == 1
+    assert all(not ref.metadata.get("evidence_types") for ref in refs)
+
+
+def test_pdf_first_reserve_zero_disables_the_reserve(registry) -> None:
+    source = with_params(
+        registry.sources.by_id("institution_sites"),
+        max_documents_per_domain=3,
+        pdf_first_reserve_percent=0,
+    )
+    html = "".join(f'<a href="/files/news/doc-{i}.pdf">News update {i}</a>' for i in range(5))
+    ladder = FakeLadder({DEMO_SEED: ok_result(DEMO_SEED, html)})
+    refs = list(InstitutionSiteAdapter(source, ladder=ladder).fetch(domains=[DEMO_SEED]))
+
+    assert len(refs) == 3  # plain top-N behaviour, no reserve
+
+
+def test_pdf_first_reserve_never_exceeds_the_document_cap(registry) -> None:
+    source = with_params(
+        registry.sources.by_id("institution_sites"),
+        max_documents_per_domain=2,
+        pdf_first_reserve_percent=100,
+    )
+    ladder = FakeLadder({DEMO_SEED: ok_result(DEMO_SEED, fixture_text(EVIDENCE_LISTING))})
+    refs = list(InstitutionSiteAdapter(source, ladder=ladder).fetch(domains=[DEMO_SEED]))
+
+    assert len(refs) == 2
+    assert all(ref.metadata.get("evidence_types") for ref in refs)
+
+
+def test_navigation_prefers_evidence_sections(adapter) -> None:
+    html = (
+        '<a href="/about/">About Us</a>'
+        '<a href="/admissions/fee-structure">Fee Structure</a>'
+        '<a href="/admissions/seat-matrix">Seat Matrix</a>'
+        '<a href="/gallery/">Photo Gallery</a>'
+    )
+    nav = adapter.parse_navigation(html, base_url=DEMO_SEED)
+
+    assert not any("gallery" in url for url in nav)
+    assert nav[0].endswith("/admissions/fee-structure")
+    assert any(url.endswith("/admissions/seat-matrix") for url in nav[:2])

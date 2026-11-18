@@ -1,8 +1,12 @@
 """Two-phase planner: Phase A defers, Phase B reads text (no network, no DB).
 
-The fixture text is a cover/index/fee excerpt in the shape of a real university
-PDF; the URLs are deliberately ordinary so Phase A cannot rely on a filename
-that already contains the answer.
+``FEE_TEXT`` is a genuine student fee structure naming its institution; the
+URLs are deliberately ordinary so Phase A cannot rely on a filename that
+already contains the answer. ``ADMIN_FEE_COVER`` is the cover/index of the
+real administrative order observed on RUHS ("Guidelines … Fee for recognition
+of Institution as Research Centre for Ph.D. Course") — it is the mandatory
+negative case: its "fee" words are institution-paid charges, so it defers on
+the URL token and then abstains once the text is read (W1 2026-11-18).
 """
 
 from __future__ import annotations
@@ -21,7 +25,8 @@ from fmd.plan import DocumentPlan, DocumentPlanner
 from fmd.plan.planner import DEFER_CODE
 
 FIXTURES = Path(__file__).parent / "fixtures" / "plan"
-FEE_TEXT = (FIXTURES / "fee_structure_cover.txt").read_text(encoding="utf-8")
+FEE_TEXT = (FIXTURES / "fee_structure_notice.txt").read_text(encoding="utf-8")
+ADMIN_FEE_COVER = (FIXTURES / "fee_structure_cover.txt").read_text(encoding="utf-8")
 NOISE_TEXT = (FIXTURES / "noise_office_order.txt").read_text(encoding="utf-8")
 ENTITY_NAME = "Demo University of Health Sciences"
 PLACEMENT_TEXT = (FIXTURES / "placement_report.txt").read_text(encoding="utf-8")
@@ -97,9 +102,7 @@ def _stage(
 def test_ambiguous_url_defers_then_text_plans_family_and_entity() -> None:
     url = "https://example.ac.in/uploads/fee-2025.pdf"
     document = _document(url)
-    planner = _planner(
-        [EntityCandidate(entity_id=7, canonical_name=ENTITY_NAME, state="Delhi")]
-    )
+    planner = _planner([EntityCandidate(entity_id=7, canonical_name=ENTITY_NAME, state="Delhi")])
 
     phase_a = planner.plan(document, phase="a")
     assert phase_a.state == "defer_for_text"
@@ -111,6 +114,32 @@ def test_ambiguous_url_defers_then_text_plans_family_and_entity() -> None:
     assert phase_b.family == "fee_structure"
     assert phase_b.entity_id == 7
     assert phase_b.defer_reason is None
+
+
+def test_admin_fee_cover_abstains_without_buying_text() -> None:
+    """The mandatory negative case, pinned on the real RUHS cover text.
+
+    The veto cancels the URL token "fee" (an institution-paid recognition
+    charge), so Phase A abstains below the acquire floor — no page acquisition
+    is spent — and Phase B on the cover text abstains too. It never classifies
+    as fee_structure.
+    """
+    url = (
+        "https://ruhsraj.org/main/Guidelines-Fee-for-recognition-of-"
+        "Institution-as-Research-Centre-for-Ph.D-Course.pdf"
+    )
+    document = _document(url)
+    planner = _planner([EntityCandidate(entity_id=7, canonical_name=ENTITY_NAME)])
+
+    phase_a = planner.plan(document, phase="a")
+    assert phase_a.family is None
+    assert phase_a.state == "abstained"
+    assert phase_a.abstain_reason == "family_undetected"
+
+    phase_b = planner.plan(document, text_sample=ADMIN_FEE_COVER, phase="b")
+    assert phase_b.family is None
+    assert phase_b.state == "abstained"
+    assert phase_b.abstain_reason == "family_undetected"
 
 
 def test_noise_text_abstains_without_buying_any_pages() -> None:
@@ -142,7 +171,7 @@ def test_noise_text_abstains_without_buying_any_pages() -> None:
 
 
 def test_phase_b_text_beats_phase_a_url_at_equal_scope() -> None:
-    # The URL says "placement", the document is a fee order. Text wins.
+    # The URL says "placement", the document is a student fee structure. Text wins.
     plan = _planner().plan(
         _document("https://example.ac.in/uploads/placement-circular.pdf"),
         text_sample=FEE_TEXT,

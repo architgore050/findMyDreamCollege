@@ -13,7 +13,7 @@ import pytest
 from fmd.db.repositories import DocumentUpsert
 from fmd.er import Alias, EntityCandidate, ERConfig
 from fmd.plan import DocumentPlan, DocumentPlanner, detect_family
-from fmd.plan.rules import DEFAULT_RULES, PlanRules, SignalWeights
+from fmd.plan.rules import DEFAULT_RULES, PlanRules, SignalWeights, score_families
 
 FIXTURES = Path(__file__).parent / "fixtures" / "plan"
 NEUTRAL_URL = "https://example.ac.in/notice-2025"
@@ -122,6 +122,75 @@ def test_unknown_declared_family_abstains_instead_of_guessing() -> None:
     assert plan.family is None
     assert plan.state == "abstained"
     assert plan.abstain_reason == "unsupported_family:not_a_family"
+
+
+# --- administrative-fee negative case (W1 2026-11-18) -------------------------
+# Observed on RUHS (2026-11-17): "Guidelines … Fee for recognition of Institution
+# as Research Centre for Ph.D. Course" — an administrative order whose URL token
+# "fee" is an institution-paid charge. It must never classify as fee_structure.
+
+ADMIN_FEE_URL = (
+    "https://ruhsraj.org/main/Guidelines-Fee-for-recognition-of-"
+    "Institution-as-Research-Centre-for-Ph.D-Course.pdf"
+)
+
+
+def test_admin_fee_order_is_vetoed_as_fee_structure() -> None:
+    text = (FIXTURES / "fee_admin_order.txt").read_text(encoding="utf-8")
+
+    fee = next(
+        item
+        for item in score_families(url=ADMIN_FEE_URL, text_sample=text)
+        if item.family == "fee_structure"
+    )
+    assert fee.score == 0.0
+    assert fee.signals["url_vetoed"] >= 1
+    assert fee.signals["text_vetoed"] >= 1
+
+    family, confidence, _signals, reason = detect_family(url=ADMIN_FEE_URL, text_sample=text)
+    assert family is None
+    assert confidence == 0.0
+    assert reason == "family_undetected"
+
+
+def test_admin_fee_order_planner_abstains_without_a_family() -> None:
+    text = (FIXTURES / "fee_admin_order.txt").read_text(encoding="utf-8")
+
+    plan = _planner().plan(_document(url=ADMIN_FEE_URL), text_sample=text)
+
+    assert plan.family is None
+    assert plan.family_source == "none"
+    assert plan.state == "abstained"
+    assert plan.abstain_reason == "family_undetected"
+
+
+def test_fee_fixture_still_detects_fee_structure() -> None:
+    text = (FIXTURES / "fee_structure.txt").read_text(encoding="utf-8")
+
+    family, confidence, _signals, reason = detect_family(
+        url="https://example.ac.in/files/fee/Fee-Structure-2025-26.pdf", text_sample=text
+    )
+
+    assert family == "fee_structure"
+    assert reason is None
+    assert confidence > 0
+
+
+def test_reference_hint_carries_fee_structure_and_registry_outranks_it() -> None:
+    text = (FIXTURES / "placement_report.txt").read_text(encoding="utf-8")
+
+    hinted = _planner().plan(_document(), family_hint="fee_structure", text_sample=text)
+    assert hinted.family == "fee_structure"
+    assert hinted.family_source == "reference"
+
+    registry = _planner().plan(
+        _document(),
+        source={"params": {"extraction_family": "placement_report"}},
+        family_hint="fee_structure",
+        text_sample=text,
+    )
+    assert registry.family == "placement_report"
+    assert registry.family_source == "registry"
 
 
 def test_single_confident_candidate_is_linked() -> None:
