@@ -1,0 +1,86 @@
+{
+  "case_id": "seat_semantics_v3",
+  "text_file": "page.txt",
+  "notes": [
+    "Seat-semantics fixture (verify@v3, W2 seat-semantics).",
+    "The page mirrors the real Tamil Nadu AHS UG seat-matrix page 1, including",
+    "each institution's printed 'Total' row, so both seat scopes exist in one",
+    "window: per-programme rows and document-stated aggregates.",
+    "t01 is the Stanley claim under its post-split predicate seats.intake:",
+    "quote '3. B.Sc. Medical Laboratory Technology\\n20' resolved by context_row",
+    "to the Stanley block (column 'Intake'). The registry description says the",
+    "field is the sanctioned intake for THIS programme at THIS institution -",
+    "one row of a seat matrix - so a row-scoped quote is CORRECT and must be",
+    "supported.",
+    "t02 is the discrimination this wave exists for: the SAME quote asserted as",
+    "seats.total with the same context. The description of seats.total says the",
+    "field is an aggregate the document itself states as a total; a single",
+    "programme row's value is a scope mismatch, so the claim must stay",
+    "wrong_field even after the repair pass. The wrong-row rule from verify@v2",
+    "is untouched - the value is printed, but it belongs to the row-scoped",
+    "field, not the aggregate one.",
+    "t03 is the genuine aggregate: quote 'Total\\n195', the Total row the",
+    "Stanley block itself prints. As seats.total it is supported: an aggregate",
+    "that the document states verifies, which is exactly what t02 must not.",
+    "t04 is the same intake field resolved on the Chengalpattu block, whose MLT",
+    "row is '1.' not '3.': a second row-scoped seats.intake claim that is",
+    "correct in its own right.",
+    "t05 quotes a bare amount with neither a currency nor a period printed",
+    "anywhere: a money+period claim the page never states. It must be rejected",
+    "(absent, no repair) - the money guard is unchanged by the seat split."
+  ],
+  "claims": [
+    {
+      "key": "t01",
+      "predicate": "seats.intake",
+      "quote": "3. B.Sc. Medical Laboratory Technology\n20",
+      "value": 20,
+      "unit": "count",
+      "context": "Govt. Stanley Medical College & Hospital, Chennai - 600 001",
+      "row_label": "3. B.Sc. Medical Laboratory Technology",
+      "column_header": "Intake",
+      "expected": "correct"
+    },
+    {
+      "key": "t02",
+      "predicate": "seats.total",
+      "quote": "3. B.Sc. Medical Laboratory Technology\n20",
+      "value": 20,
+      "unit": "count",
+      "context": "Govt. Stanley Medical College & Hospital, Chennai - 600 001",
+      "row_label": "3. B.Sc. Medical Laboratory Technology",
+      "column_header": "Intake",
+      "expected": "wrong_field"
+    },
+    {
+      "key": "t03",
+      "predicate": "seats.total",
+      "quote": "Total\n195",
+      "value": 195,
+      "unit": "count",
+      "context": "Govt. Stanley Medical College & Hospital, Chennai - 600 001",
+      "row_label": "Total",
+      "column_header": "Intake",
+      "expected": "correct"
+    },
+    {
+      "key": "t04",
+      "predicate": "seats.intake",
+      "quote": "1. B.Sc. Medical Laboratory Technology\n20",
+      "value": 20,
+      "unit": "count",
+      "context": "Chengalpattu Medical College & Hospital, Chengalpattu- 603 001",
+      "row_label": "1. B.Sc. Medical Laboratory Technology",
+      "column_header": "Intake",
+      "expected": "correct"
+    },
+    {
+      "key": "t05",
+      "predicate": "fee.tuition",
+      "quote": "Tuition fee 85000",
+      "value": 85000,
+      "unit": "INR",
+      "expected": "fabricated"
+    }
+  ]
+}

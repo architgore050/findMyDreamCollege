@@ -231,7 +231,7 @@ profiles:
     required: false            # claims stay unverified when this profile degrades
     degrade_reason: verifier_unavailable
     prompt_name: verify
-    prompt_version: v2
+    prompt_version: v3
     window_chars: 1200
     bundle_fields_per_call: 8
     max_claims_per_run: 500

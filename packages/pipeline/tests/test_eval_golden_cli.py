@@ -417,7 +417,7 @@ def test_list_reports_the_committed_set_status_and_gates(capsys) -> None:
     seat_row = next(
         row
         for row in by_id["tnmgrmu-ahs-ug-seat-matrix-2024-25"]["rows"]
-        if row["predicate"] == "seats.total"
+        if row["predicate"] == "seats.intake"
     )
     assert "row attribution" in seat_row["gate"]
     unverified = next(row for row in placement["rows"] if row["predicate"] == "fee.tuition")

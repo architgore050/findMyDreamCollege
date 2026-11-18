@@ -1596,11 +1596,19 @@ def _cross_guards(resolved: list[_ResolvedField]) -> dict[str, tuple[str, str]]:
                         f"{implied:.0f}, not placed {placed_value:g}",
                     )
 
+    # The sanctioned-intake bound. `seats.intake` is the row-scoped value the
+    # seat_matrix schema emits for a programme row; `seats.total` exists only
+    # when the document itself states an aggregate ("Total" row). Both bound a
+    # row's quota/admitted counts — the aggregate is still an upper bound — but
+    # a per-row guard against the aggregate alone would be weaker than one
+    # against the row's own intake, so the row-scoped bound is checked first.
+    intake = values("seats.intake")
     total = values("seats.total")
+    sanctioned = intake or total
     government = values("seats.government_quota")
     management = values("seats.management_quota")
-    if total is not None:
-        total_value = float(total[1])
+    if sanctioned is not None:
+        total_value = float(sanctioned[1])
         for quota in (government, management):
             if quota is not None and float(quota[1]) > total_value:
                 guards[quota[0]] = (
@@ -1619,8 +1627,8 @@ def _cross_guards(resolved: list[_ResolvedField]) -> dict[str, tuple[str, str]]:
                         ),
                     )
     admitted = values("seats.admitted")
-    if total is not None and admitted is not None:
-        total_value = float(total[1])
+    if sanctioned is not None and admitted is not None:
+        total_value = float(sanctioned[1])
         admitted_value = float(admitted[1])
         if admitted_value > total_value:
             guards[admitted[0]] = (

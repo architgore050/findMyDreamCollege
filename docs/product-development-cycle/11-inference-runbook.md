@@ -1440,8 +1440,10 @@ claims, `fee.tuition` and placement salary were effectively absent, so the
 affordability/DSR25 half of the product had no evidence to score. Wave 2 adds
 the missing fields to the `fee_structure` / `seat_matrix` / `placement_report`
 families, the guards that keep them honest, and their registry rows. The
-predicate table below is the authoritative summary; `config/predicates.yaml`
-remains the machine-readable source of truth (version `2026-11-18.2`). No
+predicate table below is a historical summary of wave 2 (the seat rows were
+re-split by §Seat predicate split and verifier descriptions, and
+`config/predicates.yaml` remains the machine-readable source of truth, now
+version `2026-11-18.3`, every row carrying a one-sentence `description`). No
 weight value changed: every new predicate is evidence-only (`component: null`)
 because scoring them would require new `weights.yaml` transforms, which is a
 scoring-workstream change, not an extraction one.
@@ -1451,6 +1453,8 @@ scoring-workstream change, not an extraction one.
 | `fee.mess` | null | money | period required | fee_structure v4 | mess/food charge; evidence-only |
 | `fee.other` | null | money | period required | fee_structure v4 | transport/internet/sports/misc; distinct from `fee.mandatory` |
 | `fee.period` | null | text | — | fee_structure v4 | document-level period (`year`\|`semester`\|`month`); supplies the period a money span omits |
+| `seats.intake` | admission_realism | count | — | seat_matrix v5 | sanctioned intake for THIS programme at THIS institution (one row of the matrix; the Stanley case) |
+| `seats.total` | admission_realism | count | — | seat_matrix v5 | aggregate across programmes/institutions; only when the document itself states a total row |
 | `seats.admitted` | null | count | — | seat_matrix v4 | filled count; guarded ≤ sanctioned intake |
 | `seats.duration_months` | null | months | — | seat_matrix v4 | consumed by programme materialisation; never derived from semesters |
 | `placement.salary_period` | null | text | — | placement_report v3 | document-level salary period; supplies the period a salary span omits |
@@ -1459,13 +1463,17 @@ scoring-workstream change, not an extraction one.
 Alternate spellings are declared **aliases**, not extra emitting fields — the
 golden placement fixture pins the canonical names
 (`placement.eligible_count`, `placement.placed_count`, `salary.median`,
-`salary.highest_package`) and the golden seat-matrix entry pins `seats.total`,
-so re-emitting the same fact under a second name would double-count claims and
+`salary.highest_package`) and the golden seat-matrix entry pins `seats.intake`
+(renamed from `seats.total` by the seat-semantics split: the Stanley quote is
+one programme's row in one college, so the aggregate name was the bug), so
+re-emitting the same fact under a second name would double-count claims and
 break the eval. The registry accepts both spellings and resolves them to one
-row: `seats.sanctioned → seats.total`, `placement.eligible →
-placement.eligible_count`, `placement.placed → placement.placed_count`,
-`placement.median_salary → salary.median`, `placement.highest_salary →
-salary.highest_package`.
+row: `seats → seats.intake`, `seats.sanctioned → seats.intake` (both legacy
+spellings meant "the sanctioned seat count for one programme", a row-scoped
+value — pointing them at the aggregate was the alias bug this wave fixed),
+`placement.eligible → placement.eligible_count`, `placement.placed →
+placement.placed_count`, `placement.median_salary → salary.median`,
+`placement.highest_salary → salary.highest_package`.
 
 **Guards added with the fields** (all in `fmd/extract/validate.py`, all
 reject — never coerce):
@@ -1496,14 +1504,19 @@ placement pipeline tests was re-recorded under the v3 prompt hash; the golden
 placement entry still replays its committed v2-era `llm_fixture` directly, so
 golden provenance stays 1.0.
 
-**Programme materialisation** consumes `seats.sanctioned` and
+**Programme materialisation** consumes `seats.intake` (the per-programme
+sanctioned intake, with its declared `seats.sanctioned` alias spelling) and
 `seats.duration_months` when present (`DEFAULT_PROGRAMME_MAPPING` and the
 `config/sources.yaml → institution_sites.params.programme_mapping` block list
-them after their canonical siblings, so canonical claims win when both
-exist). There is still no derivation: `curriculum.semesters` is never
-converted to months, and a `seats.duration_months` claim whose unit is not
-months is ignored. Every consumed claim id lands in
-`programmes.field_sources` under its own predicate.
+them in that order, so canonical claims win when both exist).
+`seats.total` is deliberately **not** consumed: an aggregate across
+programmes/institutions must never be written into one programme's `seats`
+column — a document that states only a total leaves `programmes.seats` NULL
+(`UNKNOWN` is a value). `seats.admitted` is a filled-count demand signal and is
+never treated as intake. There is still no derivation:
+`curriculum.semesters` is never converted to months, and a
+`seats.duration_months` claim whose unit is not months is ignored. Every
+consumed claim id lands in `programmes.field_sources` under its own predicate.
 
 ## Verifier row-context pass (2026-11-18, W2 verifier-row-context)
 
@@ -1932,3 +1945,116 @@ as `test_db.py`); the gate tests (403/503) run everywhere.
 * The corrected-quote check locates the quote in the stored extraction text;
   it cannot detect that the *correction itself* is true. Review remains a
   human judgement — the console only guarantees the span stays resolvable.
+
+## Seat predicate split and verifier descriptions (2026-11-18, W2 seat-semantics)
+
+**Two measured problems, one real run** (`gemma-4-26b-a4b-gguf`, verify@v2, the
+Tamil Nadu AHS UG seat matrix):
+
+1. **Semantic mismatch.** The Stanley claim was stored as `seats.total = 20`
+   with the quote `3. B.Sc. Medical Laboratory Technology\n20`, row context
+   (`context_row` → the Stanley block, column "Intake"), `expected_type=count` —
+   and the verifier still returned `wrong_field` after repair. It was arguably
+   right: `"total"` reads as an aggregate, while the quote is one programme's
+   row in one college. A verifier asked to confirm "this is the total" will
+   reject a row value. The predicate name was the bug, not the verdict.
+2. **Ambiguous predicates.** The verifier received the predicate NAME and its
+   TYPE but not its DEFINITION, so any predicate whose plain-English reading
+   differs from the intended reading gets mis-judged — this would recur beyond
+   seats.
+
+### What changed
+
+**The seat vocabulary is split** (`config/predicates.yaml`, version
+`2026-11-18.3`):
+
+| Predicate | Scope | Meaning |
+|---|---|---|
+| `seats.intake` | per-row | sanctioned intake for THIS programme at THIS institution — one row of a seat matrix under its intake/sanctioned column (the Stanley case) |
+| `seats.total` | aggregate | an aggregate the document itself states as a total (a printed "Total" row, an institution-wide figure); never a single programme row's value |
+| `seats.admitted` | per-row | the filled/admitted count for THIS programme row; unchanged, never intake |
+| `seats.duration_months` | per-row | programme duration printed on the matrix row; unchanged |
+
+Both scored predicates map to `admission_realism` with the same `seats`
+transform as before — no weight value changed, evidence tiers unchanged. The
+extraction schema (`SeatMatrix`) renamed `total_seats` → `intake`
+(`seats.intake`) and added `aggregate_seats` (`seats.total`), and
+`seat_matrix@v5` documents the split with a worked Total-row example (v1–v4
+kept and still replayable). `validate.py`'s guards bound quota/admitted counts
+by `seats.intake` first, falling back to a `seats.total` aggregate as the
+upper bound when no intake row was extracted — the guards did not get weaker.
+
+**Alias fix.** `seats.sanctioned` (and the bare legacy `seats` spelling) now
+alias `seats.intake`, not `seats.total`: both spellings meant "the sanctioned
+seat count for one programme", which is a row-scoped value.
+
+**Every registry row carries a one-sentence `description`** stating exactly
+what the predicate means and its scope (per-row vs aggregate, per-year vs
+total). 96 rows, all non-empty; the config loader and `PredicateRegistry`
+reject a missing or blank description at load, so a new predicate cannot ship
+undefined. The descriptions are the authority the verifier uses.
+
+**verify@v3 passes the definition.** The field payload is now
+`{key, field, quote, expected, description?, context?, row_label?,
+column_header?}`; `description` is resolved from the registry (aliases resolve
+to their canonical row's description; unknown predicates arrive `null`). The
+v3 prompt adds a "judge against the description, not the name" contract: when
+the description says per-programme and the quote is one table row, the
+row-scoped quote is CORRECT; when the description says aggregate and the quote
+wraps a single row's value, the scope itself is wrong and that stays
+`wrong_field`. `verify_repair@v3` mirrors it. `config/models.yaml` pins
+`prompt_version: v3`; v1/v2 are kept and still load.
+
+**Fixtures.** The committed replay fixtures were re-recorded under the v3
+prompt hashes (same verdict semantics as the v2 era). `row_context_v2`'s s01
+and s04 are now `seats.intake` (the real Stanley predicate after the split);
+s02 stays the wrong-row counterfactual. The new `seat_semantics_v3` case is
+the discrimination this wave exists for, offline: the same quote "3. B.Sc.
+Medical Laboratory Technology\n20" is `supported` as `seats.intake` (t01) and
+`wrong_field` after repair as `seats.total` (t02); the document's own "Total
+195" row verifies as `seats.total` (t03); a second row-scoped intake
+(Chengalpattu) is supported (t04); money-without-period is still `absent` with
+no repair (t05). The wrong-row rule from verify@v2 is untouched.
+
+**Golden row renamed.** The Stanley entry's expected predicate is now
+`seats.intake` — same value (20), same quote, same context/row block, same
+committed page-1 fixture, provenance still 1.0. No loader migration was
+needed: golden `expected` keys are the predicate strings themselves, and the
+loader re-checks the quote/context exactly as before (the rename is covered by
+`test_the_real_seat_matrix_row_is_verified_against_one_named_row`).
+
+**Programme materialisation** reads `seats.intake` (then its
+`seats.sanctioned` alias spelling) for the sanctioned-seats field, with every
+consumed claim id in `programmes.field_sources`. `seats.total` is deliberately
+not consumed — an aggregate across programmes/institutions must never be
+written into one programme's `seats` column — and `seats.admitted` is never
+treated as intake. A document that states only an aggregate leaves
+`programmes.seats` NULL: `UNKNOWN` is a value, and a wrong attribution is
+worse than none.
+
+**Scoring** is unchanged: `seats.intake` feeds `admission_realism` through the
+same `seats` transform `seats.total` used; having both vocabulary rows just
+means an entity can be scored from either (or both, averaged as components)
+without any weight edit.
+
+### Runbook table with definitions
+
+The predicate table above now carries the split rows; the authoritative
+per-predicate definitions (one sentence each, scope included) live in
+`config/predicates.yaml:predicates[<name>].description` — read those for any
+predicate before judging a claim against it, in code or by hand.
+
+### Verification results
+
+```bash
+cd packages/pipeline && uv sync --all-extras
+uv run ruff check .                                          # clean
+uv run pytest -q                                             # 978 passed (no DB)
+DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd uv run pytest -q   # 1039 passed
+uv run python -m fmd.cli eval --golden ../../data/golden     # provenance 1.0, gate PASS
+```
+
+`test_predicates.py` pins the registry side (descriptions non-empty, seat
+aliases, dangling references rejected); `test_verify.py` pins the v3 payload
+and the seat-semantics discrimination; `test_extract_schemas.py` pins v5 and
+the intake/aggregate spec pair.

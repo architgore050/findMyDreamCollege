@@ -486,6 +486,13 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
         if not predicate.strip():
             errors.append("predicates.yaml: predicate names must not be blank")
             continue
+        if not (rule.description or "").strip():
+            errors.append(
+                f"{where}: `description` is required. The verifier receives this "
+                "sentence as the authority for what the predicate means and its "
+                "scope (per-row vs aggregate, per-year vs total); a predicate "
+                "without one cannot be verified."
+            )
         if rule.component is None:
             if rule.scoring is not None:
                 errors.append(

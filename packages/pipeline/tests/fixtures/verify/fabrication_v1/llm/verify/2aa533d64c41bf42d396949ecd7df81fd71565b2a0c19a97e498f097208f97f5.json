@@ -1,0 +1,23 @@
+{
+  "content": {
+    "judgements": [
+      {
+        "key": "c07",
+        "verdict": "absent",
+        "reason": "recorded verdict for fabricated"
+      },
+      {
+        "key": "c09",
+        "verdict": "absent",
+        "reason": "recorded verdict for fabricated"
+      },
+      {
+        "key": "c10",
+        "verdict": "absent",
+        "reason": "recorded verdict for fabricated"
+      }
+    ]
+  },
+  "tokens_in": 900,
+  "tokens_out": 120
+}

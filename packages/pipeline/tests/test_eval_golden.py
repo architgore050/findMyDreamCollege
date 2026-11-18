@@ -44,7 +44,7 @@ def test_the_real_seat_matrix_row_is_verified_against_one_named_row() -> None:
     assert year.value == "A.Y. 2024-2025"
     assert year.quote == "A.Y. 2024-2025"
 
-    seats = entry.expected["seats.total"]
+    seats = entry.expected["seats.intake"]
     assert seats.status == "verified"
     assert seats.value == 20
     assert seats.quote == "B.Sc. Medical Laboratory Technology 20"
@@ -55,6 +55,9 @@ def test_the_real_seat_matrix_row_is_verified_against_one_named_row() -> None:
     assert seats.row.column_header == "Intake"
     assert seats.row.value_cell == "20"
     assert seats.row.table_page == 1
+    # W2 seat-semantics: the row-scoped predicate, not the aggregate vocabulary.
+    assert "seats.total" not in entry.expected
+    assert "seats.intake" in entry.verified_rows
 
 
 def test_backward_compatible_rows_without_context_still_load() -> None:

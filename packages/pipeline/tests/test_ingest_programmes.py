@@ -56,7 +56,7 @@ def test_claims_become_one_programme_with_sourced_fields() -> None:
         claim(10, 1, "curriculum.programme_name", "Bachelor of Medical Laboratory Sciences(B.MLS)"),
         claim(11, 1, "curriculum.duration_months", 48, unit="months"),
         claim(12, 1, "curriculum.internship_months", 6, unit="months"),
-        claim(13, 1, "seats.total", 60, unit="count"),
+        claim(13, 1, "seats.intake", 60, unit="count"),
         claim(14, 1, "accreditation.recognition_status", "recognised"),
     ]
     drafts, rejected = programme_drafts(claims, mapping())
@@ -74,7 +74,7 @@ def test_claims_become_one_programme_with_sourced_fields() -> None:
         "curriculum.programme_name": "10",
         "curriculum.duration_months": "11",
         "curriculum.internship_months": "12",
-        "seats.total": "13",
+        "seats.intake": "13",
         "accreditation.recognition_status": "14",
     }
     assert draft.needs_review is False
@@ -247,18 +247,38 @@ def test_wave2_seat_predicates_materialise_with_field_sources() -> None:
     assert draft.needs_review is False
 
 
-def test_seats_total_takes_precedence_over_the_sanctioned_spelling() -> None:
+def test_seats_intake_takes_precedence_over_the_sanctioned_spelling() -> None:
     """One number, two spellings: the canonical predicate wins when both exist."""
     claims = [
         claim(1, 3, "seats.programme_name", "B.Sc. MLT"),
-        claim(2, 3, "seats.total", 60, unit="count"),
+        claim(2, 3, "seats.intake", 60, unit="count"),
         claim(3, 3, "seats.sanctioned", 45, unit="count"),
     ]
     drafts, _ = programme_drafts(claims, mapping())
 
     assert drafts[0].seats == 60
-    assert drafts[0].field_sources["seats.total"] == "2"
+    assert drafts[0].field_sources["seats.intake"] == "2"
     assert "seats.sanctioned" not in drafts[0].field_sources
+
+
+def test_seats_total_aggregate_never_materialises_into_a_programme_row() -> None:
+    """The aggregate vocabulary is not a per-programme intake.
+
+    `seats.total` is an aggregate across programmes/institutions (a printed
+    Total row); writing it into one programme's seats column is the Stanley
+    mismatch. A document that states only an aggregate leaves seats NULL —
+    UNKNOWN is a value, and a wrong attribution is worse than none.
+    """
+    claims = [
+        claim(1, 3, "seats.programme_name", "B.Sc. MLT"),
+        claim(2, 3, "seats.total", 136, unit="count"),
+        claim(3, 3, "seats.admitted", 18, unit="count"),
+    ]
+    drafts, _ = programme_drafts(claims, mapping())
+
+    assert drafts[0].seats is None
+    assert "seats.total" not in drafts[0].field_sources
+    assert "seats.admitted" not in drafts[0].field_sources
 
 
 def test_curriculum_duration_takes_precedence_over_the_seat_matrix_duration() -> None:

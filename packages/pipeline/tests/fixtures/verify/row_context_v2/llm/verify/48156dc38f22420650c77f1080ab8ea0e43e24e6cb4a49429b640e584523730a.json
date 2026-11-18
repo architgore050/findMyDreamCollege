@@ -1,0 +1,28 @@
+{
+  "content": {
+    "judgements": [
+      {
+        "key": "s01",
+        "verdict": "supported",
+        "reason": "recorded verdict for the Stanley row claim"
+      },
+      {
+        "key": "s02",
+        "verdict": "wrong_field",
+        "reason": "recorded verdict for wrong_field"
+      },
+      {
+        "key": "s03",
+        "verdict": "absent",
+        "reason": "recorded verdict for fabricated"
+      },
+      {
+        "key": "s04",
+        "verdict": "supported",
+        "reason": "recorded verdict for correct"
+      }
+    ]
+  },
+  "tokens_in": 900,
+  "tokens_out": 120
+}

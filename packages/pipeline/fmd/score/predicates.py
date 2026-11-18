@@ -9,6 +9,9 @@ questions deterministically:
   inputs such as fees, exam dates and programme names);
 * what unit the claim must carry, and whether a denominator / printed period is
   mandatory (a mismatch is *rejected*, never coerced);
+* what the predicate *means* (its one-sentence ``description`` with its scope —
+  per-row vs aggregate, per-year vs total), so the second-pass verifier judges a
+  claim against the registry's definition, not the predicate's name;
 * which configured predicates are still unknown to the registry so the caller
   can report them instead of silently dropping evidence.
 
@@ -111,12 +114,15 @@ class PredicateRuleView:
     transform: str | None
     scale: float
     factor: float
+    description: str | None = None
     alias_of: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "predicate": self.predicate,
             "component": self.component,
+            "label": self.label,
+            "description": self.description,
             "unit_kind": self.unit_kind,
             "requires_denominator": self.requires_denominator,
             "requires_period": self.requires_period,
@@ -186,6 +192,14 @@ class PredicateRegistry:
             if not isinstance(spec, Mapping):
                 raise PredicateRegistryError(f"predicate {predicate!r} must be a mapping")
             scoring = spec.get("scoring") or {}
+            description = str(spec.get("description") or "").strip()
+            if not description:
+                raise PredicateRegistryError(
+                    f"predicate {predicate!r} has no `description`. The verifier "
+                    "receives this sentence as the authority for what the predicate "
+                    "means and its scope (per-row vs aggregate, per-year vs total); "
+                    "every registry row must carry one."
+                )
             rules[str(predicate)] = PredicateRuleView(
                 predicate=str(predicate),
                 component=spec.get("component"),
@@ -197,6 +211,7 @@ class PredicateRegistry:
                 transform=scoring.get("transform") if scoring else None,
                 scale=float(scoring.get("scale", 1.0) or 1.0) if scoring else 1.0,
                 factor=float(scoring.get("factor", 1.0) or 1.0) if scoring else 1.0,
+                description=description,
             )
         aliases_raw = raw.get("aliases") or {}
         if not isinstance(aliases_raw, Mapping):
@@ -231,6 +246,7 @@ class PredicateRegistry:
             transform=rule.transform,
             scale=rule.scale,
             factor=rule.factor,
+            description=rule.description,
             alias_of=str(predicate),
         )
 

@@ -27,8 +27,10 @@ class ClaimView:
     model so it can judge the *association* (does this value belong to this
     row/column?), and the spans widen the source window to cover that row.
     ``expected`` is the value type the predicate registry declares for the
-    predicate (``count``, ``money+period``, ...); the verifier fills it in, the
-    claim never supplies one.
+    predicate (``count``, ``money+period``, ...) and ``description`` is the
+    registry's one-sentence definition of the predicate, scope included
+    (verify@v3); the verifier fills both in from ``config/predicates.yaml`` —
+    the claim never supplies either, and an unknown predicate stays ``None``.
     """
 
     key: str
@@ -44,6 +46,7 @@ class ClaimView:
     context_span: tuple[int, int] | None = None
     row_span: tuple[int, int] | None = None
     expected: str | None = None
+    description: str | None = None
 
     @classmethod
     def from_claim(cls, claim: Any, *, key: str | None = None) -> ClaimView:

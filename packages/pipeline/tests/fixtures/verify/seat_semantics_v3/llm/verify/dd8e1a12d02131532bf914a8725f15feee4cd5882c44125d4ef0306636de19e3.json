@@ -1,0 +1,33 @@
+{
+  "content": {
+    "judgements": [
+      {
+        "key": "t01",
+        "verdict": "supported",
+        "reason": "recorded verdict for the Stanley row intake claim"
+      },
+      {
+        "key": "t02",
+        "verdict": "wrong_field",
+        "reason": "recorded verdict for a row value presented as the aggregate"
+      },
+      {
+        "key": "t03",
+        "verdict": "supported",
+        "reason": "recorded verdict for the document-stated Total row"
+      },
+      {
+        "key": "t04",
+        "verdict": "supported",
+        "reason": "recorded verdict for the Chengalpattu row intake claim"
+      },
+      {
+        "key": "t05",
+        "verdict": "absent",
+        "reason": "recorded verdict for fabricated"
+      }
+    ]
+  },
+  "tokens_in": 900,
+  "tokens_out": 120
+}

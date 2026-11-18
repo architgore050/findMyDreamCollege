@@ -88,7 +88,7 @@ def test_stage_writes_programme_and_reports_counts() -> None:
     stage = _stage(
         [
             _claim(1, 1, "curriculum.programme_name", "B.Sc. MLT"),
-            _claim(2, 1, "seats.total", 40, "count"),
+            _claim(2, 1, "seats.intake", 40, "count"),
         ]
     )
     summary = _summary()
@@ -98,7 +98,7 @@ def test_stage_writes_programme_and_reports_counts() -> None:
     assert summary.counts["programmes"] == 1
     assert summary.counts["programmes_created"] == 1
     assert summary.counts["programme_claims"] == 2
-    assert written[0].field_sources == {"curriculum.programme_name": "1", "seats.total": "2"}
+    assert written[0].field_sources == {"curriculum.programme_name": "1", "seats.intake": "2"}
 
 
 def test_reingest_is_idempotent_and_does_not_duplicate() -> None:
@@ -142,7 +142,7 @@ def test_unresolved_affiliation_stays_null_and_is_flagged() -> None:
 
 
 def test_no_name_claim_creates_no_programme() -> None:
-    stage = _stage([_claim(1, 1, "seats.total", 40, "count")])
+    stage = _stage([_claim(1, 1, "seats.intake", 40, "count")])
     summary = _summary()
     written = stage.run(summary=summary)
 

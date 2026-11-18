@@ -1,10 +1,14 @@
 """Counselling / intake seat matrix family.
 
-``total_seats`` (``seats.total``) is the printed sanctioned intake — the
-registry declares ``seats.sanctioned`` as its alias, so both vocabularies
-resolve to one row instead of emitting the same number twice. ``admitted`` is
-the *filled* count, a different fact, and is guarded against exceeding the
-sanctioned intake.
+``intake`` (``seats.intake``) is the sanctioned intake printed for ONE
+programme row at ONE institution — the Stanley case: a per-row value, never an
+aggregate. ``aggregate_seats`` (``seats.total``) exists only for a total the
+document itself states (a printed "Total" row); a row value must never be
+published under it, and an aggregate must never be attached to one programme.
+The registry declares ``seats.sanctioned`` (and the bare ``seats`` spelling) as
+aliases of ``seats.intake``, so the legacy vocabularies resolve to the row-scoped
+predicate. ``admitted`` is the *filled* count, a different fact, and is guarded
+against exceeding the sanctioned intake.
 """
 
 from __future__ import annotations
@@ -17,7 +21,8 @@ class SeatMatrix(FamilyDocument):
     SPECS = {
         "intake_year": FieldSpec("seats.intake_year", context=True),
         "programme_name": FieldSpec("seats.programme_name", unit_kind="text", context=True),
-        "total_seats": FieldSpec("seats.total", unit_required=True, unit_kind="count"),
+        "intake": FieldSpec("seats.intake", unit_required=True, unit_kind="count"),
+        "aggregate_seats": FieldSpec("seats.total", unit_required=True, unit_kind="count"),
         "admitted": FieldSpec("seats.admitted", unit_required=True, unit_kind="count"),
         "duration_months": FieldSpec("seats.duration_months", unit_kind="months"),
         "government_quota": FieldSpec(
@@ -31,7 +36,8 @@ class SeatMatrix(FamilyDocument):
 
     intake_year: ExtractedField | None = None
     programme_name: ExtractedField | None = None
-    total_seats: ExtractedField | None = None
+    intake: ExtractedField | None = None
+    aggregate_seats: ExtractedField | None = None
     admitted: ExtractedField | None = None
     duration_months: ExtractedField | None = None
     government_quota: ExtractedField | None = None

@@ -12,6 +12,12 @@ Contract:
   ``column_header``, plus the registry-declared ``expected`` value type, so the
   model can judge the *association* — does this value belong to this row and
   column? — instead of assuming a quote is a bare value;
+* every claim (verify@v3) also carries the registry's one-sentence
+  ``description`` of the predicate — its meaning and scope (per-row vs
+  aggregate, per-year vs total) — so the model judges the value against the
+  field's declared definition, not the name; when the description says
+  per-programme and the quote is one table row, the row-scoped quote is
+  correct;
 * it returns one forced verdict per field: ``supported | contradicted |
   absent | wrong_field``, optionally with a verbatim ``corrected_quote``;
 * several fields share a call only when their windows are *identical*, so the
@@ -172,11 +178,14 @@ def bundle_claims(
 
 
 def field_payload(view: ClaimView) -> dict[str, Any]:
-    """The verifier-visible field object (verify@v2 shape).
+    """The verifier-visible field object (verify@v2 shape, description in v3).
 
     Row-context keys are present only when the extraction resolved a row;
     ``expected`` is always present and may be ``null`` when the predicate
-    registry does not declare a type. The claimed value is never included.
+    registry does not declare a type; ``description`` (verify@v3) carries the
+    registry's definition of the predicate, scope included, and is omitted
+    when the registry does not know the predicate. The claimed value is never
+    included.
     """
     payload: dict[str, Any] = {
         "key": view.key,
@@ -184,6 +193,8 @@ def field_payload(view: ClaimView) -> dict[str, Any]:
         "quote": view.quote,
         "expected": view.expected,
     }
+    if view.description:
+        payload["description"] = view.description
     if view.context:
         payload["context"] = view.context
     if view.row_label:
@@ -272,18 +283,26 @@ class Verifier:
 
     # --------------------------------------------------------------------- public
     def _with_expected(self, view: ClaimView) -> ClaimView:
-        """Fill in the registry-declared expected type for the predicate.
+        """Fill in the registry-declared expected type and description.
 
-        The claim never supplies its own type: the expected type is config data
-        (``config/predicates.yaml``), resolved here so the prompt can gate on it
-        (verify@v2). An unknown predicate stays ``None``.
+        The claim never supplies its own type or definition: both are config
+        data (``config/predicates.yaml``), resolved here so the prompt can gate
+        on the type (verify@v2) and judge the field against its declared
+        meaning and scope (verify@v3). An unknown predicate stays ``None``.
         """
         if self.predicates is None:
             return view
-        return replace(view, expected=self._expected_type(view.predicate))
+        return replace(
+            view,
+            expected=self._expected_type(view.predicate),
+            description=self._description(view.predicate),
+        )
+
+    def _rule_for(self, predicate: str) -> Any | None:
+        return self.predicates.resolve(str(predicate)) if self.predicates else None
 
     def _expected_type(self, predicate: str) -> str | None:
-        rule = self.predicates.resolve(str(predicate)) if self.predicates else None
+        rule = self._rule_for(predicate)
         if rule is None or not rule.unit_kind:
             return None
         kind = rule.unit_kind
@@ -296,6 +315,18 @@ class Verifier:
         if kind in COUNT_KINDS:
             return "count"
         return kind
+
+    def _description(self, predicate: str) -> str | None:
+        """The registry's definition of the predicate, scope included (v3).
+
+        An alias resolves to its canonical row, so the verifier always sees the
+        canonical meaning — the claim's spelling is recorded in `field`.
+        """
+        rule = self._rule_for(predicate)
+        if rule is None:
+            return None
+        description = (getattr(rule, "description", None) or "").strip()
+        return description or None
 
     def verify_claims(
         self,

@@ -331,6 +331,7 @@ class PredicateRule(ConfigModel):
     requires_period: bool = False
     scoring: PredicateScoring | None = None
     notes: str | None = None
+    description: str | None = None
 
     @field_validator("unit_kind")
     @classmethod
