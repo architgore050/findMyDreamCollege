@@ -159,7 +159,7 @@ describe("api client", () => {
       501,
     );
 
-    const result = await apiReviewQueue({ fetchImpl });
+    const result = await apiReviewQueue("claim", {}, { fetchImpl });
 
     expect(result.state).toBe("not_implemented");
     if (result.state !== "not_implemented") throw new Error("expected not_implemented");
@@ -353,7 +353,7 @@ describe("profile-bearing POST endpoints", () => {
     expect(JSON.parse(String(init?.body))).toEqual({ profile });
   });
 
-  it("keeps a 501 on the review queue and does not treat it as a ranking", async () => {
+  it("still maps a 501 (legacy stubs, degraded proxies) on the review queue", async () => {
     const fetchImpl = fetchReturning(
       envelope({
         error: {
@@ -365,7 +365,7 @@ describe("profile-bearing POST endpoints", () => {
       501,
     );
 
-    const result = await apiReviewQueue({ fetchImpl });
+    const result = await apiReviewQueue("claim", {}, { fetchImpl });
 
     expect(result.state).toBe("not_implemented");
   });

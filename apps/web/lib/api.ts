@@ -1,11 +1,14 @@
 import { z } from "zod";
 
 import {
+  aliasReviewActionRequestSchema,
   apiErrorSchema,
   apiMetaSchema,
   claimEvidencePageSchema,
+  claimReviewActionRequestSchema,
   comparePayloadSchema,
   costPayloadSchema,
+  documentReviewActionRequestSchema,
   examWindowsPayloadSchema,
   exclusionsPayloadSchema,
   healthSchema,
@@ -17,9 +20,13 @@ import {
   profileRequestSchema,
   rankingsPayloadSchema,
   rankingsRequestSchema,
+  reviewActionResultSchema,
+  reviewAuditPayloadSchema,
+  reviewQueuePayloadSchema,
   sourcesPayloadSchema,
   type ApiMeta,
   type Profile,
+  type ReviewQueueKind,
 } from "./types";
 
 /**
@@ -67,8 +74,6 @@ export function apiBaseUrl(): string {
   const base = configured && configured.length > 0 ? configured : "http://localhost:8000";
   return base.replace(/\/+$/, "");
 }
-
-const unknownPayloadSchema = z.unknown();
 
 type ZodSchema<T> = z.ZodType<T, z.ZodTypeDef, unknown>;
 
@@ -147,6 +152,9 @@ interface RequestOptions {
   body?: unknown;
   /** Validated before the request leaves the browser (strictly no `any`). */
   bodySchema?: ZodSchema<unknown>;
+  /** Extra request headers. Only the review console uses this, for the
+   * operator-supplied admin token (X-Admin-Token); it is never persisted. */
+  headers?: Record<string, string>;
 }
 
 function readMeta(body: unknown): ApiMeta | null {
@@ -261,6 +269,7 @@ async function request<T>(
         headers: {
           accept: "application/json",
           ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+          ...(options.headers ?? {}),
         },
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
         cache: "no-store",
@@ -501,7 +510,79 @@ export function apiExclusions(profile: Profile, options?: RequestOptions) {
   });
 }
 
-/** WS-G (brief §18.7). Queue is served by the API workstream, not the browser. */
-export function apiReviewQueue(options?: RequestOptions) {
-  return request("/api/review/queue", unknownPayloadSchema, options);
+// --------------------------------------------------------------------------- review console (WS-G)
+
+/**
+ * WS-G (brief §18.7). All review endpoints are admin-token gated; the token is
+ * supplied per call by the console (in memory, never stored) via
+ * `options.headers["X-Admin-Token"]`.
+ */
+export function apiReviewQueue(
+  kind: ReviewQueueKind = "claim",
+  params: { limit?: number; offset?: number } = {},
+  options?: RequestOptions,
+) {
+  return request(
+    `/api/review/queue${queryString({ kind, limit: params.limit, offset: params.offset })}`,
+    reviewQueuePayloadSchema,
+    options,
+  );
+}
+
+/** One queue item's decision trail, newest first. */
+export function apiReviewAudit(
+  kind: ReviewQueueKind,
+  subjectId: number,
+  options?: RequestOptions,
+) {
+  return request(
+    `/api/review/audit${queryString({ kind, subject_id: subjectId })}`,
+    reviewAuditPayloadSchema,
+    options,
+  );
+}
+
+/**
+ * Accept / reject / correct a claim. A correction carries `corrected_quote`
+ * and inserts a superseding claim — the original is never mutated.
+ */
+export function apiReviewClaimAction(
+  claimId: number,
+  body: { action: "accept" | "reject" | "correct"; corrected_quote?: string; note?: string },
+  options?: RequestOptions,
+) {
+  return request(`/api/review/claims/${claimId}`, reviewActionResultSchema, {
+    ...options,
+    method: "POST",
+    body,
+    bodySchema: claimReviewActionRequestSchema,
+  });
+}
+
+/** Confirm / reject an alias suggestion. Confirming a `manual` alias arms the ER lock. */
+export function apiReviewAliasAction(
+  aliasId: number,
+  body: { action: "confirm" | "reject"; note?: string },
+  options?: RequestOptions,
+) {
+  return request(`/api/review/aliases/${aliasId}`, reviewActionResultSchema, {
+    ...options,
+    method: "POST",
+    body,
+    bodySchema: aliasReviewActionRequestSchema,
+  });
+}
+
+/** Resolve an ambiguous document: link the entity or mark it not applicable. */
+export function apiReviewDocumentAction(
+  documentId: number,
+  body: { action: "link_entity" | "mark_not_applicable"; entity_id?: number; note?: string },
+  options?: RequestOptions,
+) {
+  return request(`/api/review/documents/${documentId}`, reviewActionResultSchema, {
+    ...options,
+    method: "POST",
+    body,
+    bodySchema: documentReviewActionRequestSchema,
+  });
 }

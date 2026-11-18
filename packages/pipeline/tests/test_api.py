@@ -67,16 +67,20 @@ def test_database_unavailable_is_503(monkeypatch) -> None:
     [
         ("get", "/api/review/queue"),
         ("post", "/api/review/claims/1"),
+        ("post", "/api/review/aliases/1"),
+        ("post", "/api/review/documents/1"),
     ],
 )
-def test_unbuilt_endpoints_are_501(method: str, path: str, monkeypatch) -> None:
-    monkeypatch.setenv("FMD_ADMIN_TOKEN", "test-token")
+def test_review_endpoints_are_gated_and_no_longer_501(method: str, path: str, monkeypatch) -> None:
+    # WS-G has shipped: the review surface is no longer the 501 stub. Without a
+    # token the gate answers 403 before anything else; the full action contract
+    # lives in test_review_api.py.
+    monkeypatch.delenv("FMD_ADMIN_TOKEN", raising=False)
     kwargs = {"headers": {"X-Admin-Token": "test-token"}} if path.endswith("/1") else {}
     response = getattr(client, method)(path, **kwargs)
-    assert response.status_code == 501
+    assert response.status_code == 503
     body = response.json()
-    assert body["error"]["workstream"] == "WS-G"
-    assert "not implemented" in body["error"]["message"]
+    assert body["error"]["code"] == "admin_disabled"
     assert body.keys() >= ENVELOPE_KEYS
 
 

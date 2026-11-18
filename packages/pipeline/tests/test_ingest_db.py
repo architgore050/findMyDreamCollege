@@ -79,6 +79,7 @@ def test_0004_adds_roles_and_the_institution_domain_queue(schema_database, tmp_p
         "0005_claim_verification",
         "0006_programme_materialisation",
         "0007_dedupe_basis",
+        "0008_review_actions",
     ]
     assert run_migrations(schema_database) == []
 
