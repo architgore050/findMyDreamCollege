@@ -27,6 +27,7 @@ from typing import Any
 
 from fmd.acquire.errors import ACQUISITION_FAILED_PREFIX
 from fmd.db.repositories import ClaimsRepo, ExtractionsRepo, SnapshotsRepo
+from fmd.extract.chunking import CHUNK_BUDGET_EXHAUSTED, CHUNK_FAILED_PREFIX
 from fmd.extract.pipeline import (
     ExtractPipeline,
     ExtractTarget,
@@ -206,6 +207,30 @@ class Extractor:
                 "claims": len(result.claims),
                 "rejected": rejected,
             }
+            chunking = getattr(result, "chunking", None)
+            if isinstance(chunking, dict) and chunking.get("mode") == "chunked":
+                # W4: a long document was windowed. Surface the chunk outcome so
+                # a partial pass (some windows failed) or a capped pass (the
+                # window budget stopped early) never reads as a clean pass.
+                summary.bump("chunked_documents")
+                summary.bump("chunk_windows", int(chunking.get("window_count") or 0))
+                failed_windows = chunking.get("failed_windows") or []
+                if failed_windows:
+                    summary.bump("chunk_failed_windows", len(failed_windows))
+                    entry["chunk_failed_windows"] = list(failed_windows)
+                    entry["reason"] = f"{CHUNK_FAILED_PREFIX}{len(failed_windows)}"
+                if chunking.get("truncated"):
+                    summary.bump("chunk_budget_exhausted")
+                    entry["reason"] = entry.get("reason") or CHUNK_BUDGET_EXHAUSTED
+                entry["chunking"] = {
+                    "window_count": chunking.get("window_count"),
+                    "pages_covered": chunking.get("pages_covered"),
+                    "pages_total": chunking.get("pages_total"),
+                    "truncated": chunking.get("truncated"),
+                    "failed_windows": failed_windows,
+                    "deduped_claims": chunking.get("deduped_claims"),
+                    "resumed": chunking.get("resumed"),
+                }
             if verification is not None:
                 counts = verification.counts()
                 summary.bump("verified", counts["supported"])

@@ -2159,3 +2159,137 @@ uv run python -m fmd.cli eval --golden ../../data/golden   # provenance 1.0
 printed deadline time; month-precision with "to be notified" sitting). The
 month-precision, supersession, cycle and no-day-shift behaviours are pinned in
 `test_filters.py`; the /api/exams contract in `test_exams_api.py`.
+
+## 9. Context chunking — long documents (2026-11-18, W4)
+
+### The problem, measured
+
+Annual reports are the documents that carry accreditation, fee and placement
+evidence, and they are exactly the ones that could not be extracted: the whole
+canonical text went into one `user_message` and the server answered 400 with
+
+```
+request (195492 tokens) exceeds the available context size (65536)
+request (75572 tokens)  exceeds the available context size (65536)
+request (71621 tokens)  exceeds the available context size (65536)
+```
+
+which the provider layer classified as `http_error` — a network shape. A
+sizing fault looked like an outage, and a 200-page report could never produce a
+claim.
+
+### Sizing rule
+
+`config/models.yaml:chunking` drives everything; there are no constants in
+`fmd/extract/chunking.py`:
+
+```
+usable_tokens = context_tokens - output_tokens - prompt_headroom_tokens
+window_chars  = usable_tokens * chars_per_token          # body a call may carry
+overlap_chars = overlap_tokens  * chars_per_token        # default ~1k tokens ~ 1 page
+```
+
+`context_tokens` prefers the `chunking` block, falls back to the routed
+profile's own `context_tokens` (`bulk_extract`: 65536, the served `-c`),
+`output_tokens` to the profile's `max_tokens` (4096). A document whose canonical
+text fits `window_chars` takes the single-pass path exactly as before; a longer
+one is split by `fmd/extract/chunking.plan_windows`:
+
+* windows are **verbatim slices** of the canonical text, never rewrites;
+* cuts snap back to page boundaries (`\n\n`), then line boundaries, then the
+  raw budget cut — a table row is never split from its label;
+* every window after the first starts `overlap_chars` before the previous cut,
+  so a quote straddling a cut is whole in at least one of the two windows;
+* the plan is deterministic, which is what resume depends on.
+
+At the production numbers: `65536 - 4096 - 2048 = 59392` usable tokens →
+**237,568 chars per window** (≈15 pages), overlap 4,096 chars. A 200-page
+annual report (~470k chars) becomes 3 calls.
+
+### Spans stay absolute
+
+The model quotes from the window; `validate_document` resolves the quote
+against the window text exactly as in the single-pass path, and
+`chunking.to_absolute_offsets` then shifts `char_start`/`char_end` (plus the
+qualifier's `context_char_*`/`row_char_*` spans) by the window's absolute
+start. Every stored span is **global** in the original canonical text, so
+bbox/page projection (`fmd/acquire/canonical.py`) and the verifier's source
+windows work unchanged. One extraction row per run carries the full
+`extractions.text`, per-window outcomes and the chunk summary
+(`structure.chunking`).
+
+### Dedupe across overlapping windows
+
+The same fact recovered from two windows becomes ONE claim
+(`chunking.dedupe_claims`):
+
+* primary key `(predicate, char_start, char_end)` — same span, same window
+  overlap;
+* secondary key `(predicate, normalised value, row context)` — same value
+  (NFKC, grouping commas folded, `120` == `1,200` as a value shape is NOT
+  assumed: values are compared normalised) attributed to the same table row
+  (`table_index, row_index`), row label, or the model's `context` quote.
+
+Claims with no row context only merge on the identical span. Overlap duplicates
+neither inflate claim counts nor leak past a resume: the run's dedupe keys are
+stored per window (`claims_key`) and a retried window's claims are filtered
+against everything a prior run already stored.
+
+### Failure isolation, resume, cap
+
+| Code | Meaning | Where |
+|---|---|---|
+| `context_exceeded` | input cannot fit the served context: pre-flight (chunking disabled), or the provider 400 text matched an overflow signature | document outcome (abstention) |
+| `chunk_failed:<n>` | window *n* (1-based) failed; underlying provider reason is recorded beside it (`reason: timeout`, `reason: context_exceeded`, …) | per-window row in `structure.chunking.windows`, and aggregated on the run outcome (`reason: chunk_failed:<failed-count>`) |
+| `chunk_budget_exhausted` | the per-document window cap stopped the plan with text uncovered; `pages_covered` vs `pages_total` reported | run outcome when `chunking.truncated` |
+
+* One window failing never stops the others: the rest still run and the
+  document records partial success with per-window outcomes.
+* A rerun (`--force`, or the next run that re-selects the snapshot) **resumes**:
+  windows the prior run marked `ok`/`completed_prior_run` are skipped (matched
+  by absolute span, never by index) and only failed windows are re-called;
+  claims already stored are excluded from the new pass by their dedupe keys.
+* `max_windows_per_document` (24) bounds one run's cost: a 400-page report
+  (~27 windows) stops at the cap and reports `chunk_budget_exhausted` with the
+  covered page count. Raise the cap in config and rerun to extract the tail
+  without re-extracting the windows already done.
+* When **every** window attempted in a pass fails, nothing is persisted and the
+  document is recorded as an abstention `chunk_failed:<n>` — never an empty
+  success.
+
+`http_error` can no longer mask a sizing fault: the pipeline pre-flight raises
+`ContextExceeded` (reason `context_exceeded`) before wasting a call, and a
+provider 400 whose text matches `chunking.OVERFLOW_SIGNATURES` (llama.cpp's
+"exceeds the available context size", vLLM/OpenAI/Anthropic/Gemini phrasings)
+is reclassified the same way.
+
+### Known limits
+
+* Cross-field guards (`placed ≤ eligible`, rate-vs-counts) apply **within a
+  window**; fields split across windows are still verified per claim by the
+  verifier, but a guard that needs two siblings in one call can no longer see
+  them. Values stay honest; the guard coverage is narrower.
+* A money field whose `period_source` sibling is printed outside the window is
+  rejected (`missing_period`) rather than defaulted — the sibling must be
+  visible for the claim to exist. Raise `overlap_tokens` or let the document's
+  period lines repeat per page.
+* Scanned pages needing OCR are unchanged: chunking operates on canonical text
+  the tiers already produced; an image-only page that T2 cannot decode still
+  routes to T3 before any window is planned.
+
+### Tests (all offline unless a live DB is supplied)
+
+```bash
+cd packages/pipeline && uv run ruff check .
+uv run pytest tests/test_extract_chunking.py tests/test_extract_pipeline.py
+DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd uv run pytest -q
+uv run python -m fmd.cli eval --golden ../../data/golden   # provenance 1.0
+```
+
+`tests/fixtures/extract/chunk/annual_report.txt` is a 60-page synthetic report
+with evidence markers on fixed pages (12, 20, 34, 45, 52). The window-sizing
+arithmetic, boundary cuts, cap, dedupe keys, resume and the honest failure
+codes are pinned in `test_extract_chunking.py` (21 cases) and the pipeline
+behaviour — split, absolute offsets, overlap dedupe, one-window failure,
+all-fail persistence, cap, single-pass call count 1, `context_exceeded` never
+`http_error` — in `test_extract_pipeline.py`.
