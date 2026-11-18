@@ -11,13 +11,40 @@ from fmd.extract.pipeline import build_router
 from fmd.verify.casefile import evaluate_fixture_dir, load_case, run_case
 from fmd.verify.metrics import verification_metrics
 from fmd.verify.policy import VerifyPolicy, cost_per_1k_claims
+from fmd.verify.prompts import PROMPTS_DIR, load_prompt, prompt_versions
 from fmd.verify.schemas import VerdictBundle
 from fmd.verify.types import ClaimView
-from fmd.verify.verifier import Verifier, bounded_window, bundle_claims
+from fmd.verify.verifier import (
+    Verifier,
+    bounded_window,
+    bundle_claims,
+    field_payload,
+    seed_span,
+)
 
 TESTS = Path(__file__).parent
 CASE_DIR = TESTS / "fixtures" / "verify" / "fabrication_v1"
+ROW_CASE_DIR = TESTS / "fixtures" / "verify" / "row_context_v2"
 KEY_RE = re.compile(r'"key":\s*"([^"]+)"')
+
+STANLEY = "Govt. Stanley Medical College & Hospital, Chennai - 600 001"
+CHENGALPATTU = "Chengalpattu Medical College & Hospital, Chengalpattu- 603 001"
+MLT_LABEL = "3. B.Sc. Medical Laboratory Technology"
+MLT_QUOTE = f"{MLT_LABEL}\n20"
+
+#: The Stanley/Chengalpattu shape, small enough to assert on directly. The same
+#: label and the same number print under two institutions' blocks; only the row
+#: context tells them apart.
+ROW_PAGE = (
+    "SEAT MATRIX FOR THE A.Y. 2024-2025\n"
+    "S.N Name of the Institution Course Intake\n"
+    "1 Madras Medical College, Chennai - 600 003\n"
+    "2. B.Sc Radiotherapy Technology\n20\n"
+    f"2 {STANLEY}\n"
+    f"{MLT_QUOTE}\n"
+    f"3 {CHENGALPATTU}\n"
+    "1. B.Sc. Medical Laboratory Technology\n20\n"
+)
 
 
 class ScriptedRouter:
@@ -126,6 +153,149 @@ def test_prompt_never_includes_the_claimed_value() -> None:
         assert '"value"' not in call["user"]
 
 
+def test_claim_view_carries_row_context_from_the_qualifier() -> None:
+    claim = {
+        "id": 7,
+        "predicate": "seats.total",
+        "quote": MLT_QUOTE,
+        "char_start": 10,
+        "char_end": 10 + len(MLT_QUOTE),
+        "value": 20,
+        "qualifier": {
+            "disambiguation": "context_row",
+            "context_quote": STANLEY,
+            "context_char_start": 0,
+            "context_char_end": len(STANLEY),
+            "row": {
+                "row_label": MLT_LABEL,
+                "column_header": "Intake",
+                "value_cell": "20",
+                "table_page": 1,
+            },
+            "row_char_start": 10,
+            "row_char_end": 60,
+        },
+    }
+    view = ClaimView.from_claim(claim)
+    assert view.context == STANLEY
+    assert view.row_label == MLT_LABEL
+    assert view.column_header == "Intake"
+    assert view.context_span == (0, len(STANLEY))
+    assert view.row_span == (10, 60)
+    assert view.expected is None  # the verifier fills it from the registry
+    # The claimed value and the printed value cell never reach the payload.
+    payload = field_payload(view)
+    assert payload["key"] == "7" and payload["quote"] == MLT_QUOTE
+    assert payload["context"] == STANLEY
+    assert payload["row_label"] == MLT_LABEL and payload["column_header"] == "Intake"
+    assert "value" not in payload and "value_cell" not in payload
+
+
+def test_field_payload_omits_absent_row_context() -> None:
+    view = ClaimView("k1", "placement.rate", "80%", 0, 3)
+    payload = field_payload(view)
+    assert set(payload) == {"key", "field", "quote", "expected"}
+
+
+def test_expected_type_comes_from_the_predicate_registry(registry) -> None:
+    verifier = Verifier(
+        ScriptedRouter(lambda keys, _repair, _call: dict.fromkeys(keys, "supported")),
+        policy=_policy(),
+        predicates=registry.predicates,
+    )
+    assert verifier._expected_type("seats.total") == "count"
+    assert verifier._expected_type("placement.eligible_count") == "count"
+    assert verifier._expected_type("fee.tuition") == "money+period"
+    assert verifier._expected_type("salary.median") == "money+period"
+    assert verifier._expected_type("placement.rate") == "percentage+denominator"
+    assert verifier._expected_type("accreditation.naac_grade") == "grade"
+    assert verifier._expected_type("seats.intake_year") == "text"
+    assert verifier._expected_type("predicates.not.in.the.registry") is None
+
+
+def test_verify_claims_fill_expected_but_never_the_value(registry) -> None:
+    router = ScriptedRouter(lambda keys, _repair, _call: dict.fromkeys(keys, "supported"))
+    verifier = Verifier(router, policy=_policy(), predicates=registry.predicates)
+    claim = {
+        "id": 1,
+        "predicate": "fee.tuition",
+        "quote": "Tuition fee 85000",
+        "char_start": 0,
+        "char_end": 17,
+        "value": 85000,
+        "qualifier": {"context_quote": STANLEY, "row": {"row_label": MLT_LABEL}},
+    }
+    verifier.verify_claims([claim], text="Tuition fee 85000")
+    assert router.calls[0]["keys"] == ["claim-1"]
+    user = router.calls[0]["user"]
+    assert '"expected": "money+period"' in user
+    assert '"context"' in user and STANLEY in user
+    assert '"row_label"' in user
+    assert '"column_header"' not in user  # qualifier did not resolve one
+    assert '"value"' not in user and '"value_cell"' not in user
+
+
+VERIFY_V2_CONTRACT_MARKERS = (
+    "a bare value",
+    "a label + value pair inside one table row",
+    "a value plus unit and period",
+    "does the value this quote wraps belong to this row and this column",
+    "wrong_field",
+    "printed currency and a printed period",
+    "percentage+denominator",
+    "never output a value",
+    "corrected_quote",
+)
+
+REPAIR_V2_CONTRACT_MARKERS = (
+    "a bare value",
+    "a label + value pair inside one table row",
+    "does the value this quote wraps belong to this row and this column",
+    "genuinely wrong association",
+    "printed currency and a printed period",
+    "percentage+denominator",
+    "never emit a value",
+)
+
+
+def test_v2_prompts_state_the_quote_shape_and_row_contract() -> None:
+    for name, markers in (
+        ("verify", VERIFY_V2_CONTRACT_MARKERS),
+        ("verify_repair", REPAIR_V2_CONTRACT_MARKERS),
+    ):
+        prompt = load_prompt(name, "v2")
+        flattened = " ".join(prompt.text.split()).lower()
+        for marker in markers:
+            assert " ".join(marker.split()).lower() in flattened, (
+                f"{name}@v2 is missing the contract statement {marker!r}"
+            )
+
+
+def test_verify_prompt_family_is_complete_and_v2_is_latest(registry) -> None:
+    """The verify family keeps its history: contiguous v1..vN, every file real."""
+    for name in ("verify", "verify_repair"):
+        versions = prompt_versions(name)
+        assert versions, f"{name} must ship at least one prompt file"
+        assert versions == [f"v{index}" for index in range(1, len(versions) + 1)], (
+            f"{name} prompt history must be contiguous v1..vN with every earlier "
+            f"version kept; got {versions}"
+        )
+        assert {"v1", "v2"}.issubset(set(versions))
+        for version in versions:
+            prompt = load_prompt(name, version)
+            assert prompt.path == PROMPTS_DIR / name / f"{version}.md"
+            assert prompt.path.is_file()
+            assert prompt.text.strip(), f"{name}/{version}.md must not be empty"
+            if version != "v1":  # v1 predates the version-label convention
+                assert prompt.version in prompt.text, (
+                    f"{name}/{version}.md must carry its version label in the body"
+                )
+        assert load_prompt(name).version == "v2"
+    assert load_prompt("verify", "v1").ref == "verify@v1"
+    assert load_prompt("verify_repair", "v1").ref == "verify_repair@v1"
+    assert VerifyPolicy.load(registry.models).prompt_version == "v2"
+
+
 # --------------------------------------------------------------------------- synthetic fixture
 
 
@@ -133,7 +303,7 @@ def test_synthetic_fabrication_fixture_rejects_all_seven(registry) -> None:
     case = load_case(CASE_DIR)
     assert sum(1 for claim in case.claims if claim.expected != "correct") == 7
     router = build_router(registry.models, mock=True, fixtures_dir=str(case.fixtures_dir))
-    verifier = Verifier(router)
+    verifier = Verifier(router, predicates=registry.predicates)
     run, metrics = run_case(case, verifier)
 
     payload = metrics.as_dict()
@@ -160,6 +330,77 @@ def test_eval_fixture_dir_reports_the_same_numbers(registry) -> None:
     assert payload["fabrication_caught"] == 7
     assert payload["correct_rejected"] == 0
     assert payload["verified_rate"] == 1.0
+
+
+# --------------------------------------------------------------------------- row-context case
+
+
+def test_row_context_fixture_supports_the_stanley_claim_and_rejects_the_counterfactual(
+    registry,
+) -> None:
+    """The wave-2 anti-regression, offline: same value 20, two rows, opposite fates.
+
+    s01 is the real Stanley claim (label+value quote, context_row to the Stanley
+    block): verify@v2 must accept what v1 discarded as wrong_field. s02 is the
+    same quote asserted against the Chengalpattu block, whose MLT row is "1."
+    not "3.": the wrong-row rule must survive the v2 relaxation, repair included.
+    """
+    case = load_case(ROW_CASE_DIR)
+    assert len(case.claims) == 4
+    router = build_router(registry.models, mock=True, fixtures_dir=str(case.fixtures_dir))
+    verifier = Verifier(router, predicates=registry.predicates)
+    run, metrics = run_case(case, verifier)
+
+    decisions = {decision.key: decision for decision in run.decisions}
+    assert decisions["s01"].status == "supported"
+    assert decisions["s01"].row_context is True
+    assert decisions["s01"].expected_type == "count"
+    assert decisions["s01"].prompt_version == "verify@v2"
+
+    assert decisions["s02"].status == "rejected"
+    assert decisions["s02"].verdict == "wrong_field"
+    assert decisions["s02"].repair_attempted is True
+    assert decisions["s02"].reason == "verifier_wrong_field_after_repair"
+
+    assert decisions["s03"].status == "rejected"
+    assert decisions["s03"].verdict == "absent"
+    assert decisions["s03"].repair_attempted is False  # absent rejects immediately
+    assert decisions["s03"].expected_type == "money+period"
+
+    assert decisions["s04"].status == "supported"  # bare value, no row context
+    assert decisions["s04"].row_context is False
+
+    payload = metrics.as_dict()
+    assert payload["fabrication_caught"] == 2
+    assert payload["fabricated_total"] == 2
+    assert payload["false_accepts"] == 0
+    assert payload["correct_rejected"] == 0
+    assert payload["supported"] == 2
+    assert payload["rejected"] == 2
+    assert payload["verified_rate"] == 1.0
+    assert run.calls == 2  # one bundle (all four share the small page) + one repair
+    assert run.repairs == 1
+
+
+def test_row_context_fixture_eval_reports_the_same_numbers(registry) -> None:
+    payload = evaluate_fixture_dir(ROW_CASE_DIR, registry)
+    assert payload["fabrication_caught"] == 2
+    assert payload["false_accepts"] == 0
+    assert payload["correct_rejected"] == 0
+    assert payload["verified_rate"] == 1.0
+    assert payload["calls"] == 2 and payload["repairs"] == 1
+
+
+def test_row_context_fixture_quotes_and_contexts_resolve() -> None:
+    manifest = json.loads((ROW_CASE_DIR / "case.json").read_text(encoding="utf-8"))
+    text = (ROW_CASE_DIR / manifest["text_file"]).read_text(encoding="utf-8")
+    for claim in manifest["claims"]:
+        assert claim["quote"] in text
+        if "context" in claim:
+            assert claim["context"] in text
+    # The counterfactual pair: one quote, two different rows.
+    assert manifest["claims"][0]["quote"] == manifest["claims"][1]["quote"]
+    assert manifest["claims"][0]["context"] != manifest["claims"][1]["context"]
 
 
 # --------------------------------------------------------------------------- repair handling
@@ -202,6 +443,118 @@ def test_repair_that_fails_rejects_the_claim_with_a_reason() -> None:
     assert decision.reason == "verifier_wrong_field_after_repair"
     assert decision.repair_attempted is True
     assert run.repairs == 1
+
+
+# --------------------------------------------------------------------------- row context (scripted)
+
+
+class PayloadRouter:
+    """Answers from the exact field payload it saw, recording every call."""
+
+    def __init__(self, decide: Any) -> None:
+        self.decide = decide
+        self.calls: list[dict[str, Any]] = []
+
+    def call(self, purpose, schema, system, user, input_ref):
+        payload = json.loads(user[user.index("{") : user.rindex("}") + 1])
+        fields = payload.get("fields", [payload])
+        self.calls.append({"user": user, "repair": "PREVIOUS VERDICT" in user, "fields": fields})
+        verdicts = {field["key"]: self.decide(field, self.calls[-1]["repair"]) for field in fields}
+        return VerdictBundle.model_validate(
+            {
+                "judgements": [
+                    {"key": key, "verdict": verdict, "reason": "scripted"}
+                    for key, verdict in verdicts.items()
+                ]
+            }
+        )
+
+
+def _row_claim(key: str, context: str) -> ClaimView:
+    start = ROW_PAGE.index(MLT_QUOTE)
+    return ClaimView(
+        key=key,
+        predicate="seats.total",
+        quote=MLT_QUOTE,
+        char_start=start,
+        char_end=start + len(MLT_QUOTE),
+        value=20,
+        context=context,
+        row_label=MLT_LABEL,
+        column_header="Intake",
+        context_span=(ROW_PAGE.index(context), ROW_PAGE.index(context) + len(context)),
+    )
+
+
+def test_counterfactual_same_value_two_rows_one_supported_one_rejected(registry) -> None:
+    """Same quote span, two different row contexts: the model must see both."""
+    seen_contexts: list[str] = []
+
+    def decide(field: dict[str, Any], _repair: bool) -> str:
+        seen_contexts.append(field.get("context") or "")
+        if field.get("context") == STANLEY:
+            return "supported"
+        return "wrong_field"
+
+    router = PayloadRouter(decide)
+    verifier = Verifier(router, policy=_policy(), predicates=registry.predicates)
+    run = verifier.verify_claims(
+        [_row_claim("stanley", STANLEY), _row_claim("chengalpattu", CHENGALPATTU)],
+        text=ROW_PAGE,
+    )
+    decisions = {decision.key: decision for decision in run.decisions}
+    assert decisions["stanley"].status == "supported"
+    assert decisions["chengalpattu"].status == "rejected"
+    assert decisions["chengalpattu"].verdict == "wrong_field"
+    assert decisions["chengalpattu"].reason == "verifier_wrong_field_after_repair"
+    # Both contexts reached the model; the claimed value never did.
+    assert STANLEY in seen_contexts and CHENGALPATTU in seen_contexts
+    for call in router.calls:
+        assert '"value"' not in call["user"]
+        for field in call["fields"]:
+            assert field.get("column_header") == "Intake"
+            assert field.get("row_label") == MLT_LABEL
+
+
+def test_row_context_widens_the_window_to_cover_the_row() -> None:
+    # The context anchor sits far above the quote but within the window budget.
+    page = STANLEY + "\n" + ("padding text " * 20) + "\n" + MLT_QUOTE
+    start = page.index(MLT_QUOTE)
+    view = ClaimView(
+        key="k1",
+        predicate="seats.total",
+        quote=MLT_QUOTE,
+        char_start=start,
+        char_end=start + len(MLT_QUOTE),
+        context=STANLEY,
+        context_span=(0, len(STANLEY)),
+    )
+    assert seed_span(view, chars=400) == (0, start + len(MLT_QUOTE))
+    router = PayloadRouter(lambda _field, _repair: "supported")
+    verifier = Verifier(router, policy=_policy(window_chars=400))
+    verifier.verify_claims([view], text=page)
+    # The window the model saw contains both the quote and the row context.
+    window = router.calls[0]["user"].split("<<<\n")[1].split("\n>>>")[0]
+    assert MLT_QUOTE in window and STANLEY in window
+
+
+def test_row_context_never_blows_the_window_budget() -> None:
+    """A block wider than window_chars falls back to the quote-centred window."""
+    page = STANLEY + "\n" + ("padding " * 400) + MLT_QUOTE
+    start = page.index(MLT_QUOTE)
+    view = ClaimView(
+        key="k1",
+        predicate="seats.total",
+        quote=MLT_QUOTE,
+        char_start=start,
+        char_end=start + len(MLT_QUOTE),
+        context=STANLEY,
+        context_span=(0, len(STANLEY)),
+    )
+    assert seed_span(view, chars=200) == (start, start + len(MLT_QUOTE))
+    lo, hi, window = bounded_window(page, *seed_span(view, chars=200), chars=200)
+    assert lo <= start and hi >= start + len(MLT_QUOTE)
+    assert len(window) <= 200 + 20
 
 
 # --------------------------------------------------------------------------- budget discipline
@@ -269,7 +622,7 @@ def test_verification_persists_only_its_own_columns() -> None:
         assert claim_id in {1, 2}
         assert verification.status == "supported"
         assert verification.verified_by is None  # scripted router has no profile
-        assert verification.notes["prompt_version"] == "verify@v1"
+        assert verification.notes["prompt_version"] == "verify@v2"
         assert verification.notes["verdict"] == "supported"
 
 

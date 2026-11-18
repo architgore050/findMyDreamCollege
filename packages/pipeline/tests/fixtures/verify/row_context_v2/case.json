@@ -1,0 +1,65 @@
+{
+  "case_id": "row_context_v2",
+  "text_file": "page.txt",
+  "notes": [
+    "Row-context regression fixture (verify@v2, W2 verifier-row-context).",
+    "The page mirrors the real Tamil Nadu AHS UG seat-matrix page 1: the same",
+    "programme label and the same number print on several institutions' rows,",
+    "so a label+value quote is ambiguous without the row context.",
+    "s01 is the real Stanley claim: quote '3. B.Sc. Medical Laboratory",
+    "Technology\\n20' resolved by context_row to the Stanley block (column",
+    "'Intake'). verify@v1 judged it wrong_field because its prompt assumed a",
+    "quote is only the value; v2 judges the row/column association and accepts",
+    "it - the false rejection this wave fixes.",
+    "s02 is the counterfactual: the SAME quote asserted against the",
+    "Chengalpattu block, whose MLT row is '1.' not '3.'. The value 20 is",
+    "printed in the window but in another institute's row, so the claim must",
+    "stay wrong_field even after the repair pass. This is the anti-regression:",
+    "v2 did not relax the wrong-row rule to make s01 pass.",
+    "s03 quotes a bare amount with neither a currency nor a period printed",
+    "anywhere: a money+period claim the page never states. It must be rejected",
+    "(absent, no repair), mirroring the extractor's missing_period guard.",
+    "s04 is a bare-value quote ('20 seats') from a prose line with no row",
+    "context: it verifies exactly as it did under v1."
+  ],
+  "claims": [
+    {
+      "key": "s01",
+      "predicate": "seats.total",
+      "quote": "3. B.Sc. Medical Laboratory Technology\n20",
+      "value": 20,
+      "unit": "count",
+      "context": "Govt. Stanley Medical College & Hospital, Chennai - 600 001",
+      "row_label": "3. B.Sc. Medical Laboratory Technology",
+      "column_header": "Intake",
+      "expected": "correct"
+    },
+    {
+      "key": "s02",
+      "predicate": "seats.total",
+      "quote": "3. B.Sc. Medical Laboratory Technology\n20",
+      "value": 20,
+      "unit": "count",
+      "context": "Chengalpattu Medical College & Hospital, Chengalpattu- 603 001",
+      "row_label": "3. B.Sc. Medical Laboratory Technology",
+      "column_header": "Intake",
+      "expected": "wrong_field"
+    },
+    {
+      "key": "s03",
+      "predicate": "fee.tuition",
+      "quote": "Tuition fee 85000",
+      "value": 85000,
+      "unit": "INR",
+      "expected": "fabricated"
+    },
+    {
+      "key": "s04",
+      "predicate": "seats.total",
+      "quote": "20 seats",
+      "value": 20,
+      "unit": "count",
+      "expected": "correct"
+    }
+  ]
+}

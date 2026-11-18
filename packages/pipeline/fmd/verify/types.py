@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -17,6 +18,17 @@ class ClaimView:
     ``value`` is deliberately absent from the dataclass used to build prompts:
     the second pass must not anchor on the number the extractor produced.
     ``value`` is carried only for metrics/tests, never sent to the model.
+
+    Row context (verify@v2): when the extractor resolved the quote against a
+    table row, the claim's ``qualifier`` carries the row identifier the
+    extractor used (``context_quote``) plus the resolved row identity
+    (``row.row_label`` / ``row.column_header``) and, when available, the source
+    spans of the context anchor and of the row. The context travels to the
+    model so it can judge the *association* (does this value belong to this
+    row/column?), and the spans widen the source window to cover that row.
+    ``expected`` is the value type the predicate registry declares for the
+    predicate (``count``, ``money+period``, ...); the verifier fills it in, the
+    claim never supplies one.
     """
 
     key: str
@@ -26,6 +38,12 @@ class ClaimView:
     char_end: int
     claim_id: int | None = None
     value: Any = None
+    context: str | None = None
+    row_label: str | None = None
+    column_header: str | None = None
+    context_span: tuple[int, int] | None = None
+    row_span: tuple[int, int] | None = None
+    expected: str | None = None
 
     @classmethod
     def from_claim(cls, claim: Any, *, key: str | None = None) -> ClaimView:
@@ -36,6 +54,14 @@ class ClaimView:
         start = int(get("char_start") or 0)
         end = int(get("char_end") or start)
         predicate = str(get("predicate", ""))
+        qualifier = get("qualifier") or {}
+        if not isinstance(qualifier, Mapping):  # pragma: no cover - malformed claim
+            qualifier = {}
+        row = qualifier.get("row") or {}
+        if not isinstance(row, Mapping):  # pragma: no cover - malformed claim
+            row = {}
+        context_span = _span_of(qualifier, "context_char_start", "context_char_end")
+        row_span = _span_of(qualifier, "row_char_start", "row_char_end")
         return cls(
             key=key or (str(claim_id) if claim_id is not None else f"{predicate}:{start}:{end}"),
             predicate=predicate,
@@ -44,7 +70,27 @@ class ClaimView:
             char_end=end,
             claim_id=int(claim_id) if claim_id is not None else None,
             value=get("value"),
+            context=_text_or_none(qualifier.get("context_quote")),
+            row_label=_text_or_none(row.get("row_label")),
+            column_header=_text_or_none(row.get("column_header")),
+            context_span=context_span,
+            row_span=row_span,
         )
+
+
+def _text_or_none(value: Any) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _span_of(source: Mapping[str, Any], start_key: str, end_key: str) -> tuple[int, int] | None:
+    start, end = source.get(start_key), source.get(end_key)
+    if start is None or end is None:
+        return None
+    try:
+        return int(start), int(end)
+    except (TypeError, ValueError):  # pragma: no cover - malformed qualifier
+        return None
 
 
 @dataclass(frozen=True)
@@ -58,6 +104,8 @@ class VerificationDecision:
     corrected_quote: str | None = None
     prompt_version: str = ""
     verified_by: str | None = None
+    expected_type: str | None = None
+    row_context: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +118,8 @@ class VerificationDecision:
             "corrected_quote": self.corrected_quote,
             "prompt_version": self.prompt_version,
             "verified_by": self.verified_by,
+            "expected_type": self.expected_type,
+            "row_context": self.row_context,
         }
 
 

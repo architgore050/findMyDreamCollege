@@ -46,6 +46,11 @@ def _versions(name: str) -> list[str]:
     return sorted(versions, key=lambda version: int(version[1:]))
 
 
+def prompt_versions(name: str) -> list[str]:
+    """Every committed version of one verifier prompt, oldest first (v1..vN)."""
+    return _versions(name)
+
+
 def load_prompt(name: str, version: str | None = None) -> Prompt:
     versions = _versions(name)
     if not versions:

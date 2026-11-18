@@ -1505,6 +1505,95 @@ converted to months, and a `seats.duration_months` claim whose unit is not
 months is ignored. Every consumed claim id lands in
 `programmes.field_sources` under its own predicate.
 
+## Verifier row-context pass (2026-11-18, W2 verifier-row-context)
+
+**The bug this fixes was measured, not hypothetical.** The wave-2 row-scoped
+extraction contract (§Wave-2 fee/seat/placement predicate table) made the
+extractor emit quotes that wrap the value in its own row's wording. On the real
+Tamil Nadu AHS UG seat matrix, `seats.total` = 20 for the Stanley block carried
+the quote `"3. B.Sc. Medical Laboratory Technology\n20"` with
+`qualifier.context_quote = "Govt. Stanley Medical College & Hospital, Chennai -
+600 001"` (`disambiguation: context_row`, row "3. B.Sc. Medical Laboratory
+Technology", column "Intake"). The verifier was still `verify@v1`, whose prompt
+assumes a quote is only the value: it judged that quote `wrong_field` **and the
+repair pass returned the same verdict**, so a correct claim was discarded. That
+is a false rejection — lost recall, not a caught error — and it hit exactly the
+row-scoped claims wave 2 exists to produce.
+
+### What verify@v2 changes
+
+`config/models.yaml → profiles.verify.prompt_version: v2`; `verify/v1.md` and
+`verify_repair/v1.md` are kept and still load (the verify family now has the
+same completeness assertion as the extract families: contiguous v1..vN, every
+file real and non-empty, latest = v2). The v2 prompt documents three things the
+v1 prompt got wrong by omission:
+
+| Contract | What the prompt now says |
+|---|---|
+| Quote shapes | A quote may be a bare value ("20 seats"), a label+value pair inside one table row ("3. B.Sc. Medical Laboratory Technology 20", label and number possibly on separate lines), or a value plus unit/period ("₹30,000 per annum"). A row label inside the quote is not a different field. |
+| Row-scoped association | With `context`/`row_label`/`column_header` present, the thing verified is the association: does the value this quote wraps belong to this row and this column? A genuinely wrong row/column stays `wrong_field` (repair included); a correct association is never `wrong_field` merely because the quote repeats the row label. |
+| Expected type gates | `count` / `money+period` / `percentage+denominator` / `grade` / `year` — a money claim whose window prints neither currency nor period is `absent`; a count next to a label is normal. |
+
+### Plumbing (all in `fmd/verify/`, nothing in the extract path)
+
+* **Row context travels in the payload.** `ClaimView` now carries `context`,
+  `row_label`, `column_header` (parsed from `qualifier.context_quote` and
+  `qualifier.row`), plus the qualifier's `context_char_start/end` and
+  `row_char_start/end` spans. The field object the model sees is
+  `{key, field, quote, expected, context?, row_label?, column_header?}` — the
+  claimed value and the row's printed `value_cell` are still never sent.
+* **Expected type is registry data, not claim data.** The `Verifier` takes the
+  predicate registry (`config/predicates.yaml`) via the new `predicates=`
+  argument, wired from `fmd verify`, `fmd eval --verify-fixtures`, the
+  orchestrator's inline verifier and the offline case runner. `money` →
+  `money+period`; `percent`/`ratio` with `requires_denominator` →
+  `percentage+denominator`; `count`/`hours` → `count`; unknown kinds pass
+  through verbatim; an unknown predicate arrives as `null`.
+* **Window sizing covers the row.** The window is seeded from the union of the
+  quote span and the row-context spans, so the verifier sees the row it is
+  asked to judge; a block wider than `window_chars` falls back to the
+  quote-centred window (the context still travels as payload text). Bundling
+  still shares only identical windows, so the same quote asserted against two
+  different rows is judged with each row's own context.
+* **Verdict semantics unchanged otherwise.** Same four verdicts, `absent`
+  still rejects immediately, `contradicted`/`wrong_field` still get exactly one
+  single-field repair call, the verifier still never emits a value, and
+  decisions now record `expected_type` and `row_context` in
+  `verification_notes` next to `prompt_version: verify@v2` for review.
+
+### Fixtures (offline, no network, recorded replay only)
+
+* `fabrication_v1` was re-recorded under the v2 prompt hashes (same scripted
+  verdicts as before, so its metrics are unchanged: 7/7 caught, 0 false
+  accepts, 0 correct rejected, 2 bundles + 1 repair). The old v1-hash files
+  stay for replay of historical runs, matching the wave-2 convention.
+* New case `tests/fixtures/verify/row_context_v2/` is the anti-regression that
+  matters. One page modelled on the real Stanley page, four claims:
+  `s01` the real Stanley claim (label+value quote, context_row) → `supported`;
+  `s02` the **counterfactual** — the same quote asserted against the
+  Chengalpattu block, whose MLT row is "1." not "3." → `wrong_field`, repair
+  re-issued `wrong_field`, final `rejected`
+  (`verifier_wrong_field_after_repair`); `s03` a money claim quoting a bare
+  amount with no currency or period anywhere → `absent`, no repair; `s04` a
+  bare-value quote ("20 seats") with no row context → `supported` exactly as
+  under v1. Metrics: 2/2 caught, 0 false accepts, 0 correct rejected,
+  verified_rate 1.0.
+
+```bash
+cd packages/pipeline
+uv run pytest tests/test_verify.py -q          # incl. the counterfactual tests
+uv run python -m fmd.cli eval --golden ../../data/golden \
+  --verify-fixtures tests/fixtures/verify/row_context_v2
+# expect: verification: verified_rate 1.0 fabrication_caught 2/2 correct_rejected 0
+```
+
+**Known limits, stated plainly:** the committed fixtures prove the plumbing
+(call → forced verdict → selective repair → persistence → metrics) against the
+verdicts the v2 prompt contract requires; they do not prove a live model
+generalises. The next operator pass over the real Stanley PDF with
+`FMD_VERIFY_PROVIDER=local` should confirm `s01`-shaped claims come back
+`supported` on hardware, and that `s02`-shaped claims still do not.
+
 ## Dedupe audit (2026-11-18)
 
 The 19:22 crawl dropped 73 of 94 fetched documents as `near_duplicate_simhash`.
