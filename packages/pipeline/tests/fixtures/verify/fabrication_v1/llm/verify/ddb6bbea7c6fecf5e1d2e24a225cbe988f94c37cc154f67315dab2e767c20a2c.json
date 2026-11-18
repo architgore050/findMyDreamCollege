@@ -1,0 +1,56 @@
+{
+  "content": {
+    "judgements": [
+      {
+        "corrected_quote": null,
+        "key": "c05",
+        "reason": "recorded verdict for fabricated",
+        "verdict": "absent"
+      },
+      {
+        "corrected_quote": null,
+        "key": "c01",
+        "reason": "recorded verdict for correct",
+        "verdict": "supported"
+      },
+      {
+        "corrected_quote": null,
+        "key": "c02",
+        "reason": "recorded verdict for correct",
+        "verdict": "supported"
+      },
+      {
+        "corrected_quote": null,
+        "key": "c03",
+        "reason": "recorded verdict for correct",
+        "verdict": "supported"
+      },
+      {
+        "corrected_quote": null,
+        "key": "c11",
+        "reason": "recorded verdict for wrong_field",
+        "verdict": "wrong_field"
+      },
+      {
+        "corrected_quote": null,
+        "key": "c04",
+        "reason": "recorded verdict for correct",
+        "verdict": "supported"
+      },
+      {
+        "corrected_quote": null,
+        "key": "c06",
+        "reason": "recorded verdict for fabricated",
+        "verdict": "absent"
+      },
+      {
+        "corrected_quote": null,
+        "key": "c08",
+        "reason": "recorded verdict for fabricated",
+        "verdict": "absent"
+      }
+    ]
+  },
+  "tokens_in": 900,
+  "tokens_out": 120
+}

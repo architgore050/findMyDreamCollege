@@ -444,7 +444,9 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     try:
         claims = ClaimsRepo(database)
         router = build_router(registry.models, mock=args.mock, fixtures_dir=args.fixtures)
-        verifier = Verifier(router=router, claims=claims, policy=policy)
+        verifier = Verifier(
+            router=router, claims=claims, policy=policy, predicates=registry.predicates
+        )
         run = verify_pending(
             claims=claims,
             extractions=ExtractionsRepo(database),

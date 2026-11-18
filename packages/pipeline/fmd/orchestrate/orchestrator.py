@@ -349,6 +349,7 @@ class Orchestrator:
             store=self._store(),
             router=self.router,
             tool_version=self.tool_version,
+            predicates=self.registry.predicates,
         )
         extractor.run(summary=summary, limit=limit, force=force)
         summary.metadata["tool_version"] = self.tool_version

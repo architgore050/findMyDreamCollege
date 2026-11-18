@@ -1,0 +1,14 @@
+{
+  "content": {
+    "judgements": [
+      {
+        "corrected_quote": null,
+        "key": "c11",
+        "reason": "recorded verdict for wrong_field (repair re-issue)",
+        "verdict": "wrong_field"
+      }
+    ]
+  },
+  "tokens_in": 900,
+  "tokens_out": 120
+}

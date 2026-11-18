@@ -68,6 +68,7 @@ class Extractor:
         verifier: Any | None = None,
         verifier_factory: Any = None,
         verify: bool = True,
+        predicates: Any | None = None,
     ) -> None:
         self.snapshots = snapshots
         self.documents = documents
@@ -81,6 +82,7 @@ class Extractor:
         self.verifier = verifier
         self.verifier_factory = verifier_factory
         self.verify = verify
+        self.predicates = predicates
         self._verifier_ready = False
         self._verifier_cost = 0.0
         self._verifier_exhausted = False
@@ -263,7 +265,11 @@ class Extractor:
                     return None
                 from fmd.verify import Verifier
 
-                self.verifier = Verifier(self.router, claims=self.claims)
+                self.verifier = Verifier(
+                    self.router,
+                    claims=self.claims,
+                    predicates=self.predicates,
+                )
         except Exception as exc:  # config/prompt absence degrades, never crashes
             logger.warning("verification disabled for this run: %s", exc)
             self.verifier = None

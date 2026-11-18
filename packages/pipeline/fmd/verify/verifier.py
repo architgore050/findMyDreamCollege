@@ -3,7 +3,15 @@
 Contract:
 
 * it sees a **bounded source window** around the claim span (``window_chars``
-  from config) plus the existing ``quote`` — never the claimed value;
+  from config) plus the existing ``quote`` — never the claimed value; when the
+  extraction resolved a table row, the window is widened to cover that row's
+  context anchor (never past ``window_chars``: a wider block falls back to the
+  quote-centred window and the context still travels in the payload);
+* row-scoped claims (verify@v2) additionally carry the row identifier the
+  extractor used (``context``) with the resolved ``row_label`` /
+  ``column_header``, plus the registry-declared ``expected`` value type, so the
+  model can judge the *association* — does this value belong to this row and
+  column? — instead of assuming a quote is a bare value;
 * it returns one forced verdict per field: ``supported | contradicted |
   absent | wrong_field``, optionally with a verbatim ``corrected_quote``;
 * several fields share a call only when their windows are *identical*, so the
@@ -24,11 +32,12 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
 from fmd.llm import LLMError
+from fmd.score.predicates import PredicateRegistry, PredicateRegistryError
 from fmd.verify.policy import VerifyPolicy
 from fmd.verify.prompts import Prompt, load_prompt
 from fmd.verify.schemas import FieldJudgement, VerdictBundle
@@ -44,6 +53,16 @@ logger = logging.getLogger(__name__)
 
 PURPOSE = "verify"
 WORD_BREAK = set(" \t\r\n")
+
+#: unit_kind -> the ``expected`` label the v2 prompt documents. Anything not
+#: listed here is passed through verbatim (``grade``, ``text``, ...); a
+#: predicate the registry does not know arrives as ``null``.
+EXPECTED_KINDS = {
+    "money": "money+period",
+    "percent": "percentage",
+    "ratio": "percentage",
+}
+COUNT_KINDS = frozenset({"count", "hours"})
 
 
 class VerifierUnavailable(RuntimeError):
@@ -104,6 +123,28 @@ def bounded_window(
     return lo, hi, text[lo:hi]
 
 
+def seed_span(view: ClaimView, *, chars: int) -> tuple[int, int]:
+    """The span a claim's window is built around.
+
+    Normally the claim span. When the claim carries row context, the span grows
+    to cover the context anchor and the row itself, so the verifier sees the
+    row it is asked to judge — but never past ``chars``: a block wider than the
+    configured window falls back to the quote span (the context still travels
+    in the payload text, only its position is lost).
+    """
+    start, end = view.char_start, view.char_end
+    for span in (view.context_span, view.row_span):
+        if span is None:
+            continue
+        lo, hi = span
+        if hi <= lo:
+            continue
+        start, end = min(start, lo), max(end, hi)
+    if end - start > chars:
+        return view.char_start, view.char_end
+    return start, end
+
+
 def bundle_claims(
     views: list[ClaimView], text: str, *, chars: int, max_fields: int
 ) -> list[Bundle]:
@@ -115,7 +156,7 @@ def bundle_claims(
     bundles: list[Bundle] = []
     for view in ordered:
         start, end, window = bounded_window(
-            text, view.char_start, view.char_end, chars=chars
+            text, *seed_span(view, chars=chars), chars=chars
         )
         last = bundles[-1] if bundles else None
         if last is not None and (last.start, last.end) == (start, end) and (
@@ -130,25 +171,43 @@ def bundle_claims(
 # --------------------------------------------------------------------------- messages
 
 
-def bundle_message(bundle: Bundle) -> str:
-    payload = {
-        "fields": [
-            {"key": view.key, "field": view.predicate, "quote": view.quote}
-            for view in bundle.views
-        ]
+def field_payload(view: ClaimView) -> dict[str, Any]:
+    """The verifier-visible field object (verify@v2 shape).
+
+    Row-context keys are present only when the extraction resolved a row;
+    ``expected`` is always present and may be ``null`` when the predicate
+    registry does not declare a type. The claimed value is never included.
+    """
+    payload: dict[str, Any] = {
+        "key": view.key,
+        "field": view.predicate,
+        "quote": view.quote,
+        "expected": view.expected,
     }
+    if view.context:
+        payload["context"] = view.context
+    if view.row_label:
+        payload["row_label"] = view.row_label
+    if view.column_header:
+        payload["column_header"] = view.column_header
+    return payload
+
+
+def bundle_message(bundle: Bundle) -> str:
+    payload = {"fields": [field_payload(view) for view in bundle.views]}
     return (
         "SOURCE WINDOW (verbatim; the delimiters are not content):\n"
         "<<<\n"
         f"{bundle.window}\n"
         ">>>\n\n"
-        "FIELDS TO JUDGE (JSON; the claimed value is intentionally withheld):\n"
+        "FIELDS TO JUDGE (JSON; the claimed value is intentionally withheld; "
+        "context/row_label/column_header locate the row when present):\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
 
 
 def repair_message(view: ClaimView, window: str, previous: str) -> str:
-    payload = {"key": view.key, "field": view.predicate, "quote": view.quote}
+    payload = field_payload(view)
     return (
         "SOURCE WINDOW (verbatim; the delimiters are not content):\n"
         "<<<\n"
@@ -163,7 +222,8 @@ def repair_message(view: ClaimView, window: str, previous: str) -> str:
 def _input_ref(bundle: Bundle) -> str:
     digest = hashlib.sha256(bundle.window.encode("utf-8")).hexdigest()[:16]
     keys = ",".join(view.key for view in bundle.views)
-    return f"{digest}:{bundle.start}:{bundle.end}:{keys}"
+    contexts = ",".join(view.context or "-" for view in bundle.views)
+    return f"{digest}:{bundle.start}:{bundle.end}:{keys}:{contexts}"
 
 
 # --------------------------------------------------------------------------- verifier
@@ -176,6 +236,7 @@ class Verifier:
         *,
         claims: Any | None = None,
         policy: VerifyPolicy | None = None,
+        predicates: Any | None = None,
     ) -> None:
         self.router = router
         models = getattr(router, "models", None)
@@ -188,6 +249,14 @@ class Verifier:
         self.prompt: Prompt = load_prompt(resolved.prompt_name, resolved.prompt_version)
         self.repair_prompt: Prompt = load_prompt("verify_repair", resolved.prompt_version)
         self.claims = claims
+        try:
+            self.predicates = (
+                PredicateRegistry.from_config(predicates) if predicates is not None else None
+            )
+        except PredicateRegistryError as exc:
+            raise VerifierUnavailable(
+                f"the predicate registry is unusable, so claims cannot be typed: {exc}"
+            ) from exc
         profile = models.profiles.get("verify") if models is not None else None
         self.model = getattr(profile, "model", None)
         self._spent = 0.0
@@ -202,6 +271,32 @@ class Verifier:
         self._started = True
 
     # --------------------------------------------------------------------- public
+    def _with_expected(self, view: ClaimView) -> ClaimView:
+        """Fill in the registry-declared expected type for the predicate.
+
+        The claim never supplies its own type: the expected type is config data
+        (``config/predicates.yaml``), resolved here so the prompt can gate on it
+        (verify@v2). An unknown predicate stays ``None``.
+        """
+        if self.predicates is None:
+            return view
+        return replace(view, expected=self._expected_type(view.predicate))
+
+    def _expected_type(self, predicate: str) -> str | None:
+        rule = self.predicates.resolve(str(predicate)) if self.predicates else None
+        if rule is None or not rule.unit_kind:
+            return None
+        kind = rule.unit_kind
+        if kind == "money":
+            return EXPECTED_KINDS["money"]
+        if kind in {"percent", "ratio"} and rule.requires_denominator:
+            return "percentage+denominator"
+        if kind in EXPECTED_KINDS:
+            return EXPECTED_KINDS[kind]
+        if kind in COUNT_KINDS:
+            return "count"
+        return kind
+
     def verify_claims(
         self,
         claims: list[Any],
@@ -213,9 +308,11 @@ class Verifier:
             self.start_run()
         run = VerificationRun()
         views = [
-            claim
-            if isinstance(claim, ClaimView)
-            else ClaimView.from_claim(claim, key=_key_for(claim, index))
+            self._with_expected(
+                claim
+                if isinstance(claim, ClaimView)
+                else ClaimView.from_claim(claim, key=_key_for(claim, index))
+            )
             for index, claim in enumerate(claims)
         ]
         if not views:
@@ -398,6 +495,8 @@ class Verifier:
             corrected_quote=corrected_quote,
             prompt_version=self.prompt.ref,
             verified_by=self.model,
+            expected_type=view.expected,
+            row_context=bool(view.context or view.row_label or view.column_header),
         )
 
     def _persist(self, run: VerificationRun, *, persist: bool) -> None:
@@ -424,6 +523,8 @@ class Verifier:
                         "repair_attempted": decision.repair_attempted,
                         "corrected_quote": decision.corrected_quote,
                         "prompt_version": decision.prompt_version,
+                        "expected_type": decision.expected_type,
+                        "row_context": decision.row_context,
                         "policy": {
                             "window_chars": self.policy.window_chars,
                             "bundle_fields_per_call": self.policy.bundle_fields,
@@ -471,6 +572,7 @@ def _error_reason(exc: Exception) -> str:
 
 
 __all__ = [
+    "EXPECTED_KINDS",
     "VERDICTS",
     "Bundle",
     "Verifier",
@@ -478,5 +580,7 @@ __all__ = [
     "bounded_window",
     "bundle_claims",
     "bundle_message",
+    "field_payload",
     "repair_message",
+    "seed_span",
 ]

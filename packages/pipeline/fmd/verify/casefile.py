@@ -2,7 +2,7 @@
 
 A case is a JSON manifest plus the page text it was extracted from:
 
-    tests/fixtures/verify/fabrication_v1/
+    tests/fixtures/verify/<case>/
       case.json          # claims + expected labels, quotes only
       page.txt           # the source window
       llm/verify/*.json  # recorded verdicts, keyed by prompt hash
@@ -11,11 +11,18 @@ The manifest stores quotes, not offsets: offsets are resolved deterministically
 against the page and must be unique, which is the same rule extraction uses. A
 claim whose quote cannot be resolved is a broken fixture, not a verifier result.
 
+Row-scoped claims (verify@v2) may also carry the row identifier the extractor
+would have used: ``context`` (the anchor cell, e.g. the institute name) with
+``row_label`` and ``column_header``. Their spans are located in the page the
+same first-occurrence way the loader resolves quotes, so the window covers the
+row the claim asserts; a context that does not occur in the page is kept as
+payload text but contributes no span.
+
 The expected labels are the *ground truth about the extraction output*:
 ``correct`` (the page supports it), ``fabricated`` (plausible field the page
-never states) and ``wrong_field`` (a real fact in the wrong column). This proves
-the plumbing: verifier call -> forced verdict -> selective repair -> persistence
--> metrics. It does not prove the model generalises.
+never states) and ``wrong_field`` (a real fact in the wrong row or column). This
+proves the plumbing: verifier call -> forced verdict -> selective repair ->
+persistence -> metrics. It does not prove the model generalises.
 """
 
 from __future__ import annotations
@@ -92,6 +99,7 @@ def load_case(directory: str | Path) -> VerificationCase:
                 f"{manifest_path}: {key}: quote occurs more than once in {text_name}; "
                 "use a longer verbatim quote"
             )
+        context = _optional_text(raw.get("context"))
         claims.append(
             CaseClaim(
                 view=ClaimView(
@@ -101,6 +109,11 @@ def load_case(directory: str | Path) -> VerificationCase:
                     char_start=start,
                     char_end=start + len(quote),
                     value=raw.get("value"),
+                    context=context,
+                    row_label=_optional_text(raw.get("row_label")),
+                    column_header=_optional_text(raw.get("column_header")),
+                    context_span=_located_span(text, context),
+                    row_span=_located_span(text, _optional_text(raw.get("row_label"))),
                 ),
                 expected=expected,
                 unit=raw.get("unit"),
@@ -112,6 +125,21 @@ def load_case(directory: str | Path) -> VerificationCase:
         text=text,
         claims=claims,
     )
+
+
+def _optional_text(value: Any) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _located_span(text: str, needle: str | None) -> tuple[int, int] | None:
+    """First occurrence of ``needle`` in the page, or ``None`` when absent."""
+    if not needle:
+        return None
+    start = text.find(needle)
+    if start < 0:
+        return None
+    return start, start + len(needle)
 
 
 def run_case(
@@ -135,7 +163,7 @@ def evaluate_fixture_dir(directory: str | Path, registry: Any) -> dict[str, Any]
     router = build_router(
         registry.models, mock=True, fixtures_dir=str(case.fixtures_dir)
     )
-    verifier = Verifier(router)
+    verifier = Verifier(router, predicates=getattr(registry, "predicates", None))
     run, metrics = run_case(case, verifier)
     payload = metrics.as_dict()
     payload.update(

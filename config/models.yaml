@@ -206,9 +206,17 @@ profiles:
     # evidence: structurally different second pass over the bounded source
     # window; it sees the existing quote, never the claimed value, and emits a
     # judgement only (supported | contradicted | absent | wrong_field).
-    # Sampling/budget is deliberately config-driven: one profile, one prompt
-    # version, and a hard per-run cap. 0 price means the local default; a hosted
-    # verifier only needs an env override, never a code change.
+    # v2 (2026-11-18, W2 verifier-row-context): the extractor's row-scoped
+    # quotes ("3. B.Sc. MLT\n20" + institute context) were judged wrong_field
+    # by the v1 prompt — a correct claim discarded. v2 documents the quote
+    # shapes (bare value / label+value / value+unit+period), passes the row
+    # context (context/row_label/column_header) and the registry-declared
+    # expected type so the verifier judges the row/column association instead
+    # of assuming a bare value. Wrong-row claims still reject (see the
+    # row_context_v2 fixture). Sampling/budget is deliberately config-driven:
+    # one profile, one prompt version, and a hard per-run cap. 0 price means
+    # the local default; a hosted verifier only needs an env override, never a
+    # code change.
     provider: ${FMD_VERIFY_PROVIDER:-local}
     model: ${FMD_VERIFY_MODEL:-gemma-4-26b-a4b-gguf}
     provider_env: FMD_VERIFY_PROVIDER
@@ -223,7 +231,7 @@ profiles:
     required: false            # claims stay unverified when this profile degrades
     degrade_reason: verifier_unavailable
     prompt_name: verify
-    prompt_version: v1
+    prompt_version: v2
     window_chars: 1200
     bundle_fields_per_call: 8
     max_claims_per_run: 500
