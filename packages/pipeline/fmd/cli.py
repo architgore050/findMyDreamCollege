@@ -193,6 +193,122 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     llm_ping.add_argument("--json", action="store_true", help="machine-readable output")
 
+    golden_parser = subparsers.add_parser(
+        "golden",
+        help="golden-set curation tool (WS-F): add rows from a source PDF, check, list",
+    )
+    golden_sub = golden_parser.add_subparsers(dest="golden_command", required=True)
+
+    golden_add = golden_sub.add_parser(
+        "add",
+        help="curate one expected row: extract the quote from the source PDF, prove it, write it",
+    )
+    golden_add.add_argument(
+        "--source",
+        default=None,
+        help="source PDF path or URL (the quote is extracted from it, never typed)",
+    )
+    golden_add.add_argument(
+        "--page", type=int, default=None, help="1-based page of the PDF the quote is on"
+    )
+    golden_add.add_argument(
+        "--predicate", default=None, help="expected field name (e.g. seats.total)"
+    )
+    golden_add.add_argument(
+        "--value", default=None, help="expected normalised value (int/float/bool/text)"
+    )
+    golden_add.add_argument("--unit", default=None, help="normalised unit (count, INR, ratio, ...)")
+    golden_add.add_argument(
+        "--printed-value",
+        default=None,
+        help="the form the document prints (also used to locate candidate lines)",
+    )
+    golden_add.add_argument("--printed-unit", default=None, help="the unit the document prints")
+    golden_add.add_argument("--institution", default=None, help="institution named in the source")
+    golden_add.add_argument("--programme", default=None, help="programme the row is about")
+    golden_add.add_argument("--state", default=None, help="state (optional)")
+    golden_add.add_argument(
+        "--entry-id", default=None, help="golden entry id (defaults to a slug of --institution)"
+    )
+    golden_add.add_argument(
+        "--context",
+        default=None,
+        help="table-row anchor cell (institution/heading); must occur exactly once on the page",
+    )
+    golden_add.add_argument("--row-label", default=None, help="table-row claim: the row label cell")
+    golden_add.add_argument(
+        "--column-header", default=None, help="table-row claim: the column header cell"
+    )
+    golden_add.add_argument(
+        "--value-cell", default=None, help="table-row claim: the printed value cell"
+    )
+    golden_add.add_argument(
+        "--table-page", type=int, default=None, help="table-row claim: 1-based table page"
+    )
+    golden_add.add_argument(
+        "--source-url", default=None, help="public URL for provenance when --source is a local file"
+    )
+    golden_add.add_argument("--notes", default=None, help="free-text curator notes")
+    golden_add.add_argument(
+        "--pick", type=int, default=None, help="1-based candidate line to quote (see add output)"
+    )
+    golden_add.add_argument(
+        "--trim-left",
+        type=int,
+        default=0,
+        help="drop N leading words from the extracted line (e.g. a serial number)",
+    )
+    golden_add.add_argument(
+        "--trim-right", type=int, default=0, help="drop N trailing words from the extracted line"
+    )
+    golden_add.add_argument(
+        "--interactive",
+        action="store_true",
+        help="prompt for missing inputs and the candidate pick (TTY)",
+    )
+    golden_add.add_argument(
+        "--dry-run", action="store_true", help="run every proof and print the result; write nothing"
+    )
+    golden_add.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing predicate on a tool-generated entry (never promotes)",
+    )
+    golden_add.add_argument(
+        "--quote",
+        default=None,
+        help=argparse.SUPPRESS,  # accepted-and-refused: a typed quote can never be verified
+    )
+    golden_add.add_argument(
+        "--golden-dir", default=None, help="golden directory (default data/golden)"
+    )
+    golden_add.add_argument(
+        "--root",
+        default=None,
+        help="repo root fixtures/entries are recorded against (default: cwd)",
+    )
+
+    golden_check = golden_sub.add_parser(
+        "check",
+        help="offline re-validation: fixtures, sha256, contexts, duplicates, per-family status",
+    )
+    golden_check.add_argument(
+        "--golden", default=None, help="golden directory (default data/golden)"
+    )
+    golden_check.add_argument(
+        "--root", default=None, help="repo root fixture paths resolve against (default: cwd)"
+    )
+    golden_check.add_argument("--json", action="store_true", help="machine-readable report")
+
+    golden_list = golden_sub.add_parser("list", help="entries with status and what each row gates")
+    golden_list.add_argument(
+        "--golden", default=None, help="golden directory (default data/golden)"
+    )
+    golden_list.add_argument(
+        "--root", default=None, help="repo root fixture paths resolve against (default: cwd)"
+    )
+    golden_list.add_argument("--json", action="store_true", help="machine-readable output")
+
     # Backwards-compatible top-level alias; prefer `fmd llm doctor`.
     ping = subparsers.add_parser(
         "llm-ping", help="alias for `fmd llm doctor` (never prints secrets)"
@@ -489,6 +605,265 @@ def _cmd_llm_ping(args: argparse.Namespace) -> int:
     return _cmd_llm_doctor(args)
 
 
+def _default_golden_dir() -> Path:
+    from fmd.eval.golden import DEFAULT_GOLDEN_DIR
+
+    return DEFAULT_GOLDEN_DIR
+
+
+def _golden_root(args: argparse.Namespace) -> Path:
+    if getattr(args, "root", None):
+        return Path(args.root)
+    from fmd.eval.golden import REPO_ROOT
+
+    return REPO_ROOT
+
+
+def _prompt(text: str, default: str | None) -> str:
+    suffix = f" [{default}]" if default else ""
+    try:
+        answer = input(f"{text}{suffix}: ").strip()
+    except EOFError as exc:
+        raise SystemExit(2) from exc
+    return answer or (default or "")
+
+
+def _cmd_golden_add(args: argparse.Namespace) -> int:
+    from datetime import UTC, datetime
+
+    from fmd.eval import curator
+    from fmd.eval.curator import AddInputs, CuratorError
+    from fmd.eval.pdfpage import extract_page
+
+    if args.quote is not None:
+        print(
+            "fmd golden add: a typed quote is rejected; quotes are extracted from the source "
+            "PDF itself so the span can be proven. Pick a candidate line instead "
+            "(--pick N, optional --trim-left/--trim-right).",
+            file=sys.stderr,
+        )
+        return 2
+
+    interactive = args.interactive or sys.stdin.isatty()
+    source = args.source or (_prompt("source PDF path or URL", None) if interactive else None)
+    page = args.page
+    if page is None and interactive:
+        page = int(_prompt("page (1-based)", "1"))
+    predicate = args.predicate or (_prompt("predicate", None) if interactive else None)
+    value = args.value or (_prompt("expected value", None) if interactive else None)
+    if args.institution:
+        institution = args.institution
+    elif interactive:
+        institution = _prompt("institution", None)
+    else:
+        institution = None
+    if args.programme:
+        programme = args.programme
+    elif interactive:
+        programme = _prompt("programme", "BSc Medical Laboratory Technology")
+    else:
+        programme = None
+    if not args.unit and interactive:
+        args.unit = _prompt("unit (empty for none)", "") or None
+
+    inputs = AddInputs(
+        source=source or "",
+        page=page or 0,
+        predicate=predicate or "",
+        value_raw=value or "",
+        unit=curator.parse_optional(args.unit),
+        printed_value=curator.parse_optional(args.printed_value),
+        printed_unit=curator.parse_optional(args.printed_unit),
+        institution=institution or "",
+        programme=programme or "",
+        state=curator.parse_optional(args.state),
+        entry_id=args.entry_id,
+        context=curator.parse_optional(args.context),
+        row_label=curator.parse_optional(args.row_label),
+        column_header=curator.parse_optional(args.column_header),
+        value_cell=curator.parse_optional(args.value_cell),
+        table_page=args.table_page,
+        source_url=curator.parse_optional(args.source_url),
+        notes=curator.parse_optional(args.notes),
+        trim_left=args.trim_left,
+        trim_right=args.trim_right,
+        golden_dir=Path(args.golden_dir) if args.golden_dir else _default_golden_dir(),
+        root=_golden_root(args),
+        dry_run=args.dry_run,
+        force=args.force,
+    )
+
+    try:
+        inputs.validate()  # report every missing flag before touching the source
+        page_obj, meta = extract_page(inputs.source, inputs.page)
+        plan = curator.plan_add(inputs, page_obj)
+        pick = args.pick
+        if pick is None and interactive and len(plan.candidates) > 1:
+            print(
+                f"candidates for {plan.needle!r} on page {inputs.page}:",
+                "\n".join(f"  {i}: {c.display()}" for i, c in enumerate(plan.candidates, 1)),
+                sep="\n",
+            )
+            pick = int(_prompt("pick a candidate (1-based)", "1"))
+        candidate = curator.resolve_candidate(plan, pick)
+        outcome = curator.execute_add(plan, candidate, meta, now=datetime.now(UTC).date())
+    except CuratorError as exc:
+        print(f"fmd golden add: {exc}", file=sys.stderr)
+        return 2
+
+    _print_add_outcome(outcome, plan, meta, page_obj)
+    if outcome.status == "verified":
+        return 0
+    for reason in outcome.reasons:
+        print(f"fmd golden add: check failed: {reason}", file=sys.stderr)
+    return 1
+
+
+def _print_add_outcome(outcome, plan, meta, page_obj) -> None:
+    noun = "would write" if outcome.dry_run else "wrote"
+    print(
+        f"fmd golden add: source {plan.inputs.source} (sha256 {meta.sha256}, "
+        f"{meta.page_count} pages); page {page_obj.page} extracted with pdftext "
+        f"{meta.tool_version}: {len(page_obj.lines)} lines"
+    )
+    quote = outcome.entry["expected"][outcome.predicate].get("quote")
+    print(f"  needle {plan.needle!r}: {len(plan.candidates)} candidate line(s)")
+    print(f"  selected line {candidate_line(outcome, plan)}: quote {quote!r}")
+    print(f"  proof: {outcome.proof.summary}")
+    if outcome.status == "verified":
+        print(f"  status: verified ({noun} a fixture-checked row)")
+    else:
+        print("  status: unverified (value stays null; excluded from accuracy metrics)")
+    for path_name, path in (
+        ("entry", outcome.entry_path),
+        ("fixture", outcome.fixture_path),
+        ("metadata", outcome.sidecar_path),
+    ):
+        if path is not None:
+            print(f"  {path_name}: {path}")
+    if outcome.dry_run:
+        print("  dry run: nothing was written")
+
+
+def candidate_line(outcome, plan) -> str:
+    quote = outcome.entry["expected"][outcome.predicate].get("quote")
+    for candidate in plan.candidates:
+        if candidate.quote == quote:
+            return str(candidate.line_no)
+    return "?"
+
+
+def _cmd_golden_check(args: argparse.Namespace) -> int:
+    from fmd.eval.curator import check_golden
+
+    golden_dir = args.golden or _default_golden_dir()
+    report = check_golden(golden_dir, root=_golden_root(args))
+    if args.json:
+        print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
+    else:
+        _print_check_report(report.as_dict())
+    return 0 if report.ok else 1
+
+
+def _print_check_report(payload: dict) -> None:
+    print(
+        "fmd golden check: {} entries, verified rows {}, unverified {}".format(
+            payload.get("entries", 0),
+            payload.get("verified_rows", 0),
+            payload.get("unverified_rows", 0),
+        )
+    )
+    for family, counts in (payload.get("by_family") or {}).items():
+        print(
+            "  family {}: entries {entries} verified {verified} unverified {unverified}".format(
+                family, **counts
+            )
+        )
+    for fixture in payload.get("fixtures") or []:
+        if fixture.get("present") is False:
+            print(f"  fixture MISSING: {fixture['fixture']}")
+        elif fixture.get("match") is False:
+            print(f"  fixture TAMPERED: {fixture['fixture']} (sha256 mismatch)")
+        elif fixture.get("match") is None:
+            print(f"  fixture unrecorded (pre-tool): {fixture['fixture']}")
+        else:
+            print(f"  fixture ok: {fixture['fixture']}")
+    context_checks = payload.get("context_checks") or []
+    failed_contexts = [check for check in context_checks if check.get("ok") is False]
+    if context_checks:
+        checked = len(context_checks)
+        failed = len(failed_contexts)
+        print(f"  row contexts: {checked} checked, {failed} failed")
+    duplicates = payload.get("duplicates") or {}
+    for warning in duplicates.get("warnings") or []:
+        print(f"  duplicate warning: {warning}")
+    for problem in payload.get("problems") or []:
+        print(f"fmd golden check: FAIL {problem}", file=sys.stderr)
+    if not payload.get("problems"):
+        print("  all offline checks passed")
+
+
+def _cmd_golden_list(args: argparse.Namespace) -> int:
+    from fmd.eval.curator import list_golden
+
+    golden_dir = args.golden or _default_golden_dir()
+    payload = list_golden(golden_dir, root=_golden_root(args))
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(
+        "fmd golden list: {} entries, verified rows {}, unverified {}".format(
+            payload["totals"]["entries"],
+            payload["totals"]["verified_rows"],
+            payload["totals"]["unverified_rows"],
+        )
+    )
+    for entry in payload["entries"]:
+        source = entry["fixture"] or entry["source_url"] or "(no source)"
+        print(
+            "{}  {}  family={family}  measured={measured}  "
+            "verified={verified} unverified={unverified}  source={source}".format(
+                entry["id"],
+                entry["institution"],
+                family=entry["family"] or "none",
+                measured="yes" if entry["measured"] else "no",
+                verified=entry["verified_rows"],
+                unverified=entry["unverified_rows"],
+                source=source,
+            )
+        )
+        print(f"    gates: {entry['entry_gate']}")
+        for row in entry["rows"]:
+            context = f" context={row['context']!r}" if row["context"] else ""
+            value = row["value"]
+            print(
+                "    {predicate}: {status}/{expectation} value={value} unit={unit}{context}".format(
+                    predicate=row["predicate"],
+                    status=row["status"],
+                    expectation=row["expectation"],
+                    value=value if value is not None else "null",
+                    unit=row["unit"] or "none",
+                    context=context,
+                )
+            )
+            print(f"      {row['gate']}")
+    print("legend:")
+    for line in payload["legend"]:
+        print(f"  - {line}")
+    return 0
+
+
+def _cmd_golden(args: argparse.Namespace) -> int:
+    command = getattr(args, "golden_command", None)
+    if command == "add":
+        return _cmd_golden_add(args)
+    if command == "check":
+        return _cmd_golden_check(args)
+    if command == "list":
+        return _cmd_golden_list(args)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -533,6 +908,8 @@ def main(argv: list[str] | None = None) -> int:
             if command in {"doctor", "ping"}:
                 return _cmd_llm_doctor(args)
             parser.error("llm: choose `doctor` or `ping`")
+        if args.command == "golden":
+            return _cmd_golden(args)
         if args.command == "llm-ping":
             return _cmd_llm_ping(args)
     except (ConfigError, DatabaseError, MigrationError, SeedError) as exc:
