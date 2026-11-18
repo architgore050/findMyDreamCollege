@@ -653,6 +653,26 @@ export type RankingsPayload = z.infer<typeof rankingsPayloadSchema>;
 export const examStatusSchema = z.enum(["open", "closed", "unverified"]);
 export type ExamStatus = z.infer<typeof examStatusSchema>;
 
+/** Date precision the document actually printed; month is never completed to a day. */
+export const examPrecisionSchema = z.enum(["day", "month"]);
+export type ExamPrecision = z.infer<typeof examPrecisionSchema>;
+
+/** One observed cycle of one exam (spec 17 §2: cycles coexist, never overwrite). */
+export const examCycleSchema = z.object({
+  cycle_year: z.number(),
+  registration_opens: z.string().nullable(),
+  registration_closes: z.string().nullable(),
+  sitting_dates: z.array(z.string()).nullable().optional(),
+  observed_at: z.string().nullable(),
+  stale: z.boolean().optional(),
+  status: examStatusSchema.optional(),
+  precision: examPrecisionSchema.nullable().optional(),
+  date_text: z.string().nullable().optional(),
+  source_claim_id: z.union([z.number(), z.string()]).nullable().optional(),
+  reason: z.string().optional(),
+});
+export type ExamCycle = z.infer<typeof examCycleSchema>;
+
 export const examWindowSchema = z.object({
   exam_id: z.string(),
   name: z.string(),
@@ -666,8 +686,34 @@ export const examWindowSchema = z.object({
   travel_blocked: z.boolean(),
   deciding_claim_id: z.union([z.number(), z.string()]).nullable(),
   reason: z.string(),
+  // w3 exam windows: scope, the deciding cycle and every observed cycle.
+  scope: z.enum(["national", "state", "institution"]).nullable().optional(),
+  cycle_year: z.number().nullable().optional(),
+  closes: z.string().nullable().optional(),
+  closes_text: z.string().nullable().optional(),
+  precision: examPrecisionSchema.nullable().optional(),
+  sitting_dates: z.array(z.string()).nullable().optional(),
+  cycles: z.array(examCycleSchema).optional(),
+  programme_ids: z.array(z.number()).optional(),
 });
 export type ExamWindow = z.infer<typeof examWindowSchema>;
+
+/** The next deadline the profile can still act on, sorted ascending. */
+export const nextExamDeadlineSchema = z.object({
+  exam_id: z.string(),
+  name: z.string(),
+  cycle_year: z.number(),
+  deadline: z.string().nullable(),
+  deadline_month: z.string().nullable().optional(),
+  act_before: z.string(),
+  precision: examPrecisionSchema.nullable().optional(),
+  date_text: z.string().nullable().optional(),
+  status: examStatusSchema,
+  stale: z.boolean().optional(),
+  claim_id: z.union([z.number(), z.string()]).nullable().optional(),
+  reason: z.string().optional(),
+});
+export type NextExamDeadline = z.infer<typeof nextExamDeadlineSchema>;
 
 export const examWindowsPayloadSchema = z.object({
   items: z.array(examWindowSchema),
@@ -676,6 +722,7 @@ export const examWindowsPayloadSchema = z.object({
     closed: z.number(),
     unverified: z.number(),
   }),
+  next_deadlines: z.array(nextExamDeadlineSchema).optional(),
   profile_persisted: z.boolean(),
 });
 export type ExamWindowsPayload = z.infer<typeof examWindowsPayloadSchema>;

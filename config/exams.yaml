@@ -6,6 +6,24 @@
 # never "open". `observed_at` + TTL (weights.yaml: filter_policy.stale_exam_window_ttl_days)
 # decides staleness.
 
+# Window semantics for the exam-window workstream (spec 17). Metadata only:
+# no window values live here, now or ever.
+window_semantics:
+  timezone: Asia/Kolkata          # printed deadlines are IST; store UTC + printed text
+  precision_vocabulary: [day, month]
+  month_precision: >-
+    A window printed as a month only ("March 2027") is stored as YYYY-MM with
+    precision: month. The filter is pass before the month, UNKNOWN inside it,
+    fail after it ends; no day is ever fabricated.
+  deciding_date: registration_closes   # never a sitting date; sittings are informational
+  supersession: >-
+    A later notification supersedes an earlier one via claims.superseded_by
+    (append-only, both rows kept); a reopened/extended window flips the filter
+    back to pass on the next run.
+  cycles: >-
+    Windows are per (exam, cycle_year); concurrent cycles coexist and the
+    profile's target intake year selects the deciding window.
+
 exams:
   # ---- national / multi-state ----
   - id: neet_ug

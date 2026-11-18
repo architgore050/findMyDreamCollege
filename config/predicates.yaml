@@ -347,21 +347,40 @@ predicates:
     description: >-
       The admissions cycle year the exam notification covers; one cycle, not a
       recurring schedule.
+  exam.scope:
+    unit_kind: text
+    description: >-
+      The scope the notification prints for the exam (national, state or
+      institution); evidence for window scoping, never inferred from the
+      provider's name.
+  exam.state:
+    unit_kind: text
+    description: >-
+      The state a state-scope exam is bound to, exactly as printed on the
+      notification; a state counselling exam is scope-bound.
   exam.registration_opens:
     unit_kind: date
     description: >-
       The date the named exam's registration opens, for the stated cycle; one
-      exam, one cycle.
+      exam, one cycle. A month-only printed date is month precision, never a
+      fabricated day.
   exam.registration_closes:
     unit_kind: date
     description: >-
       The date the named exam's registration closes, for the stated cycle; one
-      exam, one cycle.
+      exam, one cycle. This close date — never a sitting date — is the
+      exam_registration_open filter's cutoff. A month-only printed date is
+      month precision, never a fabricated day.
   exam.date:
     unit_kind: date
     description: >-
       The date the named exam is held, for the stated cycle; one sitting, not a
-      range.
+      range. Informational: a sitting date never gates registration.
+  exam.sitting_dates:
+    unit_kind: text
+    description: >-
+      The printed sitting date(s) or window for the exam, quoted verbatim;
+      informational evidence only and never a filter input.
   exam.requires_travel:
     unit_kind: boolean
     description: >-
