@@ -1,5 +1,10 @@
 # TEMPLATE — copy this file to `programmes/<id>.yaml` and fill it in.
 #
+# For PDF sources prefer the curation tool instead of copying this file:
+#   cd packages/pipeline && uv run python -m fmd.cli golden add --help
+# It extracts the quote from the source PDF, proves it against the loader's
+# rules, and writes the entry (verified only when every check passes).
+#
 # This file is documentation. The loader ignores files whose name starts with
 # "_", so the placeholders below never enter the metrics.
 #
