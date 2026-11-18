@@ -22,6 +22,7 @@ pnpm-debug.log*
 
 # model weights (host data under MODEL_DIR; never in the repo, an image, or a volume)
 models/
+prompts/
 
 # data + artifacts (never commit raw crawls or snapshots)
 data/*
@@ -38,3 +39,6 @@ packages/pipeline/tests/fixtures/llm/*.real.json
 .idea/
 .vscode/
 *.swp
+
+# local patch intake
+/tmp/
