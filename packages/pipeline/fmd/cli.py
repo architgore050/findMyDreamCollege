@@ -83,6 +83,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="re-extract snapshots already processed at this tool version",
     )
 
+    plan_parser = subparsers.add_parser(
+        "plan",
+        help="plan documents that should be extractable but are not (recovery/backfill)",
+    )
+    plan_parser.add_argument(
+        "--limit", type=int, default=None, help="maximum documents to decide this run"
+    )
+    plan_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="also re-decide decided documents that are stale at the current planner version",
+    )
+    plan_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="compute every decision and print the counters, write nothing",
+    )
+
     verify_parser = subparsers.add_parser(
         "verify",
         help="second pass: judge unverified claims against their source window",
@@ -421,6 +439,25 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     return 1 if summary.failed else 0
 
 
+def _cmd_plan(args: argparse.Namespace) -> int:
+    from fmd.orchestrate.plan import run_planning_pass
+
+    registry = load_registry(args.config_dir)
+    database = _database(args)
+    try:
+        summary = run_planning_pass(
+            registry,
+            database,
+            limit=args.limit,
+            force=args.force,
+            dry_run=args.dry_run,
+        )
+    finally:
+        database.close()
+    print(summary.as_json())
+    return 1 if summary.failed else 0
+
+
 def _cmd_verify(args: argparse.Namespace) -> int:
     from fmd.db.repositories import ClaimsRepo, ExtractionsRepo
     from fmd.extract.pipeline import build_router
@@ -583,8 +620,7 @@ def _cmd_llm_doctor(args: argparse.Namespace) -> int:
         )
         if not row["usable"] and row["degrade_reason"]:
             print(
-                f"    degrades to {row['degrade_reason']} per document; "
-                "text extraction still runs."
+                f"    degrades to {row['degrade_reason']} per document; text extraction still runs."
             )
     if report["remediation"]:
         print("remediation:")
@@ -899,6 +935,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_crawl(args)
         if args.command == "extract":
             return _cmd_extract(args)
+        if args.command == "plan":
+            return _cmd_plan(args)
         if args.command == "verify":
             return _cmd_verify(args)
         if args.command == "worker":

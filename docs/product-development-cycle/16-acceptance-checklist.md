@@ -105,3 +105,47 @@ right evidence, that extraction quality gates pass, or that the DB is
 populated (an empty registry yields PASSes for shape and SKIPs for content —
 doc 12's rule that "a DB-count assertion that passes at 0 is a failure"
 belongs to the phase-4 live run, where the corpus is a precondition).
+
+## 8. Planning check (wave w4, planning-pass) — no recoverable snapshot left unplanned
+
+**Invariant:** every document that should be extractable *has a plan* —
+extraction skips unplanned documents, so a harvest after snapshot recovery or a
+backfill must never again report `{"unplanned": 84, "claims": 0}`. Runbook
+§"Planning pass (`fmd plan`)" documents the stage; the check comes in two
+layers.
+
+**Layer 1 — pytest (offline, always runnable; wired in this patch):**
+
+```bash
+cd packages/pipeline && uv run pytest -q \
+  tests/test_orchestrate_plan_pass.py tests/test_plan_versioning.py
+```
+
+`test_extract_processes_documents_the_pass_planned` is the seam gate: a
+recovery-style document (snapshot stored, `plan_state IS NULL`) becomes
+`linked` after the planning pass and is then extracted to claims against the
+recorded provider — proving `fmd extract` consumes the result with **no change
+to `fmd/orchestrate/extract.py`**. The sibling tests pin the reasons (no
+snapshot ⇒ `awaiting_text`, never a URL-only link; inventory/navigation ⇒
+`not_applicable`; idempotent second run writes nothing; `--dry-run` writes
+nothing; `--force` replans stale planner versions only and never touches a
+human-review decision). `tests/test_plan_db.py` pins the candidate SQL against
+Postgres (SKIPs cleanly without `DATABASE_URL`).
+
+**Layer 2 — operator (live, with a populated corpus; not wired into
+`scripts/acceptance.sh` — that script is another workstream's, so this is the
+manual check it should grow):**
+
+```bash
+uv run fmd plan --dry-run          # plan.candidates must be the only debt
+uv run fmd plan                    # every candidate gets a decision
+psql "$DATABASE_URL" -c \
+  "SELECT role, plan_state, extraction_family, entity_id, count(*) FROM documents GROUP BY 1,2,3,4 ORDER BY 5 DESC;"
+```
+
+PASS when, after a real run: `plan.candidates` falls to `0` on a re-run (or
+only `awaiting_text` rows remain, each `plan_state='planned'` /
+`plan_reason='defer_for_text'`); no evidence document is left with
+`plan_state IS NULL`; and the pass row (`run_id LIKE 'plan-%'`) shows in
+`pipeline_runs`. FAIL when `fmd extract` afterwards still counts `unplanned`
+evidence.

@@ -1778,6 +1778,123 @@ returned `429 FreeUsageLimitError` during the recovery extract, so the targeted
 pass used the local `gemma-4-26b-a4b-gguf` profile. The two new claims come from
 recovered NIRF reports (`cus.ac.in`, `aus.ac.in`).
 
+## Planning pass (`fmd plan`) — replanning recovered evidence (2026-11-18, W4 planning-pass)
+
+### The measured problem
+
+After the dedupe recovery above (96 snapshots stored by a drain built without a
+planner), the next harvest reported:
+
+```json
+{"counts": {"abstained": 4, "not_applicable": 14, "unplanned": 84, "claims": 0}, "ok": false}
+```
+
+`unplanned: 84` = evidence documents with `plan_state IS NULL` (never planned),
+counted by `documents.count_unplanned()` during extract. Extraction never
+selects them — `SnapshotsRepo.list_extractable` requires
+`extraction_family IS NOT NULL AND entity_id IS NOT NULL` — so the run produced
+zero claims. Planning existed only inside crawl/extract; documents that arrived
+through snapshot recovery, backfills or re-crawls were never planned.
+
+### The command
+
+```bash
+export DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd
+cd packages/pipeline
+uv run fmd plan [--limit N] [--force] [--dry-run]
+```
+
+Resumable (oldest document id first, `--limit` bounds a run) and idempotent (a
+decision identical to the stored row is not written again — a second run makes
+no changes). `--dry-run` computes every decision and the counters and writes
+nothing.
+
+**Candidate query** (`DocumentsRepo.list_plan_candidates`): every document that
+should be extractable but is not —
+
+| Queue | Rows |
+|---|---|
+| default | `plan_state IS NULL` (never planned) plus `plan_state = 'planned'` (Phase A deferrals, `plan_reason='defer_for_text'`) |
+| `--force` | adds *decided* rows (`linked` / `needs_review` / `abstained` / `not_applicable`) whose `plan_reason` is planner-shaped but not stamped at the current planner version |
+
+Non-evidence roles (inventory / navigation) with no decision are planned to
+`not_applicable` — an answer, never an abstention. Decisions written by human
+review (prose reasons such as `resolved by human review (link_entity)`) are
+**never** replanned at any version: a manual decision outranks the planner.
+
+### What each document gets
+
+Precedence is the planner's own (reused, not reimplemented):
+**registry-declared family > Phase B text evidence > Phase A URL evidence**.
+Phase B reads the stored snapshot's born-digital text layer via T0 only — no
+OCR, no model, no network, bounded to `plan.yaml → phase_b.text_sample_chars`.
+
+* evidence with a snapshot and readable text → planned at Phase B;
+* evidence with **no snapshot, or a snapshot with no T0 text layer** (a scan) →
+  **`awaiting_text`**: the row is persisted exactly like a Phase A deferral
+  (`plan_state='planned'`, `plan_reason='defer_for_text'`, family/entity
+  preserved), so the existing acquisition pipeline owns it and the next pass —
+  or the extract-time `PlanStage`, once a snapshot exists — resolves it. The
+  pass never links a document from its URL alone and never acquires text;
+* evidence whose T0 read fails (corrupt bytes, missing extraction extra) →
+  counter `acquisition_failed`, row untouched, retried next run;
+* evidence with stored reference hints (discovery family / inventory entity) and
+  no text → re-affirmed at Phase A exactly as crawl would.
+
+Planned decisions are stamped with the planner version
+(`config/plan.yaml → version`, e.g. `plan_reason='plan_v1'`; abstentions carry
+`<code>|plan_v1`) — the per-document version record, since `documents` has no
+version column and migrations are out of scope. `--force` re-decides stale
+versions only (unstamped crawl-era rows and older-version stamps); rows stamped
+at the current version are skipped (`plan.skipped_current`).
+
+### Counters (run summary and `pipeline_runs.counts_json`)
+
+| Counter | Meaning |
+|---|---|
+| `plan.candidates` | documents examined |
+| `planned` | decisions this run (the breakdown below sums to it) |
+| `linked` | family + entity resolved; extraction can read them |
+| `needs_review` | ambiguous entity/family; review queue |
+| `still_abstained` | abstained; breakdown in `metadata.reasons` and `plan.reason.<code>` |
+| `skipped_not_applicable` | inventory/navigation role |
+| `awaiting_text` | no snapshot or no T0 text layer |
+| `acquisition_failed` | T0 read raised; row untouched |
+| `unchanged` | decision identical to the stored row (idempotency proof) |
+| `plan.skipped_current` | `--force` skips: current-version stamp or human decision |
+
+`pipeline_runs.stage` is a closed set (`crawl/extract/score/worker/ingest`) and
+this wave must not migrate, so the run row is recorded under `stage='crawl'` —
+planning is the crawl stage's responsibility and its counters are already
+plan-shaped there. Identify a pass row by `run_id LIKE 'plan-%'` (status
+`succeeded` / `dry_run` / `failed`):
+
+```sql
+SELECT run_id, started_at, status, counts_json
+FROM pipeline_runs WHERE run_id LIKE 'plan-%' ORDER BY started_at DESC;
+```
+
+### Running order
+
+Slot the pass between acquisition and extraction in the §6 ordered pass:
+`fmd plan` → `fmd extract` → `fmd verify` → `fmd score`. After a recovery drain,
+`fmd plan --dry-run` first: `plan.candidates` is the remaining planning debt and
+must fall to `0` (deferrals aside) after a real run.
+
+### Proof (offline; no network, no model)
+
+`tests/test_orchestrate_plan_pass.py` covers: unplanned→planned; already-planned
+skipped; `defer_for_text` resolved by Phase B; evidence without snapshot →
+`awaiting_text`; role=inventory/navigation → `not_applicable`; idempotent second
+run writes nothing; `--dry-run` writes nothing; counters accurate; `--force`
+replans stale versions only; and `fmd extract` consumes the newly planned
+documents against the recorded provider — no change to `fmd/orchestrate/extract.py`.
+`tests/test_plan_db.py` pins the candidate SQL against Postgres. Measured CLI
+smoke (userspace Postgres 16.2, committed registry): a recovery-style document
+(url `…/fmd-2024-final.pdf`, stored snapshot, no plan) came out `linked`,
+`plan_reason='plan_v1'`, `extraction_family='placement_report'`, entity linked,
+with a `plan.candidates: 1, planned: 1, linked: 1` row in `pipeline_runs`.
+
 ## `hard_pdf` abstention semantics (2026-11-18)
 
 The first pass recorded `unresolved_provider` ×3. That code means "the
