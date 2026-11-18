@@ -44,6 +44,14 @@ from fmd.plan.rules import (
     SignalWeights,
     detect_family,
 )
+from fmd.plan.versioning import (
+    is_current_version,
+    is_replannable_reason,
+    planner_version,
+    stamp_reason,
+    stamped_version,
+    unstamped_reason,
+)
 
 __all__ = [
     "DEFAULT_RULES",
@@ -65,6 +73,12 @@ __all__ = [
     "classify_content",
     "collect_mentions",
     "detect_family",
+    "is_current_version",
+    "is_replannable_reason",
     "persist_plan",
+    "planner_version",
     "role_for",
+    "stamp_reason",
+    "stamped_version",
+    "unstamped_reason",
 ]

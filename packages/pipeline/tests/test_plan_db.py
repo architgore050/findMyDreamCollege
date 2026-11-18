@@ -9,6 +9,7 @@ from __future__ import annotations
 import shutil
 import uuid
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
@@ -256,3 +257,107 @@ def test_extract_queue_only_returns_planned_documents(db) -> None:
     pending = snapshots.list_extractable("1.0.0", limit=10)
 
     assert [row.document_id for row in pending] == [linked.id]
+
+
+# ------------------------------------------------------------------ planning-pass queue
+
+
+def test_list_plan_candidates_returns_unplanned_and_deferred_only(db) -> None:
+    documents = DocumentsRepo(db)
+    suffix = uuid.uuid4().hex[:6]
+    entity_id = _entity(db, f"Candidate Institute {suffix}")
+
+    never_planned = documents.upsert(
+        DocumentUpsert(url=f"https://example.ac.in/recovered-{suffix}.pdf", domain="example.ac.in")
+    )
+    deferred = documents.upsert(
+        DocumentUpsert(
+            url=f"https://example.ac.in/deferred-{suffix}.pdf",
+            domain="example.ac.in",
+            plan_state="planned",
+            plan_reason="defer_for_text",
+        )
+    )
+    documents.upsert(
+        DocumentUpsert(
+            url=f"https://example.ac.in/linked-{suffix}.pdf",
+            domain="example.ac.in",
+            extraction_family="placement_report",
+            entity_id=entity_id,
+            plan_state="linked",
+            plan_reason="plan_v1",
+        )
+    )
+    documents.upsert(
+        DocumentUpsert(
+            url=f"https://example.ac.in/na-{suffix}.json",
+            domain="example.ac.in",
+            role="inventory",
+            plan_state="not_applicable",
+            plan_reason="plan_v1",
+        )
+    )
+
+    candidates = documents.list_plan_candidates(limit=100)
+
+    assert [row.id for row in candidates] == sorted([never_planned.id, deferred.id])
+
+
+def test_list_plan_candidates_force_skips_current_stamps_and_human_prose(db) -> None:
+    documents = DocumentsRepo(db)
+    suffix = uuid.uuid4().hex[:6]
+    entity_id = _entity(db, f"Stale Institute {suffix}")
+
+    def _linked(name: str, **fields) -> Any:
+        return documents.upsert(
+            DocumentUpsert(
+                url=f"https://example.ac.in/{name}-{suffix}.pdf",
+                domain="example.ac.in",
+                extraction_family="placement_report",
+                entity_id=entity_id,
+                plan_state="linked",
+                **fields,
+            )
+        )
+
+    stale_stamp = _linked("stale", plan_reason="family_undetected|plan_v0")
+    crawl_era = _linked("crawl", plan_reason=None)
+    plain_code = _linked("plain", plan_reason="entity_unresolved")
+    current_stamp = _linked("current", plan_reason="plan_v1")
+    human = _linked("human", plan_reason="resolved by human review (link_entity)")
+
+    stale = documents.list_plan_candidates(limit=100, force=True, planner_version="1")
+
+    assert {row.id for row in stale} == {stale_stamp.id, crawl_era.id, plain_code.id}
+    assert current_stamp.id not in {row.id for row in stale}
+    assert human.id not in {row.id for row in stale}
+
+    # Without the version the coarse queue still returns every planner-shaped row.
+    coarse = documents.list_plan_candidates(limit=100, force=True)
+    assert {row.id for row in coarse} >= {stale_stamp.id, crawl_era.id, plain_code.id}
+
+
+def test_list_plan_candidates_force_excludes_other_decided_states(db) -> None:
+    documents = DocumentsRepo(db)
+    suffix = uuid.uuid4().hex[:6]
+    documents.upsert(
+        DocumentUpsert(
+            url=f"https://example.ac.in/na-{suffix}.json",
+            domain="example.ac.in",
+            role="inventory",
+            plan_state="not_applicable",
+            plan_reason="resolved by human review (mark_not_applicable)",
+        )
+    )
+    documents.upsert(
+        DocumentUpsert(
+            url=f"https://example.ac.in/review-{suffix}.pdf",
+            domain="example.ac.in",
+            plan_state="needs_review",
+            plan_reason="entity_ambiguous",
+        )
+    )
+
+    stale = documents.list_plan_candidates(limit=100, force=True, planner_version="1")
+
+    assert [row.plan_state for row in stale] == ["needs_review"]

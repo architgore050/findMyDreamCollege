@@ -1751,6 +1751,65 @@ class DocumentsRepo:
             ).fetchall()
         return [_document(row) for row in rows]
 
+    def list_plan_candidates(
+        self, *, limit: int = 500, force: bool = False, planner_version: str | None = None
+    ) -> list[DocumentRecord]:
+        """Documents the planning stage (:mod:`fmd.orchestrate.plan`) must decide.
+
+        The default queue is everything that *should* be extractable but is not:
+
+        * ``plan_state IS NULL`` — never planned. Snapshot recovery, backfills
+          and re-crawls that stored documents without running the planner land
+          here; extraction skips them entirely (``list_extractable`` requires a
+          family and an entity).
+        * ``plan_state = 'planned'`` — Phase A deferrals (``defer_for_text``)
+          still waiting for readable text.
+
+        With ``force=True`` the queue widens to *decided* documents
+        (``linked`` / ``needs_review`` / ``abstained`` / ``not_applicable``)
+        that may be stale at the current planner version: rows whose
+        ``plan_reason`` is missing or planner-shaped but carries no
+        ``plan_v<planner_version>`` stamp. Reasons the planner does not write —
+        the free prose human review leaves on a decision — are never returned,
+        so a manual link or exclusion cannot be overwritten by a re-plan.
+        """
+        if not force:
+            with self.db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM documents WHERE plan_state IS NULL OR plan_state = 'planned' "
+                    "ORDER BY id LIMIT %s",
+                    (limit,),
+                ).fetchall()
+            return [_document(row) for row in rows]
+
+        stale_filter = ""
+        params: list[Any] = [limit]
+        if planner_version:
+            # Coarse SQL exclusion of rows already stamped at the current
+            # version; the caller re-checks precisely via fmd.plan.versioning.
+            # IS DISTINCT FROM keeps crawl-era rows (plan_reason IS NULL):
+            # a plain NOT (reason = …) would evaluate to NULL and drop them.
+            stale_filter = (
+                " AND plan_reason IS DISTINCT FROM %s"
+                " AND (plan_reason IS NULL OR plan_reason NOT LIKE %s)"
+            )
+            params = [f"plan_v{planner_version}", f"%|plan_v{planner_version}", limit]
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM documents WHERE plan_state IN "
+                "('linked', 'needs_review', 'abstained', 'not_applicable') "
+                # psycopg formats the whole statement, so literal % is doubled.
+                "AND (plan_reason IS NULL OR plan_reason LIKE '%%|plan_v%%' "
+                "OR plan_reason LIKE 'plan_v%%' "
+                "OR plan_reason IN ('family_undetected', 'ambiguous_family', "
+                "'entity_undetected', 'entity_unresolved', 'entity_ambiguous') "
+                "OR plan_reason LIKE 'unsupported_family:%%')"
+                + stale_filter
+                + " ORDER BY id LIMIT %s",
+                tuple(params),
+            ).fetchall()
+        return [_document(row) for row in rows]
+
     def counts_by_role(self) -> dict[str, int]:
         with self.db.connection() as conn:
             rows = conn.execute(
