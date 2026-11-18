@@ -15,6 +15,12 @@ Items here are deliberately **not** being worked on now. They are blocked by GPU
 | D3 | **20-document bake-off** against the gates (span-exact ≥98%, catastrophic ≤0.5%, null precision ≥95%, recall ≥85%) | Needs GPU + the expanded golden set | 1 day |
 | D4 | **OCR / T2 tier** for scanned PDFs (~25% of corpus) | Needs weights + GPU; currently routes to T3 | 0.5–1 day |
 
+## A2. New requirement (added 2026-11-18) — exam registration windows
+
+| ID | Item | Why it matters | Blocked by |
+|---|---|---|---|
+| D17 | **Exam registration windows** — per exam, per cycle, registration open/close vs sitting date, with observed_at + TTL and supersession; closed ⇒ binary exclusion | A programme can be open while its required exam is closed; the applicant is then ineligible regardless of merit. Spec: `17-exam-registration-requirements.md` | Network for live notifications; **coding can proceed now** (schema/prompts/tests offline) |
+
 ## B. Needs stable network
 
 | ID | Item | Why it waits | Est. |
