@@ -1106,8 +1106,22 @@ def _exam_status(
     closes: datetime | None,
     observed_at: datetime | None,
     ttl_days: int,
+    precision: str | None = None,
+    month_value: str | None = None,
 ) -> tuple[str, bool, str]:
-    if closes is None:
+    """The /api/exams verdict for one stored window.
+
+    Mirrors the ``exam_registration_open`` filter's rules (the filter is
+    authoritative; this projection exists so the exams page can explain
+    itself): stale beyond TTL ⇒ unverified, a month-precision window is
+    unverified inside the printed month rather than given a fabricated day,
+    and a day-precision close never shifts the printed day (date-only closes
+    stay open through the whole IST day; printed times are IST).
+    """
+
+    from fmd.filters.impl import _close_instant, _month_bounds
+
+    if closes is None and month_value is None:
         return "unverified", False, "no registration window extracted"
     if observed_at is None:
         return "unverified", False, "window has no observed_at; cannot verify freshness"
@@ -1118,12 +1132,116 @@ def _exam_status(
     age_days = (now - observed).total_seconds() / 86_400.0
     if age_days > ttl_days:
         return "unverified", True, f"window observed {age_days:.1f}d ago exceeds TTL {ttl_days}d"
-    close_at = closes
-    if (now.tzinfo is None) != (close_at.tzinfo is None):
-        close_at = close_at.replace(tzinfo=UTC) if close_at.tzinfo is None else close_at
+    if precision == "month":
+        bounds = _month_bounds(month_value if month_value is not None else closes)
+        if bounds is None:
+            return (
+                "unverified",
+                False,
+                f"month-precision window {month_value or closes!r} unparseable",
+            )
+        start, end = bounds
+        if now >= end:
+            return (
+                "closed",
+                False,
+                f"registration closed by end of {month_value or start.date().isoformat()[:7]} "
+                "(month precision)",
+            )
+        if now >= start:
+            return (
+                "unverified",
+                False,
+                "closes sometime in "
+                f"{month_value or start.date().isoformat()[:7]} (month precision); "
+                "no day is printed — verify with the authority",
+            )
+        return (
+            "open",
+            False,
+            f"registration closes sometime in {month_value or start.date().isoformat()[:7]}, "
+            "after now (month precision)",
+        )
+    close_at = _close_instant(closes)
+    if close_at is None:
+        return "unverified", False, "closing date unparseable"
     if now < close_at:
         return "open", False, f"registration closes {close_at.date().isoformat()}"
     return "closed", False, f"registration closed {close_at.date().isoformat()}"
+
+
+def _profile_target_cycle(profile: Mapping[str, Any]) -> int | None:
+    target = profile.get("target_intake_year")
+    text = str(target) if target is not None else ""
+    return int(text[:4]) if text[:4].isdigit() else None
+
+
+def _window_claim_for(
+    claims_by_id: Mapping[int, Any], row: Any
+) -> tuple[str | None, str | None, Any]:
+    """(precision, printed date_text, raw claim value) cited by a window row."""
+
+    claim = claims_by_id.get(row.source_claim_id) if row.source_claim_id else None
+    if claim is None:
+        return None, None, None
+    qualifier = claim.qualifier or {}
+    return qualifier.get("precision"), qualifier.get("date_text"), claim.value
+
+
+def _programmes_by_required_exam(database: Database) -> dict[str, list[int]]:
+    """exam_id → programme ids whose extracted claims require that exam."""
+
+    mapping: dict[str, set[int]] = {}
+    repo = ProgrammesRepo(database)
+    claims_repo = ClaimsRepo(database)
+    for programme in repo.list(ProgrammeFilter(limit=1000, offset=0)):
+        for claim in claims_repo.list_for_entity(programme.institution_id):
+            if claim.predicate != "exam_required":
+                continue
+            exam_id = (claim.qualifier or {}).get("exam_id") or claim.value
+            if exam_id:
+                mapping.setdefault(str(exam_id), set()).add(programme.id)
+    return {exam_id: sorted(ids) for exam_id, ids in sorted(mapping.items())}
+
+
+def _deciding_window_row(
+    rows: Sequence[Any], target_cycle: int | None
+) -> Any | None:
+    """The cycle that decides an exam for this profile: the target intake
+    year's window when one exists, else the latest observed cycle."""
+
+    if not rows:
+        return None
+    if target_cycle is not None:
+        matching = [row for row in rows if row.cycle_year == target_cycle]
+        if matching:
+            rows = matching
+    return max(
+        rows,
+        key=lambda row: (
+            row.observed_at.isoformat() if row.observed_at is not None else "",
+            row.cycle_year,
+        ),
+    )
+
+
+def _deadline_sort_instant(
+    closes: datetime | None, precision: str | None, month_value: str | None
+) -> datetime | None:
+    """Earliest instant at which the window may close — the act-before bound.
+
+    Day precision: the close instant itself. Month precision: the month's
+    first IST instant, because a window printed only as "March 2027" may close
+    on the 1st; sorting by that bound never shows an already-maybe-closed
+    window as the safe next action.
+    """
+
+    from fmd.filters.impl import _close_instant, _month_bounds
+
+    if precision == "month":
+        bounds = _month_bounds(month_value if month_value is not None else closes)
+        return bounds[0] if bounds else None
+    return _close_instant(closes)
 
 
 @app.post("/api/exams")
@@ -1145,24 +1263,85 @@ def exam_windows(request: ProfileRequest) -> dict[str, Any]:
     profile = request.profile
     travel_pref = str(profile.get("travel_for_exams", "")).strip().lower()
     forbids_travel = travel_pref in {"no", "false", "none", "not_allowed", "avoids"}
+    target_cycle = _profile_target_cycle(profile)
 
-    windows: dict[str, Any] = {}
+    windows_by_exam: dict[str, list[Any]] = {}
+    claims_by_id: dict[int, Any] = {}
+    programmes_by_exam: dict[str, list[int]] = {}
     if database is not None:
         repo = ExamsRepo(database)
+        claims_repo = ClaimsRepo(database)
         for exam in registry.exams.exams:
-            found = repo.list_windows(exam.id)
-            if found:
-                windows[exam.id] = found[0]
+            windows_by_exam[exam.id] = repo.list_windows(exam.id)
+        for rows in windows_by_exam.values():
+            for row in rows:
+                if row.source_claim_id is not None and row.source_claim_id not in claims_by_id:
+                    claim = claims_repo.get(int(row.source_claim_id))
+                    if claim is not None:
+                        claims_by_id[row.source_claim_id] = claim
+        programmes_by_exam = _programmes_by_required_exam(database)
 
     items: list[dict[str, Any]] = []
+    deadlines: list[dict[str, Any]] = []
     for exam in registry.exams.exams:
-        window = windows.get(exam.id)
-        closes = getattr(window, "registration_closes", None) if window else None
-        observed = getattr(window, "observed_at", None) if window else None
-        if window is None and exam.registration is not None:
-            closes = _parse_exam_datetime(exam.registration.closes)
+        rows = windows_by_exam.get(exam.id, [])
+        cycles: list[dict[str, Any]] = []
+        for row in sorted(rows, key=lambda item: item.cycle_year):
+            precision, date_text, claim_value = _window_claim_for(claims_by_id, row)
+            status, stale, reason = _exam_status(
+                now=now,
+                closes=row.registration_closes,
+                observed_at=row.observed_at,
+                ttl_days=ttl,
+                precision=precision,
+                month_value=claim_value if precision == "month" else None,
+            )
+            cycles.append(
+                {
+                    "cycle_year": row.cycle_year,
+                    "registration_opens": (
+                        row.registration_opens.isoformat() if row.registration_opens else None
+                    ),
+                    "registration_closes": (
+                        row.registration_closes.isoformat() if row.registration_closes else None
+                    ),
+                    "sitting_dates": row.sitting_dates,
+                    "observed_at": row.observed_at.isoformat() if row.observed_at else None,
+                    "stale": stale,
+                    "status": status,
+                    "precision": precision,
+                    "date_text": date_text,
+                    "month_value": claim_value if precision == "month" else None,
+                    "source_claim_id": row.source_claim_id,
+                    "reason": reason,
+                }
+            )
+
+        deciding = _deciding_window_row(rows, target_cycle)
+        precision: str | None = None
+        date_text: str | None = None
+        month_value: str | None = None
+        closes: datetime | None = None
+        observed: datetime | None = None
+        source_claim_id: int | None = None
+        if deciding is not None:
+            precision, date_text, claim_value = _window_claim_for(claims_by_id, deciding)
+            if precision == "month":
+                # Month precision: the stored projection may hold a boundary
+                # datetime, but the claim only ever said the month. Never
+                # publish a fabricated day — the month rides in month_value.
+                month_value = claim_value if isinstance(claim_value, str) else None
+            else:
+                closes = deciding.registration_closes
+            observed = deciding.observed_at
+            source_claim_id = deciding.source_claim_id
         status, stale, reason = _exam_status(
-            now=now, closes=closes, observed_at=observed, ttl_days=ttl
+            now=now,
+            closes=closes,
+            observed_at=observed,
+            ttl_days=ttl,
+            precision=precision,
+            month_value=month_value,
         )
         requires_travel = bool(exam.requires_travel and not exam.remote_options)
         blocked = requires_travel and forbids_travel
@@ -1174,17 +1353,72 @@ def exam_windows(request: ProfileRequest) -> dict[str, Any]:
                 "exam_id": exam.id,
                 "name": exam.name,
                 "country": exam.country,
+                "scope": exam.scope,
                 "status": status,
+                "cycle_year": deciding.cycle_year if deciding is not None else None,
+                "closes": closes.isoformat() if closes else None,
+                "closes_text": date_text,
+                "precision": precision,
+                "sitting_dates": (
+                    deciding.sitting_dates if deciding is not None else None
+                ),
                 "observed_at": observed.isoformat() if observed else None,
                 "stale": stale,
                 "ttl_days": ttl,
                 "requires_travel": requires_travel,
                 "remote_options": bool(exam.remote_options),
                 "travel_blocked": blocked,
-                "deciding_claim_id": getattr(window, "source_claim_id", None) if window else None,
+                "deciding_claim_id": source_claim_id,
                 "reason": reason,
+                "cycles": cycles,
+                "programme_ids": programmes_by_exam.get(exam.id, []),
             }
         )
+
+        # Next actionable deadlines: every cycle that can still be acted on
+        # (open, or unverified-but-future — the action there is verification).
+        if not blocked:
+            for cycle in cycles:
+                cycle_closes = (
+                    _parse_exam_datetime(cycle["registration_closes"])
+                    if cycle["registration_closes"]
+                    else None
+                )
+                sort_at = _deadline_sort_instant(
+                    cycle_closes, cycle["precision"], cycle["month_value"]
+                )
+                if sort_at is None or sort_at <= now or cycle["status"] == "closed":
+                    continue
+                deadlines.append(
+                    {
+                        "exam_id": exam.id,
+                        "name": exam.name,
+                        "cycle_year": cycle["cycle_year"],
+                        "deadline": (
+                            cycle_closes.isoformat()
+                            if cycle_closes and cycle["precision"] != "month"
+                            else None
+                        ),
+                        "deadline_month": (
+                            cycle["month_value"] if cycle["precision"] == "month" else None
+                        ),
+                        "act_before": sort_at.isoformat(),
+                        "precision": cycle["precision"],
+                        "date_text": cycle["date_text"],
+                        "status": cycle["status"],
+                        "stale": cycle["stale"],
+                        "claim_id": cycle["source_claim_id"],
+                        "reason": cycle["reason"],
+                    }
+                )
+
+    deadlines.sort(
+        key=lambda entry: (
+            entry["act_before"],
+            entry["exam_id"],
+            entry["cycle_year"],
+        )
+    )
 
     return _envelope(
         {
@@ -1194,6 +1428,7 @@ def exam_windows(request: ProfileRequest) -> dict[str, Any]:
                 "closed": sum(1 for item in items if item["status"] == "closed"),
                 "unverified": sum(1 for item in items if item["status"] == "unverified"),
             },
+            "next_deadlines": deadlines,
             "profile_persisted": False,
         }
     )

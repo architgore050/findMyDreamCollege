@@ -49,7 +49,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -290,6 +290,30 @@ _DATE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("%d %B %Y", re.compile(r"\b(\d{1,2}\s+[A-Za-z]+\s+\d{4})\b")),
     ("%d %b %Y", re.compile(r"\b(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})\b")),
 )
+
+#: Indian printed deadlines are Asia/Kolkata. A printed time of day is part of
+#: the deadline: "up to 5:00 pm on 12/03/2027" is 2027-03-12T11:30Z, still the
+#: 12th in both IST and UTC. Only a full-date span reaches the time parser.
+_IST = timezone(timedelta(hours=5, minutes=30), "Asia/Kolkata")
+_TIME_OF_DAY = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?", re.I)
+_TIME_OF_DAY_24H = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)(?!\s*[ap]\.?\s*m\.?)", re.I)
+
+_MONTH_NUMBERS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+_MONTH_YEAR = re.compile(r"\b([A-Za-z]{3,9})\.?,?\s+(20\d{2})\b(?!\s*[–-]\s*\d)")
+_NUMERIC_MONTH_YEAR = re.compile(r"\b(1[0-2]|0?[1-9])/(20\d{2})\b")
 
 
 def _map_replace(
@@ -1042,15 +1066,102 @@ def _period_from_span(text: str) -> str | None:
 
 
 def _parse_date(text: str) -> str | None:
+    parsed = _parse_date_token(text)
+    return parsed[0] if parsed is not None else None
+
+
+def _parse_date_token(text: str) -> tuple[str, str] | None:
+    """Parse a full printed date; return ``(ISO date, printed token)``."""
+
     for fmt, pattern in _DATE_PATTERNS:
         match = pattern.search(text)
         if match is None:
             continue
         try:
-            return datetime.strptime(match.group(1), fmt).date().isoformat()
+            return datetime.strptime(match.group(1), fmt).date().isoformat(), match.group(1)
         except ValueError:
             continue
     return None
+
+
+def _parse_month_precision(text: str) -> tuple[str, str] | None:
+    """Parse a month-only printed date; return ``(YYYY-MM, printed token)``.
+
+    Runs only when no full-date pattern matched, so "12 March 2027" never
+    degrades to month precision. The token must name a real month: "Session
+    2026-27" is not a date and stays unparseable.
+    """
+
+    match = _MONTH_YEAR.search(text)
+    if match is not None:
+        month = _MONTH_NUMBERS.get(match.group(1)[:3].lower())
+        if month is not None:
+            return f"{match.group(2)}-{month:02d}", match.group(0)
+    match = _NUMERIC_MONTH_YEAR.search(text)
+    if match is not None:
+        return f"{match.group(2)}-{int(match.group(1)):02d}", match.group(0)
+    return None
+
+
+def _printed_time(text: str) -> tuple[str, int, int] | None:
+    """A printed clock time; return ``(printed token, hour, minute)`` or None."""
+
+    match = _TIME_OF_DAY.search(text)
+    if match is not None:
+        hour = int(match.group(1))
+        if not 1 <= hour <= 12:
+            return None
+        minute = int(match.group(2) or 0)
+        suffix = match.group(3).lower()
+        if suffix == "p" and hour != 12:
+            hour += 12
+        if suffix == "a" and hour == 12:
+            hour = 0
+        return match.group(0), hour, minute
+    match = _TIME_OF_DAY_24H.search(text)
+    if match is not None:
+        return match.group(0), int(match.group(1)), int(match.group(2))
+    return None
+
+
+def _date_derived_value(span_text: str, clean: str) -> DerivedValue:
+    """The deterministic date parser: full date, or month precision, or reject.
+
+    A full date is ``precision: day`` and, when the span prints a time of day,
+    the claim value is the equivalent UTC instant (IST has no DST, so a
+    "5:00 pm on 12/03/2027" deadline stays on the printed day). A month-only
+    span keeps its month as ``YYYY-MM`` with ``precision: month`` — never a
+    fabricated day. ``date_text`` always carries the printed token verbatim.
+    """
+
+    for text in (span_text, clean):
+        parsed = _parse_date_token(text)
+        if parsed is None:
+            continue
+        iso_date, date_token = parsed
+        printed_time = _printed_time(text)
+        if printed_time is not None:
+            time_token, hour, minute = printed_time
+            instant = datetime.combine(
+                datetime.strptime(iso_date, "%Y-%m-%d").date(),
+                time(hour, minute),
+                tzinfo=_IST,
+            ).astimezone(UTC)
+            return DerivedValue(
+                instant.isoformat(),
+                precision="day",
+                date_text=f"{date_token} {time_token}",
+            )
+        return DerivedValue(iso_date, precision="day", date_text=date_token)
+    for text in (span_text, clean):
+        month = _parse_month_precision(text)
+        if month is not None:
+            return DerivedValue(month[0], precision="month", date_text=month[1])
+    return DerivedValue(
+        None,
+        reason="unparseable_value",
+        detail=f"span {span_text!r} is not a recognisable date",
+    )
 
 
 def _parse_boolean(text: str) -> bool | None:
@@ -1096,6 +1207,13 @@ class DerivedValue:
     #: Predicate of the sibling claim that supplied the period, when the span
     #: itself printed none. Review-console provenance, never a model guess.
     period_from: str | None = None
+    #: Date precision the document actually printed: "day" (a full date) or
+    #: "month" (a month-only span such as "March 2027"). Month precision is
+    #: recorded, never completed into a fabricated day.
+    precision: Literal["day", "month"] | None = None
+    #: The printed date token verbatim, kept beside the normalised value so a
+    #: deadline never loses its original printed form.
+    date_text: str | None = None
 
 
 def _derive(
@@ -1177,14 +1295,7 @@ def _derive(
             )
         return DerivedValue(_as_claim_value(number / 100), unit="ratio")
     if kind == "date":
-        parsed = _parse_date(span_text)
-        if parsed is None:
-            return DerivedValue(
-                None,
-                reason="unparseable_value",
-                detail=f"span {span_text!r} is not a recognisable date",
-            )
-        return DerivedValue(parsed)
+        return _date_derived_value(span_text, clean)
     if kind == "boolean":
         parsed_bool = _parse_boolean(span_text)
         if parsed_bool is None:
@@ -1746,6 +1857,14 @@ def _build_claim(  # noqa: PLR0913 - explicit gates are clearer than a bag of st
         if entry.derived.period_from is not None:
             qualifier["period_source"] = entry.derived.period_from
         qualifier["as_of"] = observed_at.date().isoformat() if observed_at is not None else None
+    if spec.unit_kind == "date":
+        # Precision and the printed token are claim metadata, never evidence
+        # substitutions: a month-only window stays month precision and every
+        # deadline keeps its original printed form beside the parsed value.
+        qualifier["precision"] = entry.derived.precision
+        qualifier["date_text"] = entry.derived.date_text
+        if entry.derived.precision == "day" and isinstance(value, str) and "T" in value:
+            qualifier["tz"] = "Asia/Kolkata"
 
     confidence = entry.confidence * match.penalty
     confidence = max(0.0, min(1.0, confidence))

@@ -13,11 +13,13 @@ const STATES = [
   },
   {
     state: "closed",
-    meaning: "Registration close date has passed, using the observed window and its observed_at.",
+    meaning:
+      "Registration close date has passed, using the observed window and its observed_at. This is the date registration closes — never the exam sitting date.",
   },
   {
     state: "unverified",
-    meaning: "The window is missing or stale. Never rendered as open and never treated as pass.",
+    meaning:
+      "The window is missing, stale, or printed only as a month. Never rendered as open and never treated as pass.",
   },
 ] as const;
 

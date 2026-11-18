@@ -2058,3 +2058,104 @@ uv run python -m fmd.cli eval --golden ../../data/golden     # provenance 1.0, g
 aliases, dangling references rejected); `test_verify.py` pins the v3 payload
 and the seat-semantics discrimination; `test_extract_schemas.py` pins v5 and
 the intake/aggregate spec pair.
+
+## 8. Exam registration windows — exam_notification@v3 (2026-11-18)
+
+Programme application windows were tracked; the registration windows of the
+EXAMS an applicant must sit were not, and an unknown window was
+indistinguishable from an open one. Spec `17-exam-registration-requirements.md`
+makes them a v1 hard-filter requirement. This section is the operator-facing
+summary of what now runs; the acceptance tests pin it.
+
+### Extraction (`exam_notification@v3`)
+
+`fmd/extract/prompts/exam_notification/v3.md` replaces v2 as the latest
+version (v1/v2 kept and still replayable). The schema
+(`fmd/extract/schemas/exam_notification.py`) adds three nullable fields —
+`scope` (`exam.scope`), `state` (`exam.state`) and `sitting_dates`
+(`exam.sitting_dates`) — and keeps every v1/v2 field, so old payloads still
+validate. New predicates carry registry rows in `config/predicates.yaml` with
+one-sentence descriptions, like every other row.
+
+The prompt contract adds the two rules the product lives or dies by:
+
+1. **Registration close is not a sitting date.** `registration_closes` is the
+   last date to apply/register; `sitting_dates` is when the exam is held. A
+   document that prints only a sitting date leaves `registration_closes` null.
+   The filter uses registration close only; sitting dates are informational.
+2. **Printed precision is preserved.** A month-only print ("March 2027") is
+   quoted verbatim — never completed into a day. A printed time of day is
+   quoted together with its date ("up to 5:00 pm on 12/03/2027").
+
+### Parsing (`fmd/extract/validate.py`, date branch only)
+
+`_date_derived_value` is the deterministic parser behind `unit_kind: date`:
+
+- **Full date** → `precision: day`, value `YYYY-MM-DD`, printed token stored in
+  the claim qualifier as `date_text`.
+- **Full date + printed time** → value is the UTC instant
+  (`2027-03-12T11:30:00+00:00` for "5:00 pm on 12/03/2027"), qualifier carries
+  `precision: day`, `date_text` and `tz: Asia/Kolkata`. IST has no DST, so a
+  same-day clock time never shifts the printed day.
+- **Month-only** → value `YYYY-MM`, `precision: month`, `date_text` verbatim.
+  No day is fabricated, anywhere. `Session 2026-27` and other non-month words
+  are rejected, not guessed.
+- Full-date patterns always run before the month pattern, so `12 March 2027`
+  never degrades to month precision.
+
+### Filter (`fmd/filters/impl.py: exam_registration_open`)
+
+Unchanged invariants: binary cutoffs, `unknown` is a value, the TTL rule
+(`weights.yaml filter_policy.stale_exam_window_ttl_days`) still turns a stale
+window into `unknown` — render "verify", never "open". On top of that:
+
+- **Supersession.** A claim whose `superseded_by` is set (or that another live
+  claim retires via a `supersedes` qualifier) never decides. A reopened or
+  extended window flips the verdict back to `pass` on the next run; both rows
+  are kept (append-only).
+- **Cycles coexist.** Cycle-tagged windows (`qualifier.cycle_year`) are decided
+  per profile target intake year; a 2026 late-round window says nothing about a
+  2027 intake. No target year → the latest observed tagged window decides and
+  its cycle is reported in `detail.exams[].cycle_year`.
+- **Month precision.** Pass before the month starts, `unknown` inside it
+  (not stale), fail after it ends. Day-level questions inside the month are
+  unanswerable from a month print.
+- **Day boundary.** A date-only close is honoured through the whole IST day
+  (closes 12/03/2027 is still open at 10:00Z on the 12th, closed at 18:31Z).
+  A naive printed time is read as IST; an aware value (UTC from the validator)
+  is compared as an instant.
+- **Exclusion code.** A fail carries `detail.exclusion_reason =
+  exam_registration_closed` beside the deciding claim id and `observed_at`,
+  which the shortlist and exclusions surface.
+
+### API and web
+
+`POST /api/exams` keeps its flat `items` contract and adds: `scope`,
+`cycle_year` (the cycle that decides for the supplied profile), `closes`,
+`closes_text` (printed text), `precision`, `sitting_dates`, per-exam `cycles`
+(each with opens/closes/sittings/`observed_at`/staleness/its own status and
+`source_claim_id`), `programme_ids` (programmes whose extracted
+`exam_required` claims need this exam), and a top-level `next_deadlines`
+sorted ascending by the act-before instant (month precision sorts by the
+month's first IST instant — the earliest the window may close). A
+month-precision window never publishes a fabricated day: `closes` and
+`deadline` are null and `deadline_month` carries `2027-03`.
+
+`apps/web` (`/exams`) renders the cycles column, a "next actionable deadlines"
+panel for the profile, and a month-precision chip; unverified still never
+renders as "open". `apps/web/lib/types.ts` gained additive exam types only.
+
+### Tests (all offline unless a live DB is supplied)
+
+```bash
+cd packages/pipeline && uv run ruff check .
+uv run pytest tests/test_extract_exam_dates.py tests/test_extract_exam_notification.py
+uv run pytest tests/test_filters.py tests/test_exams_api.py
+DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd uv run pytest -q
+uv run python -m fmd.cli eval --golden ../../data/golden   # provenance 1.0
+```
+
+`tests/fixtures/exam/` carries two notification texts (exact dates with a
+printed deadline time; month-precision with "to be notified" sitting). The
+month-precision, supersession, cycle and no-day-shift behaviours are pinned in
+`test_filters.py`; the /api/exams contract in `test_exams_api.py`.

@@ -57,11 +57,13 @@ def test_every_family_declares_a_real_prompt_file_history_with_labels() -> None:
 def test_every_family_keeps_v1_v2_and_tabular_families_add_their_next_version() -> None:
     # fee_structure was at v3, so wave 2 shipped v4 for it; seat_matrix went to
     # v4 in wave 2 and to v5 with the seat-semantics split (intake vs
-    # aggregate); placement_report was at v2, so its next version is v3. Every
+    # aggregate); placement_report was at v2, so its next version is v3;
+    # exam_notification was at v2, so wave 3 (exam windows) shipped v3. Every
     # other family stays at its current latest, and old files are kept
     # everywhere.
     tabular_v4 = {"fee_structure"}
     tabular_v5 = {"seat_matrix"}
+    wave3_v3 = {"exam_notification", "placement_report"}
     for family in FAMILIES:
         versions = prompt_versions(family)
         assert {"v1", "v2"}.issubset(set(versions)), f"{family} must keep v1 and v2"
@@ -70,7 +72,7 @@ def test_every_family_keeps_v1_v2_and_tabular_families_add_their_next_version() 
             expected = "v5"
         elif family in tabular_v4:
             expected = "v4"
-        elif family == "placement_report":
+        elif family in wave3_v3:
             expected = "v3"
         else:
             expected = "v2"

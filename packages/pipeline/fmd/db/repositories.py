@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from fmd.db.connection import Database
 
@@ -486,6 +486,15 @@ class ExamWindowCreate(RowModel):
     sitting_dates: list[Any] | None = None
     source_claim_id: int | None = None
     observed_at: datetime | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _map_sitting_dates_column(cls, data: Any) -> Any:
+        # The row column is ``sitting_dates_json``; without this mapping the
+        # jsonb sitting dates were silently dropped by ``extra="ignore"``.
+        if isinstance(data, dict) and "sitting_dates" not in data and "sitting_dates_json" in data:
+            data = {**data, "sitting_dates": data["sitting_dates_json"]}
+        return data
 
 
 class ExamWindowRecord(ExamWindowCreate):

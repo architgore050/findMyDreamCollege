@@ -11,9 +11,10 @@ carry the deciding evidence and its ``observed_at``.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, time, timedelta, timezone
 from typing import Any, Literal
 
 from fmd.score.evidence import (
@@ -33,10 +34,17 @@ from fmd.score.evidence import (
     TCOA_LO,
     ClaimIndex,
     ClaimView,
+    claim_view,
     numeric,
 )
 
 FilterResult = Literal["pass", "fail", "unknown"]
+
+#: Printed Indian deadlines are Asia/Kolkata (no DST). A date-only close is
+#: honoured through the whole printed IST day; a naive printed time is IST.
+_IST = timezone(timedelta(hours=5, minutes=30), "Asia/Kolkata")
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_MONTH_VALUE = re.compile(r"^(\d{4})-(\d{2})$")
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -435,18 +443,25 @@ def exam_registration_open(
             "no entrance-exam requirement extracted; registration state unverified",
         )
 
+    # Supersession: only claims whose evidence still stands may decide. The DB
+    # layer filters ``superseded_by IS NULL`` before the index is built; raw
+    # claims (fixtures, replays) are filtered here so a superseded window can
+    # never decide, and a reopened/extended window flips the verdict on the
+    # next run without manual edits (spec 17 §5).
+    live = ClaimIndex(_live_claims(programme, index))
     now = ctx.clock()
+    target_cycle = _target_cycle(profile)
     outcomes: list[tuple[str, FilterResult, ClaimView | None, str, bool]] = []
     for requirement in requirements:
         exam_id = str(requirement.qualifier.get("exam_id") or requirement.value)
-        closes = index.latest(EXAM_REGISTRATION_CLOSES, exam_id=exam_id)
+        closes, cycle_note = _deciding_window(live, exam_id, target_cycle)
         if closes is None:
             outcomes.append(
                 (
                     exam_id,
                     "unknown",
                     requirement,
-                    f"no registration window extracted for {exam_id}",
+                    cycle_note or f"no registration window extracted for {exam_id}",
                     False,
                 )
             )
@@ -477,35 +492,244 @@ def exam_registration_open(
                 )
             )
             continue
-        close_at = _as_datetime(closes.value)
-        if close_at is None:
-            outcomes.append(
-                (exam_id, "unknown", closes, f"{exam_id} closing date unparseable", False)
-            )
-            continue
-        now_aligned, close_at = _align(now, close_at)
-        if now_aligned < close_at:
-            outcomes.append(
-                (
-                    exam_id,
-                    "pass",
-                    closes,
-                    f"{exam_id} registration closes {close_at.date().isoformat()}",
-                    False,
-                )
-            )
-        else:
-            outcomes.append(
-                (
-                    exam_id,
-                    "fail",
-                    closes,
-                    f"{exam_id} registration closed {close_at.date().isoformat()}",
-                    False,
-                )
-            )
+        outcomes.append(_window_outcome(exam_id, closes, now))
 
-    return _combine("exam_registration_open", outcomes)
+    decision = _combine("exam_registration_open", outcomes)
+    if decision.result == "fail":
+        # Machine-readable exclusion code: the shortlist cites
+        # exam_registration_closed (with the deciding claim) for a programme
+        # whose required exam can no longer be entered this cycle.
+        decision = replace(
+            decision, detail={**decision.detail, "exclusion_reason": "exam_registration_closed"}
+        )
+    return decision
+
+
+def _live_claims(programme: Any, index: ClaimIndex) -> tuple[ClaimView, ...]:
+    """Claims not retired by append-only supersession.
+
+    A claim is dead when its own ``superseded_by`` is set (the DB convention:
+    the old row points at its replacement) or when another live claim names it
+    via a ``supersedes`` qualifier. Both rows are kept in storage; only the
+    deciding view here filters them.
+    """
+
+    raw = _get(programme, "claims", None)
+    if raw is None:
+        # The programme supplied a ready-made index; supersession was applied
+        # upstream (the API loads claims with ``superseded_by IS NULL``).
+        return tuple(index)
+    parsed: list[tuple[ClaimView, Any]] = []
+    retired: set[str] = set()
+    for item in raw:
+        view = claim_view(item)
+        own = _get(item, "superseded_by", None)
+        if own is None:
+            own = view.qualifier.get("superseded_by")
+        parsed.append((view, own))
+        supersedes = view.qualifier.get("supersedes")
+        if supersedes is not None:
+            retired.add(str(supersedes))
+    live: list[ClaimView] = []
+    for view, own in parsed:
+        if own is not None:
+            continue
+        if view.claim_id is not None and str(view.claim_id) in retired:
+            continue
+        live.append(view)
+    return tuple(live)
+
+
+def _target_cycle(profile: Any) -> int | None:
+    """The profile's target intake year, when stated (2027 → 2027)."""
+
+    target = _profile(profile, "target_intake_year", None)
+    text = str(target) if target is not None else ""
+    return int(text[:4]) if text[:4].isdigit() else None
+
+
+def _cycle_of(claim: ClaimView) -> int | None:
+    cycle = claim.qualifier.get("cycle_year")
+    text = str(cycle) if cycle is not None else ""
+    return int(text[:4]) if text[:4].isdigit() else None
+
+
+def _deciding_window(
+    live: ClaimIndex, exam_id: str, target_cycle: int | None
+) -> tuple[ClaimView | None, str | None]:
+    """Pick the window that decides this exam, honouring cycle separation.
+
+    Windows for different cycles coexist (a 2026 late round next to a 2027
+    main). When any window is cycle-tagged, a profile with a target intake year
+    is decided by that cycle only — a 2026 window says nothing about 2027
+    admission. With no target year the latest observed tagged window decides
+    and its cycle is reported in the decision detail.
+    """
+
+    windows = [
+        claim
+        for claim in live.all(EXAM_REGISTRATION_CLOSES)
+        if str(claim.qualifier.get("exam_id", "")) == exam_id
+    ]
+    if not windows:
+        return None, None
+    tagged = [claim for claim in windows if _cycle_of(claim) is not None]
+    if not tagged:
+        return _latest(windows), None
+    if target_cycle is not None:
+        matching = [claim for claim in tagged if _cycle_of(claim) == target_cycle]
+        if matching:
+            return _latest(matching), None
+        observed_cycles = sorted({_cycle_of(claim) for claim in tagged})
+        return (
+            None,
+            (
+                f"{exam_id} windows observed for cycle(s) {observed_cycles}; "
+                f"profile targets {target_cycle} and no window for it is extracted"
+            ),
+        )
+    return _latest(tagged), None
+
+
+def _latest(claims: Sequence[ClaimView]) -> ClaimView:
+    """The most recently observed claim (superseded rows never reach here)."""
+
+    return max(
+        claims,
+        key=lambda claim: (
+            claim.observed_at.isoformat() if claim.observed_at is not None else "",
+            str(claim.claim_id),
+        ),
+    )
+
+
+def _window_outcome(
+    exam_id: str, closes: ClaimView, now: datetime
+) -> tuple[str, FilterResult, ClaimView | None, str, bool]:
+    """One exam's verdict from its deciding window claim.
+
+    Precision discipline: a month-only window ("March 2027") never fabricates a
+    day — the verdict is pass before the month starts, unknown inside it, fail
+    after it ends. A day-precision close never shifts the printed day: a
+    date-only close stays open through that whole IST day, and a printed time
+    of day is read as IST (Asia/Kolkata has no DST, so the UTC instant lands on
+    the same printed day for any same-day clock time).
+    """
+
+    precision = _norm(closes.qualifier.get("precision") or "day")
+    if precision == "month":
+        bounds = _month_bounds(closes.value)
+        if bounds is None:
+            return (
+                exam_id,
+                "unknown",
+                closes,
+                f"{exam_id} month-precision window {closes.value!r} unparseable",
+                False,
+            )
+        start, end = bounds
+        if _compare(now, end) >= 0:
+            return (
+                exam_id,
+                "fail",
+                closes,
+                f"{exam_id} registration closed by end of {closes.value} (month precision)",
+                False,
+            )
+        if _compare(now, start) >= 0:
+            return (
+                exam_id,
+                "unknown",
+                closes,
+                (
+                    f"{exam_id} closes sometime in {closes.value} (month precision); "
+                    "no day is printed — verify with the authority"
+                ),
+                False,
+            )
+        return (
+            exam_id,
+            "pass",
+            closes,
+            (
+                f"{exam_id} registration closes sometime in {closes.value} "
+                "(month precision), after now"
+            ),
+            False,
+        )
+
+    close_at = _close_instant(closes.value)
+    if close_at is None:
+        return (exam_id, "unknown", closes, f"{exam_id} closing date unparseable", False)
+    if _compare(now, close_at) < 0:
+        return (
+            exam_id,
+            "pass",
+            closes,
+            f"{exam_id} registration closes {close_at.date().isoformat()}",
+            False,
+        )
+    return (
+        exam_id,
+        "fail",
+        closes,
+        f"{exam_id} registration closed {close_at.date().isoformat()}",
+        False,
+    )
+
+
+def _close_instant(value: Any) -> datetime | None:
+    """The instant after which a day-precision window is closed, or None.
+
+    A date-only close ("2027-03-12") becomes the *start of the next IST day*:
+    the printed day is still open, and no deadline is moved across midnight by
+    a timezone conversion. A datetime without an offset is read as IST; an
+    aware datetime (the validator stores UTC plus the printed text) is used
+    as-is.
+    """
+
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=_IST)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if _DATE_ONLY.match(text):
+        try:
+            day = datetime.strptime(text, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+        return datetime.combine(day + timedelta(days=1), time(0, 0), tzinfo=_IST)
+    parsed = _as_datetime(text)
+    if parsed is None:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=_IST)
+
+
+def _month_bounds(value: Any) -> tuple[datetime, datetime] | None:
+    """(start, end-exclusive) of a ``YYYY-MM`` month-precision window, in IST."""
+
+    match = _MONTH_VALUE.match(str(value).strip())
+    if match is None:
+        return None
+    year, month = int(match.group(1)), int(match.group(2))
+    if not 1 <= month <= 12:
+        return None
+    start = datetime(year, month, 1, tzinfo=_IST)
+    end = datetime(year + (month == 12), (month % 12) + 1, 1, tzinfo=_IST)
+    return start, end
+
+
+def _compare(now: datetime, when: datetime) -> int:
+    """Instant comparison tolerating one naive and one aware timestamp."""
+
+    if (now.tzinfo is None) != (when.tzinfo is None):
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        else:
+            when = when.replace(tzinfo=UTC)
+    if now < when:
+        return -1
+    return 0 if now == when else 1
 
 
 def _as_datetime(value: Any) -> datetime | None:
@@ -518,16 +742,6 @@ def _as_datetime(value: Any) -> datetime | None:
         return datetime.fromisoformat(text)
     except ValueError:
         return None
-
-
-def _align(now: datetime, when: datetime) -> tuple[datetime, datetime]:
-    """Bring a naive/aware pair onto one timeline without changing the instant."""
-
-    if now.tzinfo is None and when.tzinfo is not None:
-        return now, when.astimezone(UTC).replace(tzinfo=None)
-    if now.tzinfo is not None and when.tzinfo is None:
-        return now, when.replace(tzinfo=UTC)
-    return now, when
 
 
 def _combine(
@@ -553,6 +767,13 @@ def _combine(
                 "exam_id": exam_id,
                 "result": verdict,
                 "claim_id": claim.claim_id if claim is not None else None,
+                "observed_at": (
+                    claim.observed_at.isoformat()
+                    if claim is not None and claim.observed_at
+                    else None
+                ),
+                "precision": claim.qualifier.get("precision") if claim is not None else None,
+                "cycle_year": claim.qualifier.get("cycle_year") if claim is not None else None,
                 "reason": reason,
                 "stale": stale,
             }
