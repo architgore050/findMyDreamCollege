@@ -278,6 +278,39 @@ budgets:
   hard_stop: true
   cache: true                 # keyed by (purpose, prompt_sha256, input_sha256, model)
 
+chunking:
+  # W4 context chunking (runbook §9): documents whose canonical text cannot fit
+  # one call are split into overlapping windows instead of dying with a 400
+  # "request (N tokens) exceeds the available context size (65536)" that used to
+  # be recorded as http_error. Sizing rule: window_chars =
+  # (context_tokens - output_tokens - prompt_headroom_tokens) * chars_per_token;
+  # every window is a verbatim slice of the canonical text cut at page/line
+  # boundaries, claims are re-anchored to absolute offsets, and overlapping
+  # windows are deduped by (predicate, span) or (predicate, value + row context).
+  enabled: true
+  chars_per_token: 4.0        # conservative text estimate; overestimating only
+                              # moves a doc to the chunk path a few pages early
+  prompt_headroom_tokens: 2048  # system prompt + delimiters + guided-JSON text
+  # output_tokens is unset: it defaults to the profile's max_tokens (4096 for
+  # bulk_extract). Set it here to reserve a different amount per deployment.
+  overlap_tokens: 1024        # ~1 page of annual-report text, duplicated between
+                              # consecutive windows so a quote straddling a cut
+                              # is whole in at least one of the two
+  min_window_chars: 2000      # a smaller tail is merged into the previous
+                              # window instead of becoming a stub model call
+  max_windows_per_document: 24  # per-RUN cost cap. A 400-page report (~27
+                              # windows) stops at 24 and reports
+                              # chunk_budget_exhausted with pages covered vs
+                              # total; raising the cap and rerunning extracts
+                              # the tail without re-extracting the windows
+                              # already done. Must stay small enough that
+                              # window_count * max_tokens fits the budget.
+  # context_tokens is unset: it defaults to the routed profile's own
+  # context_tokens (bulk_extract: 65536, the served -c). Set it here only to
+  # budget BELOW the served ceiling; setting it above is a misconfiguration
+  # that will surface as context_exceeded per window.
+
+
 routing_rules:
   - if: {doc_kind: pdf_scan, pages_gt: 30}
     use: hard_pdf

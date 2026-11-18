@@ -2,18 +2,30 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+import pytest
+
+from fmd.config.models import ModelsConfig
 from fmd.db.repositories import (
     ClaimRecord,
     ClaimsRepo,
+    DocumentUpsert,
     ExtractionRecord,
     ExtractionsRepo,
     LLMCallLog,
+    SnapshotCreate,
     SnapshotRecord,
     SnapshotsRepo,
 )
+from fmd.extract.chunking import (
+    ChunkedExtractError,
+    ContextExceeded,
+    plan_windows,
+)
 from fmd.extract.pipeline import (
     ExtractPipeline,
+    ExtractResult,
     ExtractTarget,
     build_router,
     mock_models,
@@ -21,6 +33,8 @@ from fmd.extract.pipeline import (
 from fmd.extract.prompts import load_prompt, user_message
 from fmd.extract.schemas import PlacementReport
 from fmd.llm import ModelRouter, prompt_hash
+from fmd.llm.providers import ProviderError
+from fmd.orchestrate.ledger import RunSummary
 from fmd.store import SnapshotStore
 
 FIXTURES = Path(__file__).parent / "fixtures" / "extract"
@@ -328,3 +342,521 @@ def _field(quote: str | None, confidence: float | None = 0.9) -> dict:
         "confidence": confidence if quote is not None else None,
         "reason_if_null": None if quote is not None else "not stated in the document",
     }
+
+
+# ------------------------------------------------------------------ W4 chunking
+# Long-document behaviour: windows sized from config/models.yaml:chunking,
+# absolute offsets, overlap dedupe, per-window failure isolation and the honest
+# failure codes. All offline through a scripted router (no provider, no network).
+
+
+CHUNK_FIXTURES = FIXTURES / "chunk"
+ANNUAL_REPORT = CHUNK_FIXTURES / "annual_report.txt"
+ELIGIBLE = "Eligible students: 120"
+PLACED = "Students placed: 96"
+CUMULATIVE = "Cumulative placement record: 96 of 120 placed in 2025."
+#: The measured llama.cpp answer for an over-context request.
+MEASURED_OVERFLOW = "request (70000 tokens) exceeds the available context size (65536)"
+
+# Same arithmetic as _chunk_models: (800 - 200 - 100) tokens * 4 chars/token.
+WINDOW_CHARS = 2000
+OVERLAP_CHARS = 100
+MIN_WINDOW_CHARS = 300
+PLAN_PARAMS = {
+    "window_chars": WINDOW_CHARS,
+    "overlap_chars": OVERLAP_CHARS,
+    "max_windows": 24,
+    "min_window_chars": MIN_WINDOW_CHARS,
+}
+
+PLACEMENT_FIELDS = (
+    "cohort_year",
+    "eligible_count",
+    "placed_count",
+    "placement_rate",
+    "salary_period",
+    "median_salary",
+    "highest_package",
+    "recruiters_count",
+    "internship_counted_as_employment",
+    "outcome_basis",
+)
+
+
+def _chunk_models(registry, **overrides) -> ModelsConfig:
+    """The committed registry plus a small chunking budget for fast tests."""
+    payload = registry.models.model_dump()
+    chunking = {
+        "enabled": True,
+        "chars_per_token": 4.0,
+        "prompt_headroom_tokens": 100,
+        "output_tokens": 200,
+        "context_tokens": 800,
+        "overlap_tokens": 25,
+        "min_window_chars": MIN_WINDOW_CHARS,
+        "max_windows_per_document": 24,
+    }
+    chunking.update(overrides)
+    payload["chunking"] = chunking
+    return ModelsConfig.model_validate(payload)
+
+
+def _report_text(pages: int) -> str:
+    whole = ANNUAL_REPORT.read_text(encoding="utf-8")
+    blocks = whole.split("\n\n")
+    return "".join(block + "\n\n" for block in blocks[:pages])
+
+
+def _marker_payload(user_text: str, index: int = 0) -> dict:
+    """Quote whatever evidence markers this window actually contains.
+
+    ``eligible_count`` prefers the printed "Eligible students" line; windows
+    that only see the cumulative sentence quote that instead — and because the
+    sentence sits in the overlap of two windows, the same fact is recovered
+    twice and must dedupe to one claim.
+    """
+    payload = {name: _field(None) for name in PLACEMENT_FIELDS}
+    if ELIGIBLE in user_text:
+        payload["eligible_count"] = _field(ELIGIBLE)
+    elif CUMULATIVE in user_text:
+        payload["eligible_count"] = _field(CUMULATIVE)
+    if PLACED in user_text:
+        payload["placed_count"] = _field(PLACED)
+    return {name: value for name, value in payload.items() if value["quote"] is not None}
+
+
+class ChunkedScriptedRouter:
+    """Scripted per-window responses; the offline stand-in for the extract model.
+
+    Window 0 is the single-pass call (no ``:w`` suffix on ``input_ref``); the
+    ``fail`` map raises a prepared exception for a window index, which is how
+    provider faults are staged without a network.
+    """
+
+    def __init__(self, models, *, payload_for=None, fail=None) -> None:
+        self.models = models
+        self.payload_for = payload_for
+        self.fail = dict(fail or {})
+        self.calls: list[tuple[int, str]] = []
+
+    def call(self, purpose, schema, system, user, input_ref):
+        index = 0
+        if ":w" in input_ref:
+            index = int(input_ref.rsplit(":w", 1)[1])
+        self.calls.append((index, input_ref))
+        failure = self.fail.get(index)
+        if failure is not None:
+            raise failure
+        payload = self.payload_for(user, index) if self.payload_for else {}
+        return schema.model_validate(payload)
+
+
+def _windows_containing(text: str, marker: str) -> list[int]:
+    position = text.find(marker)
+    plan = plan_windows(text, **PLAN_PARAMS)
+    return [w.index for w in plan.windows if w.char_start <= position < w.char_end]
+
+
+def _chunk_pipeline(tmp_path: Path, text: str, router):
+    store = SnapshotStore(tmp_path)
+    digest = store.put(text.encode("utf-8"))
+    snapshots = FakeSnapshots([_snapshot(1, digest)])
+    extractions = FakeExtractions()
+    claims = FakeClaims()
+    pipeline = ExtractPipeline(
+        router,
+        snapshots=snapshots,
+        extractions=extractions,
+        claims=claims,
+        store=store,
+    )
+    return pipeline, snapshots, extractions, claims, store
+
+
+def test_short_document_keeps_the_single_pass_path_with_one_call(tmp_path, registry) -> None:
+    text = f"{ELIGIBLE}\n{PLACED}\n"
+    router = ChunkedScriptedRouter(
+        _chunk_models(registry),
+        payload_for=lambda user, index: _marker_payload(text),
+    )
+    pipeline, _snapshots, extractions, claims, _store = _chunk_pipeline(tmp_path, text, router)
+    target = ExtractTarget(snapshot_id=1, entity_id=42, family="placement_report")
+
+    result = pipeline.run(target)
+
+    assert len(router.calls) == 1  # one call: the pre-existing path, unchanged
+    assert router.calls[0][0] == 0  # no :w suffix on the input ref
+    assert result.chunking is None
+    assert "chunking" not in extractions.rows[0].structure
+    assert result.rejections == []
+    assert len(claims.rows) == 2
+
+
+def test_long_document_splits_into_windows_and_offsets_stay_absolute(tmp_path, registry) -> None:
+    text = _report_text(60)
+    router = ChunkedScriptedRouter(_chunk_models(registry), payload_for=_marker_payload)
+    pipeline, _snapshots, extractions, claims, _store = _chunk_pipeline(tmp_path, text, router)
+    target = ExtractTarget(snapshot_id=1, entity_id=42, family="placement_report")
+
+    result = pipeline.run(target)
+
+    chunking = result.chunking
+    assert chunking is not None and chunking["mode"] == "chunked"
+    assert chunking["window_count"] >= 2
+    assert [index for index, _ in router.calls] == list(range(1, chunking["window_count"] + 1))
+    assert len({input_ref for _, input_ref in router.calls}) == len(router.calls)
+    assert chunking["truncated"] is False
+    assert chunking["failed_windows"] == []
+    assert all(row["status"] == "ok" for row in chunking["windows"])
+    assert chunking["pages_covered"] == chunking["pages_total"] == 1  # text doc: one block page
+
+    # Spans are global: every claim resolves verbatim in the FULL canonical text
+    # and the page map still resolves the absolute offsets.
+    doc = result.doc
+    assert len(claims.rows) >= 2
+    for claim in claims.rows:
+        assert 0 <= claim.char_start < claim.char_end <= len(text)
+        assert text[claim.char_start : claim.char_end] == claim.quote
+        assert doc.canonical.page_for_offset(claim.char_start) is not None
+    eligible = next(c for c in claims.rows if c.predicate == "placement.eligible_count")
+    assert eligible.char_start == text.find(ELIGIBLE)
+    cumulative = next(c for c in claims.rows if c.quote == CUMULATIVE)
+    assert cumulative.char_start == text.find(CUMULATIVE)
+    assert cumulative.char_start > eligible.char_start
+
+    extraction = extractions.rows[0]
+    assert extraction.text == text
+    assert extraction.structure["chunking"]["window_count"] == chunking["window_count"]
+    assert extraction.structure["outcome_counts"]["resolved"] >= 2
+
+
+def test_overlap_windows_agree_on_one_claim(tmp_path, registry) -> None:
+    whole = _report_text(60)
+    note = "Retention note: the same cohort of 120 students was tracked for three years."
+    text = _text_with_note_in_overlap(whole, note)
+    router = ChunkedScriptedRouter(
+        _chunk_models(registry),
+        payload_for=lambda user, index: (
+            {"eligible_count": _field(note)} if note in user else {}
+        ),
+    )
+    pipeline, _snapshots, extractions, claims, _store = _chunk_pipeline(tmp_path, text, router)
+    target = ExtractTarget(snapshot_id=1, entity_id=42, family="placement_report")
+
+    result = pipeline.run(target)
+
+    covering = _windows_containing(text, note)
+    assert len(covering) >= 2
+    called = {index for index, _ in router.calls}
+    assert set(covering) <= called
+    # Both windows resolved the note; the overlap produced ONE claim, not two.
+    assert len(claims.rows) == 1
+    assert claims.rows[0].quote == note
+    assert claims.rows[0].char_start == text.find(note)
+    assert result.chunking["deduped_within_run"] == 1
+    assert len(extractions.rows) == 1
+
+
+def _text_with_note_in_overlap(text: str, note: str) -> str:
+    """Insert ``note`` (once, inside a page) so two consecutive windows hold it."""
+    for offset in range(1500, len(text), 137):
+        if text[offset - 1] == "\n" or text[offset] == "\n":
+            continue
+        candidate = text[:offset] + note + "\n" + text[offset:]
+        plan = plan_windows(candidate, **PLAN_PARAMS)
+        position = candidate.find(note)
+        covering = [w.index for w in plan.windows if w.char_start <= position < w.char_end]
+        if len(covering) >= 2:
+            return candidate
+    raise AssertionError("no overlap position found for the note")
+
+
+def test_window_failure_is_isolated_and_a_rerun_retries_only_that_window(
+    tmp_path, registry
+) -> None:
+    text = _report_text(60)
+    eligible_windows = _windows_containing(text, ELIGIBLE)
+    placed_windows = _windows_containing(text, PLACED)
+    assert eligible_windows and placed_windows
+    assert set(eligible_windows).isdisjoint(placed_windows)
+    failing = placed_windows[0]
+    models = _chunk_models(registry)
+    router = ChunkedScriptedRouter(
+        models,
+        payload_for=_marker_payload,
+        fail={failing: ProviderError("timeout", "local: request timed out")},
+    )
+    pipeline, snapshots, extractions, claims, store = _chunk_pipeline(tmp_path, text, router)
+    target = ExtractTarget(snapshot_id=1, entity_id=42, family="placement_report")
+
+    first = pipeline.run(target)
+
+    # The failed window did not stop the others: partial success is recorded.
+    assert first.chunking["failed_windows"] == [failing]
+    failed_row = first.chunking["windows"][failing - 1]
+    assert failed_row["code"] == f"chunk_failed:{failing}"
+    assert failed_row["reason"] == "timeout"
+    assert failed_row["status"] == "failed"
+    assert {c.predicate for c in first.claims} == {"placement.eligible_count"}
+    assert len(first.claims) >= 1
+    assert len(extractions.rows) == 1
+    first_extraction = extractions.rows[0]
+
+    # A rerun (resume) calls ONLY the failed window and skips the completed ones.
+    retried = ChunkedScriptedRouter(models, payload_for=_marker_payload)
+    resumed = ExtractPipeline(
+        retried, snapshots=snapshots, extractions=extractions, claims=claims, store=store
+    )
+    second = resumed.run(target)
+
+    assert second.chunking["resumed"] is True
+    assert second.chunking["prior_extraction_id"] == first_extraction.id
+    assert [index for index, _ in retried.calls] == [failing]
+    statuses = {row["index"]: row["status"] for row in second.chunking["windows"]}
+    assert statuses[failing] == "ok"
+    assert all(
+        status == "completed_prior_run"
+        for index, status in statuses.items()
+        if index != failing
+    )
+    # Both facts now exist exactly once across both runs — the retried window's
+    # overlap cannot double-emit what a completed window already stored.
+    keys = [(c.predicate, c.char_start, c.char_end) for c in claims.rows]
+    assert len(keys) == len(set(keys))
+    assert {c.predicate for c in claims.rows} == {
+        "placement.eligible_count",
+        "placement.placed_count",
+    }
+    assert len(extractions.rows) == 2
+    assert second.claims and second.claims[0].extraction_id == extractions.rows[1].id
+
+
+def test_all_windows_failing_persists_nothing_and_raises_chunk_failed(
+    tmp_path, registry
+) -> None:
+    text = _report_text(60)
+    fail = {
+        index: ProviderError("http_error", MEASURED_OVERFLOW) for index in range(1, 40)
+    }
+    router = ChunkedScriptedRouter(_chunk_models(registry), payload_for=_marker_payload, fail=fail)
+    pipeline, _snapshots, extractions, claims, _store = _chunk_pipeline(tmp_path, text, router)
+    target = ExtractTarget(snapshot_id=1, entity_id=42, family="placement_report")
+
+    with pytest.raises(ChunkedExtractError) as excinfo:
+        pipeline.run(target)
+
+    assert excinfo.value.reason.startswith("chunk_failed:")
+    assert "chunk_failed:" in str(excinfo.value)
+    assert extractions.rows == []
+    assert claims.rows == []
+
+
+def test_window_cap_stops_the_run_and_reports_the_budget(tmp_path, registry) -> None:
+    text = _report_text(60)
+    router = ChunkedScriptedRouter(
+        _chunk_models(registry, max_windows_per_document=2), payload_for=_marker_payload
+    )
+    pipeline, _snapshots, extractions, claims, _store = _chunk_pipeline(tmp_path, text, router)
+    target = ExtractTarget(snapshot_id=1, entity_id=42, family="placement_report")
+
+    result = pipeline.run(target)
+
+    # A 400-page report cannot silently become 400 calls: the cap stops the run.
+    assert len(router.calls) == 2
+    chunking = result.chunking
+    assert chunking["truncated"] is True
+    assert chunking["budget_exhausted"] is True
+    assert chunking["window_count"] == 2
+    assert chunking["pages_covered"] <= chunking["pages_total"]
+    assert chunking["failed_windows"] == []
+    assert len(extractions.rows) == 1
+    # the two covered windows reach only pages 1-10: no evidence markers there
+    assert len(claims.rows) == 0
+
+
+def test_over_budget_document_without_chunking_fails_as_context_exceeded(
+    tmp_path, registry
+) -> None:
+    text = _report_text(60)
+    router = ChunkedScriptedRouter(_chunk_models(registry, enabled=False))
+    pipeline, _snapshots, extractions, claims, _store = _chunk_pipeline(tmp_path, text, router)
+    target = ExtractTarget(snapshot_id=1, entity_id=42, family="placement_report")
+
+    with pytest.raises(ContextExceeded) as excinfo:
+        pipeline.run(target)
+
+    # The honest sizing code, raised BEFORE any call — never http_error.
+    assert excinfo.value.reason == "context_exceeded"
+    assert router.calls == []
+    assert extractions.rows == []
+    assert claims.rows == []
+
+
+def test_provider_overflow_answer_is_reclassified_not_http_error(tmp_path, registry) -> None:
+    text = _report_text(60)
+    # A fitting config budget with a provider that 400s anyway (served ceiling
+    # below the configured one): the measured error must surface as
+    # context_exceeded, never as the network-shaped http_error.
+    models = _chunk_models(
+        registry, enabled=False, context_tokens=1000000, prompt_headroom_tokens=100
+    )
+    router = ChunkedScriptedRouter(
+        models, fail={0: ProviderError("http_error", MEASURED_OVERFLOW)}
+    )
+    pipeline, _snapshots, extractions, _claims, _store = _chunk_pipeline(tmp_path, text, router)
+    target = ExtractTarget(snapshot_id=1, entity_id=42, family="placement_report")
+
+    with pytest.raises(ContextExceeded) as excinfo:
+        pipeline.run(target)
+
+    assert excinfo.value.reason == "context_exceeded"
+    assert len(router.calls) == 1
+    assert extractions.rows == []
+
+
+def test_window_overflow_records_context_exceeded_and_the_rest_still_run(
+    tmp_path, registry
+) -> None:
+    text = _report_text(60)
+    failing = _windows_containing(text, PLACED)[0]
+    router = ChunkedScriptedRouter(
+        _chunk_models(registry),
+        payload_for=_marker_payload,
+        fail={failing: ProviderError("http_error", MEASURED_OVERFLOW)},
+    )
+    pipeline, _snapshots, extractions, claims, _store = _chunk_pipeline(tmp_path, text, router)
+    target = ExtractTarget(snapshot_id=1, entity_id=42, family="placement_report")
+
+    result = pipeline.run(target)
+
+    failed_row = result.chunking["windows"][failing - 1]
+    assert failed_row["code"] == f"chunk_failed:{failing}"
+    assert failed_row["reason"] == "context_exceeded"  # not http_error
+    assert result.chunking["failed_windows"] == [failing]
+    assert {c.predicate for c in claims.rows} == {"placement.eligible_count"}
+    assert len(extractions.rows) == 1
+
+
+# ------------------------------------------------------------------ W4 orchestrator
+# The run ledger must show a chunked partial pass (some windows failed, the
+# window budget stopped early) and a sizing fault (context_exceeded) as what
+# they are — never as network-shaped failures.
+
+
+class StubChunkPipeline:
+    """Pipeline stand-in for orchestrator-level assertions."""
+
+    def __init__(self, result: ExtractResult | None = None, error: Exception | None = None):
+        self.result = result
+        self.error = error
+
+    def run_batch(self, targets: list[ExtractTarget]) -> list[ExtractResult]:
+        if self.error is not None:
+            raise self.error
+        return [self.result]
+
+
+def _orchestrator(tmp_path: Path, registry, pipeline) -> Any:
+    from test_orchestrate_support import (
+        MemoryClaims,
+        MemoryDocuments,
+        MemoryExtractions,
+        MemorySnapshots,
+    )
+
+    from fmd.orchestrate.extract import Extractor
+
+    store = SnapshotStore(tmp_path / "store")
+    documents = MemoryDocuments()
+    extractions = MemoryExtractions()
+    snapshots = MemorySnapshots(extractions, documents)
+    claims = MemoryClaims()
+    text = f"{ELIGIBLE}\n{PLACED}\n"
+    digest = store.put(text.encode("utf-8"))
+    document = documents.upsert(
+        DocumentUpsert(
+            url="https://college.ac.in/report.txt",
+            domain="college.ac.in",
+            extraction_family="placement_report",
+            entity_id=7,
+            plan_state="linked",
+        )
+    )
+    snapshots.create(
+        SnapshotCreate(
+            document_id=document.id,
+            sha256=digest,
+            bytes_path=str(store.path_for(digest)),
+            content_type="text/plain",
+            fetched_at=FETCHED_AT,
+        )
+    )
+    router = build_router(registry.models, mock=True, fixtures_dir=LLM_FIXTURES)
+    extractor = Extractor(
+        snapshots=snapshots,
+        documents=documents,
+        extractions=extractions,
+        claims=claims,
+        entities=None,
+        store=store,
+        router=router,
+        pipeline_factory=lambda cls: pipeline,
+        verify=False,
+    )
+    return extractor
+
+
+def _run_summary() -> RunSummary:
+    return RunSummary(
+        run_id="chunk-run", stage="extract", started_at=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+
+
+def test_orchestrator_reports_chunk_failures_and_budget_exhaustion(tmp_path, registry) -> None:
+    target = ExtractTarget(snapshot_id=1, entity_id=7, family="placement_report")
+    result = ExtractResult(
+        target=target,
+        extraction_id=3,
+        claims=[object()],
+        chunking={
+            "mode": "chunked",
+            "window_count": 11,
+            "pages_covered": 50,
+            "pages_total": 60,
+            "truncated": True,
+            "failed_windows": [6, 9],
+            "deduped_claims": 2,
+            "resumed": False,
+        },
+    )
+    extractor = _orchestrator(tmp_path, registry, StubChunkPipeline(result=result))
+
+    summary = _run_summary()
+    extractor.run(summary=summary)
+
+    entry = summary.outcomes[0]
+    assert entry["outcome"] == "extracted"
+    assert entry["reason"] == "chunk_failed:2"  # two failed windows, stable shape
+    assert entry["chunk_failed_windows"] == [6, 9]
+    assert entry["chunking"]["truncated"] is True
+    assert entry["chunking"]["pages_covered"] == 50
+    assert entry["chunking"]["pages_total"] == 60
+    assert summary.counts["chunked_documents"] == 1
+    assert summary.counts["chunk_windows"] == 11
+    assert summary.counts["chunk_failed_windows"] == 2
+    assert summary.counts["chunk_budget_exhausted"] == 1
+
+
+def test_orchestrator_records_context_exceeded_as_a_sizing_fault(
+    tmp_path, registry
+) -> None:
+    extractor = _orchestrator(
+        tmp_path, registry, StubChunkPipeline(error=ContextExceeded("snapshot 1: over budget"))
+    )
+
+    summary = _run_summary()
+    extractor.run(summary=summary)
+
+    entry = summary.outcomes[0]
+    assert entry["outcome"] == "abstained"
+    assert entry["reason"] == "context_exceeded"  # never http_error, never network-shaped

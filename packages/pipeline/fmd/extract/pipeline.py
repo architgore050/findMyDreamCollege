@@ -8,7 +8,8 @@ never computes anything. Every number it publishes has already passed
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,22 @@ from fmd.db.repositories import (
     ExtractionsRepo,
     SnapshotRecord,
     SnapshotsRepo,
+)
+from fmd.extract.chunking import (
+    ChunkedExtractError,
+    ChunkingConfig,
+    ChunkResume,
+    ContextExceeded,
+    chunk_failed_code,
+    claim_keys_record,
+    classify_failure,
+    dedupe_claims,
+    estimate_input_tokens,
+    filter_known_claims,
+    is_context_overflow,
+    known_claim_keys,
+    plan_windows,
+    to_absolute_offsets,
 )
 from fmd.extract.pdf import (
     ExtractedDoc,
@@ -88,6 +105,9 @@ class ExtractResult:
     skipped: bool = False
     needs_review: bool = False
     review: dict[str, Any] | None = None
+    #: Chunk-path summary (``None`` on the single-pass path, which is unchanged).
+    #: Shape documented in ``fmd/extract/chunking.py`` and runbook §9.
+    chunking: dict[str, Any] | None = None
 
 
 class ExtractPipeline:
@@ -130,7 +150,9 @@ class ExtractPipeline:
         if snapshot is None:
             raise ExtractError(f"snapshot {target.snapshot_id} does not exist")
         prompt = load_prompt(target.family)
-        if self._already_extracted(snapshot.id, prompt.ref):
+        already = self._already_extracted(snapshot.id, prompt.ref)
+        resume = self._chunk_resume(snapshot.id, prompt.ref) if already else None
+        if already and (resume is None or not resume.has_failures):
             logger.info(
                 "skipping snapshot %s (%s): already extracted at tool_version %s",
                 snapshot.id,
@@ -162,14 +184,49 @@ class ExtractPipeline:
         purpose = self.policy.profile_for(doc.tier)
         model = self._model_for(purpose)
         observed_at = self.observed_at or snapshot.fetched_at
-
-        payload = self.router.call(
-            purpose,
-            schema,
-            prompt.text,
-            user_message(doc.text),
-            input_ref=f"{snapshot.sha256}:{target.family}:{prompt.version}",
+        config = ChunkingConfig.from_models(
+            self.router.models,
+            (getattr(self.router.models, "profiles", None) or {}).get(purpose),
         )
+        if not config.fits(doc.text):
+            # W4: the canonical text cannot fit one call. Chunk it when enabled;
+            # otherwise fail with the honest sizing code before wasting a call.
+            if not config.enabled:
+                estimated = estimate_input_tokens(
+                    prompt.text, user_message(doc.text), chars_per_token=config.chars_per_token
+                )
+                raise ContextExceeded(
+                    f"snapshot {snapshot.id}: canonical text is {len(doc.text)} chars "
+                    f"(~{estimated} tokens with the system prompt), over the context budget "
+                    f"of {config.context_tokens} tokens ({config.output_tokens} reserved for "
+                    f"output, {config.prompt_headroom_tokens} prompt headroom); enable "
+                    "chunking in config/models.yaml:chunking"
+                )
+            return self._run_chunked(
+                target, snapshot, doc, prompt, schema, purpose, model, observed_at, config, resume
+            )
+
+        try:
+            payload = self.router.call(
+                purpose,
+                schema,
+                prompt.text,
+                user_message(doc.text),
+                input_ref=f"{snapshot.sha256}:{target.family}:{prompt.version}",
+            )
+        except ContextExceeded:
+            raise
+        except Exception as exc:
+            # The provider answered 400 "request (N tokens) exceeds the available
+            # context size" — a sizing fault the estimate under-counted (config
+            # budget above the served ceiling). Record it as context_exceeded,
+            # never http_error; an operator must fix the budget, not retry.
+            if is_context_overflow(str(exc)):
+                raise ContextExceeded(
+                    f"snapshot {snapshot.id}: provider reported the input did not fit the "
+                    f"served context ({exc})"
+                ) from exc
+            raise
         if not isinstance(payload, FamilyDocument):
             raise ExtractError(
                 f"router returned {type(payload).__name__}, expected a "
@@ -234,6 +291,261 @@ class ExtractPipeline:
         ordered = sorted(targets, key=lambda item: (item.snapshot_id, item.family))
         return [self.run(target) for target in ordered]
 
+    # ------------------------------------------------------------------ chunked path
+
+    def _run_chunked(
+        self,
+        target: ExtractTarget,
+        snapshot: SnapshotRecord,
+        doc: ExtractedDoc,
+        prompt: Any,
+        schema: type,
+        purpose: str,
+        model: str | None,
+        observed_at: datetime | None,
+        config: ChunkingConfig,
+        resume: ChunkResume | None,
+    ) -> ExtractResult:
+        """The W4 chunk loop: one call per window, one extraction row per run.
+
+        Each window is a verbatim slice of the canonical text; validation
+        resolves the model's quotes against the window exactly as in the
+        single-pass path, then :func:`to_absolute_offsets` shifts every span to
+        the window's absolute start, so stored ``char_start``/``char_end`` are
+        global and bbox/page projection works unchanged.
+
+        Failure isolation: a window that raises is recorded with
+        ``chunk_failed:<n>`` (plus the classified provider reason) and the
+        remaining windows still run. Partial success is a real extraction row:
+        claims from the windows that resolved are persisted with per-window
+        outcomes, and a rerun retries only the failed windows — windows the
+        prior run completed are skipped from its structure and their claims are
+        excluded from this run by the same dedupe keys, so overlap facts are
+        never written twice.
+
+        The window cap bounds one run's cost. When the cap stops the plan with
+        text uncovered, the extraction records ``chunk_budget_exhausted`` with
+        pages covered vs total; covering the tail needs a higher
+        ``max_windows_per_document`` (and a rerun, which will skip the windows
+        already done). When every window attempted in this pass fails, nothing
+        is persisted and :class:`ChunkedExtractError` is raised so the run
+        ledger records an abstention, not an empty success.
+        """
+        plan = plan_windows(
+            doc.text,
+            window_chars=config.window_chars,
+            overlap_chars=config.overlap_chars,
+            max_windows=config.max_windows_per_document,
+            min_window_chars=config.min_window_chars,
+            page_map=doc.page_map,
+        )
+        logger.info(
+            "snapshot %s: chunking %s chars into %s window(s) (~%s chars each, overlap %s)",
+            snapshot.id,
+            plan.total_chars,
+            plan.window_count,
+            plan.window_chars,
+            plan.overlap_chars,
+        )
+        rejections: list[Rejection] = []
+        rewrites: list[SpanRewrite] = []
+        outcomes: list[FieldOutcome] = []
+        structure_rejections: list[dict[str, Any]] = []
+        structure_rewrites: list[dict[str, Any]] = []
+        structure_outcomes: list[dict[str, Any]] = []
+        adjudications: list[dict[str, Any]] = []
+        window_rows: list[dict[str, Any]] = []
+        collected: list[ClaimCreate] = []
+        for window in plan.windows:
+            prior = resume.completed_row(window) if resume is not None else None
+            row = {
+                "index": window.index,
+                "char_start": window.char_start,
+                "char_end": window.char_end,
+                "core_start": window.core_start,
+                "core_end": window.core_end,
+                "pages": list(window.pages),
+            }
+            window_rows.append(row)
+            if prior is not None:
+                row.update(
+                    status="completed_prior_run",
+                    code=None,
+                    reason=None,
+                    claims=prior.get("claims", 0),
+                    claims_key=prior.get("claims_key", []),
+                    prior_extraction_id=resume.prior_extraction_id,
+                )
+                continue
+            try:
+                payload = self.router.call(
+                    purpose,
+                    schema,
+                    prompt.text,
+                    user_message(window.text),
+                    input_ref=(
+                        f"{snapshot.sha256}:{target.family}:{prompt.version}:w{window.index}"
+                    ),
+                )
+            except Exception as exc:
+                reason = classify_failure(exc)
+                code = chunk_failed_code(window.index)
+                logger.warning(
+                    "window %s/%s of snapshot %s failed (%s): %s",
+                    window.index,
+                    plan.window_count,
+                    snapshot.id,
+                    reason,
+                    exc,
+                )
+                row.update(
+                    status="failed",
+                    code=code,
+                    reason=reason,
+                    detail=str(exc)[:500],
+                    claims=0,
+                    claims_key=[],
+                )
+                continue
+            validation = validate_document(
+                payload,
+                window.text,
+                extraction_id=0,
+                entity_id=target.entity_id,
+                bands=self.bands,
+                observed_at=observed_at,
+                default_confidence=self.default_confidence,
+                tables=doc.tables,
+            )
+            window_adjudications = self._adjudicate(validation.claims, window.text)
+            adjudications.extend({**item, "window": window.index} for item in window_adjudications)
+            window_claims: list[ClaimCreate] = []
+            for claim in validation.claims:
+                adjusted = _apply_adjudications(claim, window_adjudications)
+                window_claims.append(to_absolute_offsets(adjusted, window.char_start))
+            for item in validation.rejections:
+                rejections.append(item)
+                structure_rejections.append({**item.as_dict(), "window": window.index})
+            for item in validation.rewrites:
+                shifted = replace(
+                    item,
+                    after_start=item.after_start + window.char_start,
+                    after_end=item.after_end + window.char_start,
+                )
+                rewrites.append(shifted)
+                structure_rewrites.append({**shifted.as_dict(), "window": window.index})
+            for item in validation.outcomes:
+                absolute = replace(
+                    item,
+                    char_start=(
+                        item.char_start + window.char_start
+                        if item.char_start is not None
+                        else None
+                    ),
+                    char_end=(
+                        item.char_end + window.char_start if item.char_end is not None else None
+                    ),
+                )
+                outcomes.append(absolute)
+                structure_outcomes.append({**absolute.as_dict(), "window": window.index})
+            row.update(
+                status="ok",
+                code=None,
+                reason=None,
+                claims=len(window_claims),
+                rejections=len(validation.rejections),
+                claims_key=[claim_keys_record(claim) for claim in window_claims],
+            )
+            collected.extend(window_claims)
+
+        deduped, dropped_in_run = dedupe_claims(collected)
+        if resume is not None:
+            kept, dropped_prior = filter_known_claims(deduped, resume.known)
+        else:
+            kept, dropped_prior = deduped, 0
+
+        failed_rows = [row for row in window_rows if row.get("status") == "failed"]
+        attempted = [row for row in window_rows if row.get("status") in {"ok", "failed"}]
+        if attempted and all(row["status"] == "failed" for row in attempted):
+            codes = ", ".join(str(row["code"]) for row in failed_rows)
+            raise ChunkedExtractError(
+                len(failed_rows),
+                f"snapshot {snapshot.id}: all {len(failed_rows)} window(s) failed ({codes}); "
+                "no extraction recorded this pass",
+            )
+
+        chunk_summary = {
+            "mode": "chunked",
+            "config": {
+                "context_tokens": config.context_tokens,
+                "output_tokens": config.output_tokens,
+                "prompt_headroom_tokens": config.prompt_headroom_tokens,
+                "chars_per_token": config.chars_per_token,
+                "window_chars": config.window_chars,
+                "overlap_chars": config.overlap_chars,
+                "min_window_chars": config.min_window_chars,
+                "max_windows_per_document": config.max_windows_per_document,
+            },
+            "estimated_single_pass_tokens": estimate_input_tokens(
+                prompt.text, user_message(doc.text), chars_per_token=config.chars_per_token
+            ),
+            "window_count": plan.window_count,
+            "total_chars": plan.total_chars,
+            "truncated": plan.truncated,
+            "budget_exhausted": plan.truncated,
+            "pages_covered": plan.pages_covered,
+            "pages_total": plan.pages_total,
+            "windows": window_rows,
+            "failed_windows": [row["index"] for row in failed_rows],
+            "deduped_claims": dropped_in_run + dropped_prior,
+            "deduped_within_run": dropped_in_run,
+            "deduped_against_prior": dropped_prior,
+            "resumed": resume is not None,
+            "prior_extraction_id": resume.prior_extraction_id if resume else None,
+        }
+
+        extraction = self.extractions.create(
+            ExtractionCreate(
+                snapshot_id=snapshot.id,
+                tool=self.tool,
+                tool_version=self.tool_version,
+                model=model,
+                prompt_version=prompt.ref,
+                page_range=_page_range(doc),
+                text=doc.text,
+                structure={
+                    **doc.to_structure(),
+                    "family": target.family,
+                    "prompt_sha256": prompt.sha256,
+                    "rejections": structure_rejections,
+                    "rewrites": structure_rewrites,
+                    "outcomes": structure_outcomes,
+                    "outcome_counts": _outcome_counts(structure_outcomes),
+                    "adjudications": adjudications,
+                    "chunking": chunk_summary,
+                },
+            )
+        )
+
+        stored: list[Any] = []
+        for claim in kept:
+            adjusted = _attach_bbox_provenance(claim, doc)
+            stored.append(
+                self.claims.create(adjusted.model_copy(update={"extraction_id": extraction.id}))
+            )
+
+        return ExtractResult(
+            target=target,
+            extraction_id=extraction.id,
+            doc=doc,
+            claims=stored,
+            rejections=rejections,
+            rewrites=rewrites,
+            outcomes=outcomes,
+            adjudications=adjudications,
+            chunking=chunk_summary,
+        )
+
     # ------------------------------------------------------------------ internals
 
     def _already_extracted(self, snapshot_id: int, prompt_ref: str) -> bool:
@@ -241,6 +553,48 @@ class ExtractPipeline:
             if existing.tool_version == self.tool_version and existing.prompt_version == prompt_ref:
                 return True
         return False
+
+    def _chunk_resume(self, snapshot_id: int, prompt_ref: str) -> ChunkResume | None:
+        """Resume state from the latest chunked extraction at this tool version.
+
+        Returns ``None`` when the snapshot has no chunked extraction, so plain
+        single-pass records keep the legacy skip behaviour untouched. Completed
+        windows are keyed by their absolute span — never by index — so a config
+        change between runs cannot mistake one window for another. Windows the
+        prior run recorded as ``failed`` are what a rerun retries.
+        """
+        for record in reversed(self.extractions.list_for_snapshot(snapshot_id)):
+            if record.tool_version != self.tool_version or record.prompt_version != prompt_ref:
+                continue
+            chunking = (record.structure or {}).get("chunking")
+            if not isinstance(chunking, Mapping) or chunking.get("mode") != "chunked":
+                return None
+            completed: dict[tuple[int, int], dict[str, Any]] = {}
+            keys: list[Mapping[str, Any]] = []
+            has_failures = False
+            for row in chunking.get("windows") or []:
+                if not isinstance(row, Mapping):
+                    continue
+                status = row.get("status")
+                start, end = row.get("char_start"), row.get("char_end")
+                if status == "failed":
+                    has_failures = True
+                if (
+                    status in {"ok", "completed_prior_run"}
+                    and isinstance(start, int)
+                    and isinstance(end, int)
+                ):
+                    completed[(start, end)] = dict(row)
+                for item in row.get("claims_key") or []:
+                    if isinstance(item, Mapping):
+                        keys.append(item)
+            return ChunkResume(
+                prior_extraction_id=record.id,
+                completed=completed,
+                known=known_claim_keys(keys),
+                has_failures=has_failures,
+            )
+        return None
 
     def _model_for(self, purpose: str) -> str | None:
         profile = self.router.models.profiles.get(purpose)
@@ -330,6 +684,15 @@ def _page_range(doc: ExtractedDoc) -> str | None:
         return None
     pages = [span.page for span in doc.page_map]
     return f"{min(pages)}-{max(pages)}"
+
+
+def _outcome_counts(structure_outcomes: list[dict[str, Any]]) -> dict[str, int]:
+    """Per-outcome counts over every window's merged per-field results."""
+    counts: dict[str, int] = {}
+    for outcome in structure_outcomes:
+        key = str(outcome.get("outcome"))
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 # --------------------------------------------------------------------------- router
