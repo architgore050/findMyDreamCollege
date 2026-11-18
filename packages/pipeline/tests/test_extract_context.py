@@ -168,6 +168,65 @@ def test_row_identity_is_part_of_the_claim_qualifier() -> None:
     )
 
 
+def test_wave2_seat_columns_stay_row_scoped_and_column_safe() -> None:
+    """Wave-2 columns (sanctioned vs admitted) keep the row-context discipline.
+
+    Both colleges print 20/18, so each quote is ambiguous document-wide; the
+    context must resolve each to one institute block and the value must be
+    parsed from that row's own numeric cell, never the serial number.
+    """
+    tables = [
+        build_table(
+            [
+                ["S.N", "Name of the Institution", "Course", "Sanctioned", "Admitted"],
+                [
+                    "1",
+                    "Institute 1 Medical College",
+                    "1. B.Sc. Medical Laboratory Technology",
+                    "20",
+                    "18",
+                ],
+                [
+                    "2",
+                    "Institute 2 Medical College",
+                    "1. B.Sc. Medical Laboratory Technology",
+                    "20",
+                    "18",
+                ],
+            ],
+            page=1,
+        )
+    ]
+    text = linearise(tables)
+    document = SeatMatrix(
+        total_seats=ExtractedField(
+            quote="B.Sc. Medical Laboratory Technology 20",
+            context="Institute 2 Medical College",
+            confidence=0.9,
+        ),
+        admitted=ExtractedField(quote="18", context="Institute 2 Medical College", confidence=0.9),
+    )
+
+    result = validate(document, text, tables=tables)
+
+    assert result.rejections == []
+    by_predicate = {claim.predicate: claim for claim in result.claims}
+    total = by_predicate["seats.total"]
+    admitted = by_predicate["seats.admitted"]
+    assert total.value == 20
+    assert admitted.value == 18
+    for claim in (total, admitted):
+        assert claim.qualifier["disambiguation"] == "context_row"
+        assert claim.qualifier["row"]["table_page"] == 1
+        assert claim.qualifier["row"]["row_label"] == "1. B.Sc. Medical Laboratory Technology"
+        assert claim.qualifier["context_quote"] == "Institute 2 Medical College"
+    assert total.qualifier["row"]["column_header"] == "Sanctioned"
+    assert admitted.qualifier["row"]["column_header"] == "Admitted"
+    # admitted within sanctioned: the wave-2 cross-guard does not fire
+    assert total.qualifier["row"]["value_cell"] == "20"
+    assert admitted.qualifier["row"]["value_cell"] == "18"
+
+
 def test_context_that_names_a_block_without_the_quote_is_rejected() -> None:
     tables = [
         build_table(

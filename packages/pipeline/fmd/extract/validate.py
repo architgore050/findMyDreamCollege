@@ -30,7 +30,12 @@ turns that quote into a claim deterministically:
 3. **Apply semantic guards** that are independent of the model: a salary must
    carry a printed period, a rate's numerator cannot exceed its denominator, a
    placement rate cannot exceed 100%, placements cannot exceed eligible
-   students, seat quotas cannot exceed the sanctioned total.
+   students, seat quotas cannot exceed the sanctioned total, and admitted
+   students cannot exceed the sanctioned intake. Every money field must end up
+   with a currency and a period **on the claim itself**: the period may come
+   from the field's own span or from the document-level period sibling named by
+   ``FieldSpec.period_source`` (``fee.period``, ``placement.salary_period``) —
+   never from a default. A money claim that still has no period is rejected.
 
 A claim is rejected, never silently fixed. Rejections and per-field outcomes
 (``resolved``, ``ambiguous``, ``unresolved``, ``rejected_guard:<name>``) are
@@ -249,17 +254,33 @@ _PERCENT_MARK = re.compile(r"%|\bper\s*cent\b|\bpercent(?:age)?\b", re.I)
 _GRADE = re.compile(r"\b(O|A\+\+|A\+|A|B\+\+|B\+|B|C\+\+|C)\b")
 
 _PERIOD_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("per_month", re.compile(r"per\s*month|monthly|p\.?\s*m\.?|/\s*month\b", re.I)),
-    ("per_semester", re.compile(r"per\s*semester|semester|/\s*sem\b", re.I)),
+    # Devanagari words are printed period words, not a guess: वर्ष = year,
+    # मासिक/माह = monthly, सेमेस्टर = semester (Hindi fee/salary pages).
+    (
+        "per_month",
+        re.compile(r"per\s*month|monthly|p\.?\s*m\.?|/\s*month\b|मासिक|माह", re.I),
+    ),
+    (
+        "per_semester",
+        re.compile(r"per\s*semester|semester|/\s*sem\b|सेमेस्टर", re.I),
+    ),
     (
         "per_year",
         re.compile(
-            r"per\s*annum|per\s*year|annually|annual|p\.?\s*a\.?|/\s*year\b|\ba\s+year\b",
+            r"per\s*annum|per\s*year|annually|annual|p\.?\s*a\.?|/\s*year\b|\ba\s+year\b"
+            r"|first[-\s]?year|वर्ष",
             re.I,
         ),
     ),
     ("one_time", re.compile(r"one[-\s]?time|registration\s+fee|application\s+fee", re.I)),
 )
+
+#: ``fee.period`` narrows to this vocabulary; each word maps to a claim period.
+_DOCUMENT_PERIOD_WORDS = {
+    "year": "per_year",
+    "semester": "per_semester",
+    "month": "per_month",
+}
 
 _DATE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("%Y-%m-%d", re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")),
@@ -1072,6 +1093,9 @@ class DerivedValue:
     period: str | None = None
     reason: RejectionReason | None = None
     detail: str = ""
+    #: Predicate of the sibling claim that supplied the period, when the span
+    #: itself printed none. Review-console provenance, never a model guess.
+    period_from: str | None = None
 
 
 def _derive(
@@ -1389,6 +1413,8 @@ def validate_document(
                 quote=entry.quote,
             )
 
+    _apply_period_sources(resolved)
+
     guards = _cross_guards(resolved)
 
     context = _context_values(resolved)
@@ -1474,6 +1500,46 @@ def _context_currency(resolved: list[_ResolvedField]) -> str | None:
     return None
 
 
+def _sibling_period_value(text: str) -> str | None:
+    """Canonical claim period for a period sibling's quoted text.
+
+    Accepts both the printed phrase (``per annum``) and the narrowed
+    ``fee.period`` vocabulary (``year`` | ``semester`` | ``month``). Anything
+    else returns ``None``: an unmappable phrase is not a period.
+    """
+    period = _period_from_span(text)
+    if period is not None:
+        return period
+    return _DOCUMENT_PERIOD_WORDS.get(text.strip().casefold())
+
+
+def _apply_period_sources(resolved: list[_ResolvedField]) -> None:
+    """Fill a money field's period from the sibling claim the schema names.
+
+    A fee table prints the period once (a header or a note), not on every
+    cell. When a money span carries no period of its own, the sibling named by
+    ``FieldSpec.period_source`` (``fee.period``, ``placement.salary_period``)
+    supplies it from its own quoted claim, and the money claim records that
+    provenance. A money field whose period is still missing is left ``None``
+    and is rejected downstream by ``period_required`` — never defaulted.
+    """
+    by_name = {entry.name: entry for entry in resolved}
+    for entry in resolved:
+        if entry.rejection is not None or entry.derived is None:
+            continue
+        if entry.derived.period is not None or entry.spec.period_source is None:
+            continue
+        sibling = by_name.get(entry.spec.period_source)
+        if sibling is None or sibling.rejection is not None:
+            continue
+        if sibling.derived is None or sibling.derived.value is None:
+            continue
+        period = _sibling_period_value(str(sibling.derived.value))
+        if period is None:
+            continue
+        entry.derived = replace(entry.derived, period=period, period_from=sibling.spec.predicate)
+
+
 def _context_values(resolved: list[_ResolvedField]) -> dict[str, JsonScalar]:
     values: dict[str, JsonScalar] = {}
     for entry in resolved:
@@ -1552,6 +1618,15 @@ def _cross_guards(resolved: list[_ResolvedField]) -> dict[str, tuple[str, str]]:
                             f"quota total {combined:g} exceeds sanctioned intake {total_value:g}",
                         ),
                     )
+    admitted = values("seats.admitted")
+    if total is not None and admitted is not None:
+        total_value = float(total[1])
+        admitted_value = float(admitted[1])
+        if admitted_value > total_value:
+            guards[admitted[0]] = (
+                "admitted_exceeds_sanctioned_intake",
+                f"admitted {admitted_value:g} exceeds sanctioned intake {total_value:g}",
+            )
     return guards
 
 
@@ -1587,11 +1662,17 @@ def _build_claim(  # noqa: PLR0913 - explicit gates are clearer than a bag of st
             quote=entry.quote,
         )
     if spec.period_required and entry.derived.period is None:
+        source = (
+            f" and its {spec.period_source!r} sibling states none" if spec.period_source else ""
+        )
         return Rejection(
             field=entry.name,
             predicate=spec.predicate,
             reason="missing_period",
-            detail="salary span states no period (per month / per year); unusable without one",
+            detail=(
+                "money span states no period (per month / per year / per semester)"
+                f"{source}; unusable without one"
+            ),
             quote=entry.quote,
         )
     if unit is not None and spec.unit_kind == "money" and unit not in bands.currencies:
@@ -1654,6 +1735,8 @@ def _build_claim(  # noqa: PLR0913 - explicit gates are clearer than a bag of st
 
     if spec.unit_kind == "money":
         qualifier["period"] = entry.derived.period
+        if entry.derived.period_from is not None:
+            qualifier["period_source"] = entry.derived.period_from
         qualifier["as_of"] = observed_at.date().isoformat() if observed_at is not None else None
 
     confidence = entry.confidence * match.penalty

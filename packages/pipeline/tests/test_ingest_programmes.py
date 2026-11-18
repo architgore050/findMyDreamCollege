@@ -225,3 +225,72 @@ def test_dedupe_url_identity_helpers() -> None:
     assert is_same_document("https://a.ac.in/list?page=1", "https://a.ac.in/list?page=2") is True
     assert is_same_document("https://a.ac.in/a.pdf", "https://a.ac.in/b.pdf") is False
     assert classify({"url": "https://a.ac.in/a.pdf", "mode": "simhash"}).verdict == "unknown"
+
+
+# ------------------------------------------------------------------ wave-2 seat predicates
+
+
+def test_wave2_seat_predicates_materialise_with_field_sources() -> None:
+    """``seats.sanctioned`` / ``seats.duration_months`` are consumed when present."""
+    claims = [
+        claim(1, 9, "seats.programme_name", "B.Sc. MLT"),
+        claim(2, 9, "seats.sanctioned", 50, unit="count"),
+        claim(3, 9, "seats.duration_months", 24, unit="months"),
+    ]
+    drafts, rejected = programme_drafts(claims, mapping())
+
+    assert rejected == []
+    draft = drafts[0]
+    assert (draft.seats, draft.duration_months) == (50, 24)
+    assert draft.field_sources["seats.sanctioned"] == "2"
+    assert draft.field_sources["seats.duration_months"] == "3"
+    assert draft.needs_review is False
+
+
+def test_seats_total_takes_precedence_over_the_sanctioned_spelling() -> None:
+    """One number, two spellings: the canonical predicate wins when both exist."""
+    claims = [
+        claim(1, 3, "seats.programme_name", "B.Sc. MLT"),
+        claim(2, 3, "seats.total", 60, unit="count"),
+        claim(3, 3, "seats.sanctioned", 45, unit="count"),
+    ]
+    drafts, _ = programme_drafts(claims, mapping())
+
+    assert drafts[0].seats == 60
+    assert drafts[0].field_sources["seats.total"] == "2"
+    assert "seats.sanctioned" not in drafts[0].field_sources
+
+
+def test_curriculum_duration_takes_precedence_over_the_seat_matrix_duration() -> None:
+    claims = [
+        claim(1, 4, "seats.programme_name", "B.Sc. MLT"),
+        claim(2, 4, "curriculum.duration_months", 48, unit="months"),
+        claim(3, 4, "seats.duration_months", 24, unit="months"),
+    ]
+    drafts, _ = programme_drafts(claims, mapping())
+
+    assert drafts[0].duration_months == 48
+    assert drafts[0].field_sources["curriculum.duration_months"] == "2"
+
+
+def test_seat_duration_with_a_non_month_unit_is_never_consumed() -> None:
+    claims = [
+        claim(1, 6, "seats.programme_name", "B.Sc. MLT"),
+        claim(2, 6, "seats.duration_months", 4, unit="count"),
+    ]
+    drafts, _ = programme_drafts(claims, mapping())
+
+    assert drafts[0].duration_months is None
+    assert "seats.duration_months" not in drafts[0].field_sources
+
+
+def test_semesters_are_still_never_converted_to_months() -> None:
+    """No derivation: 8 semesters does not become 48 months at this stage."""
+    claims = [
+        claim(1, 5, "seats.programme_name", "B.Sc. MLT"),
+        claim(2, 5, "curriculum.semesters", 8, unit="count"),
+    ]
+    drafts, _ = programme_drafts(claims, mapping())
+
+    assert drafts[0].duration_months is None
+    assert "curriculum.semesters" not in drafts[0].field_sources

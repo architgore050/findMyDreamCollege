@@ -906,10 +906,12 @@ sources:
           - accreditation.programme_name
         duration_month_predicates:
           - curriculum.duration_months
+          - seats.duration_months
         internship_month_predicates:
           - curriculum.internship_months
         seats_predicates:
           - seats.total
+          - seats.sanctioned
         medium_predicates:
           - curriculum.medium
           - programme.medium

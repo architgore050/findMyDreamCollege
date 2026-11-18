@@ -127,13 +127,13 @@ def test_mock_pipeline_persists_validated_claims_from_recorded_fixture(
     extraction = extractions.rows[0]
     assert extraction.snapshot_id == 1
     assert extraction.tool == "fmd.extract"
-    assert extraction.prompt_version == "placement_report@v2"
+    assert extraction.prompt_version == "placement_report@v3"
     assert extraction.model == registry.models.profiles["bulk_extract"].model
     assert extraction.structure["tier"] == "T0"
     assert extraction.structure["family"] == "placement_report"
     assert extraction.structure["prompt_sha256"] == load_prompt("placement_report").sha256
-    assert extraction.structure["outcome_counts"]["resolved"] == 7
-    assert extraction.structure["outcome_counts"]["abstained"] == 1
+    assert extraction.structure["outcome_counts"]["resolved"] == 8
+    assert extraction.structure["outcome_counts"]["abstained"] == 2
     assert len(sink.calls) == 1
     expected_prompt = prompt_hash(load_prompt("placement_report").text, user_message(text))
     assert sink.calls[0].prompt_sha256 == expected_prompt
@@ -145,6 +145,7 @@ def test_mock_pipeline_persists_validated_claims_from_recorded_fixture(
         "placement.eligible_count",
         "placement.placed_count",
         "placement.rate",
+        "placement.salary_period",
         "salary.median",
         "placement.internship_counted_as_employment",
         "placement.basis",

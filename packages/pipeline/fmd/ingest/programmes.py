@@ -33,15 +33,21 @@ from fmd.er.normalise import normalise_name
 #: Predicate vocabulary is data. The defaults mirror the committed registry so
 #: offline tests and one-off scripts work without a config dir; production
 #: always reads ``params.programme_mapping`` from the institution-site source.
+#: ``seats.sanctioned`` and ``seats.duration_months`` are the wave-2 seat-matrix
+#: predicates; both are consumed when present and never invented. Semesters are
+#: still not converted to months.
 DEFAULT_PROGRAMME_MAPPING: dict[str, Any] = {
     "name_predicates": [
         "curriculum.programme_name",
         "seats.programme_name",
         "accreditation.programme_name",
     ],
-    "duration_month_predicates": ["curriculum.duration_months"],
+    "duration_month_predicates": [
+        "curriculum.duration_months",
+        "seats.duration_months",
+    ],
     "internship_month_predicates": ["curriculum.internship_months"],
-    "seats_predicates": ["seats.total"],
+    "seats_predicates": ["seats.total", "seats.sanctioned"],
     "medium_predicates": ["curriculum.medium", "programme.medium"],
     "affiliated_university_predicates": [
         "curriculum.affiliated_university",
