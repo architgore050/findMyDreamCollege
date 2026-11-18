@@ -23,6 +23,11 @@ fmd-patch-<wave>-<workstream>-<base7>-<UTC>-<seq>.md
 - `.patch` = `git diff --binary --full-index --find-renames <BASE_SHA>...HEAD`
 - Review patches: `fmd-patch-<wave>-<workstream>-review-<prhead7>-<UTC>-<seq>-r01.patch`
 
+**Auxiliary artifacts are always prefixed with the patch stem**, never generic names:
+`<patch-stem>-findings.json`, `<patch-stem>-notes.md`, `<patch-stem>-screenshot.png`.
+A file called `findings.json` is ambiguous the moment a second agent runs — download order
+must never be the only thing distinguishing two agents' output.
+
 ## Manifest (`.json`)
 
 ```json

@@ -21,7 +21,9 @@
 
 1. Copy one prompt file to a cloud agent (full text, no edits — it is self-contained).
 2. The agent clones `https://github.com/architgore050/findMyDreamCollege.git`, checks out the base SHA, works on its branch, and writes the three patch files at its workspace root.
-3. Copy those three files into `~/Downloads` (or anywhere you like).
+3. Copy the three files into `~/Downloads` (or anywhere you like). Any extra artifact
+   MUST be named `<patch-stem>-<what>.json/.md` — never `findings.json`, because a second
+   agent's file would collide and only download order would distinguish them.
 4. Tell me: **"FMD-CLOUD-00N finished"**.
 5. I run one local intake agent for the batch, which:
    - finds the files by the patch stem (searches `~/Downloads`, `~/Downloads/*/`, and `tmp/patches/incoming/`);
