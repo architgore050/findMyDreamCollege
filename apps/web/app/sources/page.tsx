@@ -123,7 +123,7 @@ export default async function SourcesPage() {
                   </td>
                   <td className="num text-[11px]">{source.cadence_days} d</td>
                   <td className="num text-[11px]">
-                    {source.adapter}
+                    {source.adapter ?? "no adapter"}
                     {source.requires_manual_review ? (
                       <span className="mt-1 block font-sans text-[10px] font-semibold text-amber-950">
                         requires manual review

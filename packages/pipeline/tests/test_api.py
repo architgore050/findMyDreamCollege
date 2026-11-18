@@ -117,12 +117,52 @@ def test_exams_is_a_post_and_degrades_without_db(monkeypatch) -> None:
 
 
 def test_admin_write_endpoints_are_gated(monkeypatch) -> None:
+    # The admin gate resolves before the database dependency, so every case here
+    # is asserted with no database reachable (the DB-down 503 must never shadow
+    # the auth verdict, and auth must never need a live Postgres).
+    def boom() -> None:
+        raise DatabaseError("cannot connect")
+
     monkeypatch.delenv("FMD_ADMIN_TOKEN", raising=False)
     assert client.post("/api/scoring/rerun").status_code == 503
 
     monkeypatch.setenv("FMD_ADMIN_TOKEN", "test-token")
     assert client.post("/api/scoring/rerun").status_code == 401
     assert client.post("/api/scoring/rerun", headers={"X-Admin-Token": "wrong"}).status_code == 401
+
+    # Valid token but no database: 503 database_unavailable, not a crash.
+    monkeypatch.setattr(api_module, "get_database", boom)
+    authorized = client.post("/api/scoring/rerun", headers={"X-Admin-Token": "test-token"})
+    assert authorized.status_code == 503
+    assert authorized.json()["error"]["code"] == "database_unavailable"
+
+
+def test_validation_errors_never_echo_the_profile() -> None:
+    """A malformed body must not reflect the submitted profile back.
+
+    FastAPI's validation errors carry the offending ``input`` verbatim; the
+    422 handler strips it, so family financing data never reaches the response
+    (or any log that captures response bodies). The database dependency is
+    overridden because FastAPI resolves dependencies before validating the
+    body — a down database would otherwise answer 503 first.
+    """
+
+    app.dependency_overrides[api_module._database_or_503] = lambda: object()
+    try:
+        sentinel = "SENTINEL-ECHO-42fmd"
+        response = client.post(
+            "/api/rankings",
+            json={
+                "profile": {"regions": [sentinel], "acceptance_marker": sentinel},
+                "weights": "not-an-object",
+            },
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "validation_error"
+        assert sentinel not in response.text
+        assert "regions" not in response.text
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_db_backed_programme_reads(pg_database) -> None:
@@ -327,14 +367,10 @@ def test_engine_endpoints_against_real_db(pg_database, monkeypatch) -> None:
 
         override = dict.fromkeys(body["weights"], 0.0)
         override["outcomes"] = 100.0
-        overridden = client.post(
-            "/api/rankings", json={"profile": profile, "weights": override}
-        )
+        overridden = client.post("/api/rankings", json={"profile": profile, "weights": override})
         assert overridden.status_code == 200
         assert "+override." in overridden.json()["weights_version"]
-        bad = client.post(
-            "/api/rankings", json={"profile": profile, "weights": {"outcomes": 10}}
-        )
+        bad = client.post("/api/rankings", json={"profile": profile, "weights": {"outcomes": 10}})
         assert bad.status_code == 422
         assert bad.json()["error"]["code"] == "invalid_weights"
 
@@ -374,9 +410,7 @@ def test_engine_endpoints_against_real_db(pg_database, monkeypatch) -> None:
         assert independent.status_code == 200
         assert independent.json()["living"] == "independent"
 
-        filters = client.post(
-            f"/api/programmes/{programme.id}/filters", json={"profile": profile}
-        )
+        filters = client.post(f"/api/programmes/{programme.id}/filters", json={"profile": profile})
         assert filters.status_code == 200
         filters_body = filters.json()
         assert filters_body["needs_profile"] is False
@@ -399,9 +433,7 @@ def test_engine_endpoints_against_real_db(pg_database, monkeypatch) -> None:
         assert no_profile_filters.json()["needs_profile"] is True
         assert no_profile_filters.json()["filters"] == []
 
-        compare = client.get(
-            "/api/compare", params={"ids": f"{programme.id},{second.id}"}
-        )
+        compare = client.get("/api/compare", params={"ids": f"{programme.id},{second.id}"})
         assert compare.status_code == 200
         compare_body = compare.json()
         assert compare_body["matrix"]
@@ -507,9 +539,7 @@ def test_profile_is_never_persisted(pg_database) -> None:
         assert cost.status_code == 200
         assert sentinel not in cost.text
 
-        filters = client.post(
-            f"/api/programmes/{programme.id}/filters", json={"profile": profile}
-        )
+        filters = client.post(f"/api/programmes/{programme.id}/filters", json={"profile": profile})
         assert filters.status_code == 200
         assert sentinel not in filters.text
 
@@ -525,4 +555,3 @@ def test_profile_is_never_persisted(pg_database) -> None:
             assert json.dumps(profile) not in cost.text
     finally:
         app.dependency_overrides.clear()
-

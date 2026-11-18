@@ -468,6 +468,7 @@ export type ProgrammeFiltersPayload = z.infer<typeof programmeFiltersPayloadSche
 // --------------------------------------------------------------------------- costs
 
 export const costCategorySchema = z.enum([
+  "tuition",
   "hostel",
   "mess",
   "rent",
@@ -538,7 +539,8 @@ export const sourceSchema = z.object({
   format: z.string(),
   cadence_days: z.number(),
   trust: z.string(),
-  adapter: z.string(),
+  // Registry sources may be registered without an adapter (config allows null).
+  adapter: z.string().nullable(),
   enabled: z.boolean(),
   requires_manual_review: z.boolean().optional(),
   notes: z.string().nullable().optional(),
