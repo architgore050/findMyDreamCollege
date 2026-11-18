@@ -216,9 +216,7 @@ def student_work_from_config(cost_rules: Any, country: str) -> StudentWork:
     raw = _plain(cost_rules)
     base = (raw.get("currency") or {}).get("base")
     if not base:
-        raise CostModelError(
-            "cost_rules.currency.base is required; refusing to assume a currency"
-        )
+        raise CostModelError("cost_rules.currency.base is required; refusing to assume a currency")
     entry = ((raw.get("student_work") or {}).get(country)) or {}
     informal = entry.get("realistic_informal_monthly") or {}
     currency = informal.get("currency") or base
@@ -312,6 +310,9 @@ class DSRResult(_Model):
     p25_first_year_salary: float | None
     bands: dict[str, dict[str, float]]
     inputs: dict[str, Any] = Field(default_factory=dict)
+    # Published on the block itself (not only in CostSnapshot.methods) so every
+    # computed money/ratio response carries its method (acceptance sweep).
+    method: str | None = None
 
 
 class AffordabilityResult(_Model):
@@ -321,6 +322,7 @@ class AffordabilityResult(_Model):
     formula: str
     family_out_of_pocket: float
     annual_family_income: float | None
+    method: str | None = None
 
 
 class CostSnapshot(_Model):
@@ -702,15 +704,9 @@ def compute(inputs: CostInputs, rules: CostRules) -> CostSnapshot:
         )
         emi_value = None
     else:
-        debt_value = capitalised_debt(
-            principal, rate, moratorium_months, basis=loan.interest_basis
-        )
-        debt_lo = capitalised_debt(
-            principal_lo, rate, moratorium_months, basis=loan.interest_basis
-        )
-        debt_hi = capitalised_debt(
-            principal_hi, rate, moratorium_months, basis=loan.interest_basis
-        )
+        debt_value = capitalised_debt(principal, rate, moratorium_months, basis=loan.interest_basis)
+        debt_lo = capitalised_debt(principal_lo, rate, moratorium_months, basis=loan.interest_basis)
+        debt_hi = capitalised_debt(principal_hi, rate, moratorium_months, basis=loan.interest_basis)
         debt = MoneyBand(
             value=debt_value,
             lo=min(debt_lo, debt_value),
@@ -831,6 +827,10 @@ def compute(inputs: CostInputs, rules: CostRules) -> CostSnapshot:
             "student_work_offset": offset.method,
         }
     )
+    # The ratio blocks publish their method on themselves, not only in the
+    # snapshot-level methods map, so every rendered block is self-describing.
+    dsr = dsr.model_copy(update={"method": methods["dsr25"]})
+    affordability = affordability.model_copy(update={"method": methods["affordability_gap"]})
 
     snapshot = CostSnapshot(
         currency=currency,

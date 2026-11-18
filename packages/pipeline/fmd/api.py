@@ -51,14 +51,11 @@ def _registry() -> Registry | None:
         return None
 
 
-def _meta(
-    claims_hash: str | None = None, weights_version: str | None = None
-) -> dict[str, Any]:
+def _meta(claims_hash: str | None = None, weights_version: str | None = None) -> dict[str, Any]:
     registry = _registry()
     return {
         "scorer_version": registry.scorer_version if registry else "unknown",
-        "weights_version": weights_version
-        or (registry.weights_version if registry else "unknown"),
+        "weights_version": weights_version or (registry.weights_version if registry else "unknown"),
         "claims_hash": claims_hash or EMPTY_CLAIMS_HASH,
         "generated_at": datetime.now(UTC).isoformat(),
     }
@@ -159,9 +156,24 @@ async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONR
     return _error(exc.status_code, code, message, workstream=workstream)
 
 
+def _validation_message(exc: RequestValidationError) -> str:
+    """Compact 422 message that never echoes the submitted payload.
+
+    ``exc.errors()`` carries the offending ``input`` verbatim; a malformed body
+    would otherwise reflect the caller's profile (family financing data) back
+    into the response and any logs that capture it.
+    """
+
+    parts: list[str] = []
+    for error in exc.errors():
+        location = ".".join(str(item) for item in error.get("loc", ()) if item != "body")
+        parts.append(f"{location or 'body'}: {error.get('msg', 'invalid')}")
+    return "; ".join(parts) if parts else "request body failed validation"
+
+
 @app.exception_handler(RequestValidationError)
 async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    return _error(422, "validation_error", str(exc.errors()))
+    return _error(422, "validation_error", _validation_message(exc))
 
 
 async def _database_error_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -422,9 +434,7 @@ def _resolved_scoring(
         raise WeightOverrideError(f"weights must be numbers: {exc}") from exc
     unknown = sorted(set(normalized) - set(config.weights))
     if unknown:
-        raise WeightOverrideError(
-            "unknown sub-score weights: " + ", ".join(unknown)
-        )
+        raise WeightOverrideError("unknown sub-score weights: " + ", ".join(unknown))
     missing = sorted(set(config.weights) - set(normalized))
     if missing:
         raise WeightOverrideError(
@@ -799,7 +809,6 @@ def programme_cost_needs_profile(
                 "message": "living must be 'hostel' or 'independent'",
             },
         )
-    _programme_or_404(database, programme_id)
     programme = _programme_or_404(database, programme_id)
     claims = _claims_for(database, programme)
     return _envelope(
@@ -835,9 +844,7 @@ def programme_cost(
     registry = _registry_or_500()
     claims = _claims_for(database, programme)
 
-    _loan, _income, financing_reasons = _financing_context(
-        registry, claims, request.profile
-    )
+    _loan, _income, financing_reasons = _financing_context(registry, claims, request.profile)
     reasons = _cost_unknown_reasons(claims, financing_reasons)
 
     snapshots: dict[str, Any] = {}
@@ -861,9 +868,7 @@ def programme_cost(
                 "available": False,
                 "needs_profile": False,
                 "profile_persisted": False,
-                "reason": (
-                    "no complete cost evidence; refusing to model a TCOA from nothing"
-                ),
+                "reason": ("no complete cost evidence; refusing to model a TCOA from nothing"),
                 "scenarios": {},
                 "scenario_totals": {},
                 "unknown_reasons": reasons,
@@ -885,8 +890,7 @@ def programme_cost(
                 "assumed": True,
                 "source": "assumption",
                 "note": (
-                    "tenure and moratorium are modelled defaults, not published "
-                    "sanction terms"
+                    "tenure and moratorium are modelled defaults, not published sanction terms"
                 ),
             },
         )
@@ -972,9 +976,7 @@ def programme_filters(
     claims = _claims_for(database, programme)
     context = FilterContext.from_registry(registry)
     summary = evaluate_all(_programme_view(programme, claims), request.profile, context=context)
-    decisions = [
-        summary.decisions[filter_id].as_dict() for filter_id in summary.order
-    ]
+    decisions = [summary.decisions[filter_id].as_dict() for filter_id in summary.order]
     return _envelope(
         {
             "programme_id": programme_id,
@@ -1038,9 +1040,7 @@ def compare_programmes(
             programme.id, view, {}, claims, config=config, cost_rules=registry.cost_rules
         )
         programmes[str(programme_id)] = programme
-        rows[str(programme_id)] = {
-            key: value.as_dict() for key, value in result.sub_scores.items()
-        }
+        rows[str(programme_id)] = {key: value.as_dict() for key, value in result.sub_scores.items()}
 
     matrix = pareto_matrix(rows)
     comparisons: dict[str, Any] = {}
@@ -1174,9 +1174,7 @@ def exam_windows(request: ProfileRequest) -> dict[str, Any]:
                 "requires_travel": requires_travel,
                 "remote_options": bool(exam.remote_options),
                 "travel_blocked": blocked,
-                "deciding_claim_id": getattr(window, "source_claim_id", None)
-                if window
-                else None,
+                "deciding_claim_id": getattr(window, "source_claim_id", None) if window else None,
                 "reason": reason,
             }
         )
@@ -1234,9 +1232,7 @@ def exclusions(
             elif decision.result == "unknown":
                 unknown_histogram[filter_id] = unknown_histogram.get(filter_id, 0) + 1
         if summary.excluded:
-            deciding = [
-                summary.decisions[filter_id].as_dict() for filter_id in summary.excluded
-            ]
+            deciding = [summary.decisions[filter_id].as_dict() for filter_id in summary.excluded]
             excluded.append(
                 {
                     "programme": _programme_json(programme),
@@ -1286,8 +1282,10 @@ def review_claim(claim_id: int, _: None = Depends(require_admin)) -> JSONRespons
 
 @app.post("/api/scoring/rerun")
 def scoring_rerun(
+    # Admin gate resolves before the database dependency: an unauthorised call
+    # must answer 401/503 without first probing (or waiting on) Postgres.
+    _admin: Annotated[None, Depends(require_admin)],
     database: DatabaseDep,
-    _: None = Depends(require_admin),
 ) -> dict[str, Any]:
     registry = _registry()
     if registry is None:
