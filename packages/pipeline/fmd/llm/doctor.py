@@ -93,6 +93,14 @@ def diagnose_profile(
     live: bool = False,
     transport: httpx.BaseTransport | None = None,
 ) -> dict[str, Any]:
+    if name == "embed":
+        # The embed profile is not a chat-completions target: its blockers,
+        # probe and mode come from the embedding backend factory, which knows
+        # the difference between the in-process CPU backend and an HTTP
+        # /v1/embeddings endpoint (the :8010 chat server is neither).
+        from fmd.llm.embeddings import describe_embed_profile
+
+        return describe_embed_profile(models, profile, live=live, transport=transport)
     provider, blockers = profile_blockers(models, profile)
     reachable, reach_note = _reachability(
         provider, name=profile.provider, live=live, transport=transport

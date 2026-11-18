@@ -68,6 +68,36 @@ providers:
   mock:
     kind: replay
     fixtures_dir: packages/pipeline/tests/fixtures/llm
+  cpu:
+    # PLACEMARKER (embed profile only): the in-process CPU embedder — bge-m3 via
+    # sentence-transformers, loaded lazily in the pipeline process, zero VRAM.
+    # It is declared only because config/loader.py cross-checks every profile's
+    # `provider` against this block; it is NOT an HTTP endpoint and no chat
+    # profile may ever point at it. `fmd/llm/embeddings.py` resolves `cpu` to
+    # the in-process backend by name and never reads `base_url` here; a chat
+    # profile routed here would fail loudly with unresolved_provider (no URL).
+    kind: openai_compatible
+    base_url_env: FMD_EMBED_DEVICE_URL      # deliberately unset: not an endpoint
+    api_key_env: FMD_EMBED_KEY
+    requires_api_key: false
+    supports_guided_json: false
+    base_url_example: in-process sentence-transformers (no HTTP endpoint)
+  embed_openai:
+    # Embed-only OpenAI-compatible provider: POST {base_url}/embeddings in the
+    # OpenAI shape, implemented by llama.cpp (`llama-server --embedding
+    # --pooling cls`, e.g. bge-m3 GGUF on :8011) and by hosted embedding APIs.
+    # Chat profiles must never point here, and the embed profile must never
+    # point at `local` (:8010) — the 26B chat GGUF is not an embedding model.
+    # base_url has no default on purpose: an unset FMD_EMBED_URL is a
+    # `embeddings_unavailable` blocker, never a silent hit on the chat server.
+    base_url: ${FMD_EMBED_URL}
+    api_key: ${FMD_EMBED_KEY:-not-needed}
+    kind: openai_compatible
+    base_url_env: FMD_EMBED_URL
+    api_key_env: FMD_EMBED_KEY
+    requires_api_key: false
+    supports_guided_json: false
+    base_url_example: http://localhost:8011/v1
 
 profiles:
   bulk_extract:
@@ -206,14 +236,33 @@ profiles:
   # OpenAI-compatible chat endpoint. Retiring the profile keeps `fmd llm doctor`
   # honest: a vision model is not a router target and must never be scored as one.
   embed:
-    # evidence: multilingual 1024-dim baseline
-    provider: ${FMD_EMBED_PROVIDER:-local}
+    # DECISION 2026-11-18 (doc 10 §12, runbook §8): bge-m3 runs on CPU,
+    # in-process via sentence-transformers. The 26B llama.cpp server on :8010
+    # is a chat model and does not serve /v1/embeddings; the measured config of
+    # record (64k ctx, -ub 2048) leaves 1,153 MiB free, below even the
+    # estimated ~1.1 GiB int8 footprint of a 568M embedder, so a GPU co-resident
+    # embedder breaks the required text profile to serve an optional one.
+    # `cpu` therefore costs zero VRAM; FMD_EMBED_DEVICE/FMD_EMBED_BATCH tune it.
+    #
+    # Selecting another backend is env-only, never a code change:
+    #   FMD_EMBED_PROVIDER=cpu           in-process bge-m3 on CPU (default)
+    #   FMD_EMBED_PROVIDER=mock          deterministic offline vectors (CI)
+    #   FMD_EMBED_PROVIDER=embed_openai  POST {FMD_EMBED_URL}/embeddings
+    #                                    (llama.cpp --embedding on :8011, hosted)
+    # Never `local`: that provider is the :8010 chat server, which cannot embed.
+    # Missing backend/model => `embeddings_unavailable` is recorded and the
+    # documented lexical fallback runs with the mode surfaced (runbook §8);
+    # dimension mismatches are rejected, never truncated.
+    provider: ${FMD_EMBED_PROVIDER:-cpu}
     model: ${FMD_EMBED_MODEL:-BAAI/bge-m3}
     provider_env: FMD_EMBED_PROVIDER
     model_env: FMD_EMBED_MODEL
     model_example: BAAI/bge-m3
-    dim: 1024
+    dim: 1024                     # bge-m3 dense vectors; mismatch is an error
+    batch_size: ${FMD_EMBED_BATCH:-32}
+    device: ${FMD_EMBED_DEVICE:-cpu}
     required: false
+    degrade_reason: embeddings_unavailable
 
 budgets:
   daily_usd: 5.00

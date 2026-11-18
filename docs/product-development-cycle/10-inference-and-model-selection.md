@@ -136,6 +136,8 @@ A mid-tier hosted model is proposed for the **second pass only**: conflict resol
 
 No new evidence justified a change. bge-m3 remains the 1024-dimensional multilingual default already wired into `config/models.yaml`. This is an **unchanged baseline**, not a fresh benchmark result. If retrieval quality becomes a bottleneck, compare bge-m3 against a current multilingual embedding on our own claim/alias pairs; do not switch on a leaderboard alone.
 
+**Serving decision 2026-11-18:** see §12 — bge-m3 runs on CPU, in-process; the :8010 chat server is not an embedder.
+
 ---
 
 ## 4. The Devanagari finding (why it drives the OCR decision)
@@ -357,7 +359,7 @@ invented by the harness; omit them and the `$/page` column reads `n/a`.
 | `adjudicate` | `gemini` / `gemini-2.5-flash` | `FMD_ADJUDICATE_PROVIDER`, `FMD_ADJUDICATE_MODEL` | Documented example; reroute 2026-12-01 |
 | `entity_adjudication` | `local` / `Qwen3.5-9B-AWQ` | `FMD_ENTITY_ADJUDICATE_PROVIDER`, `FMD_ENTITY_ADJUDICATE_MODEL` | Pairwise only |
 | `nlp_rubric` | `gemini` / `gemini-2.5-flash` | `FMD_NLP_PROVIDER`, `FMD_NLP_MODEL` | Quote required |
-| `embed` | `local` / `BAAI/bge-m3` | `FMD_EMBED_PROVIDER`, `FMD_EMBED_MODEL` | 1024-d, unchanged |
+| `embed` | `cpu` (in-process) / `BAAI/bge-m3` | `FMD_EMBED_PROVIDER`, `FMD_EMBED_MODEL` | 1024-d; §12 (2026-11-18): CPU default, 0 VRAM; `embed_openai` = POST /v1/embeddings |
 
 **Guided JSON / architecture caveat.** `guided_json: true` is kept, but xgrammar (or the served backend's constrained decoder) must support the Qwen3.5 architecture in the pinned vLLM/SGLang build. If it does not, the router degrades to JSON-instruct plus schema validation; the bake-off must then report the degraded path's schema-valid rate, because it is not the same candidate. Verify the xgrammar/backend version before recording results.
 
@@ -411,3 +413,64 @@ These are the research's open claims, kept as claims — not as facts. Each must
 - A first-party price or model id changes before the bake-off: update the candidates file, not this document's arithmetic; record the new date and source.
 
 **Until the bake-off runs, treat every default in this document as a hypothesis with a named test.**
+
+---
+
+## 12. Decision note — 2026-11-18 (embed provider: bge-m3 on CPU; the :8010 chat server is not an embedder)
+
+**This note supersedes §3.4 and the §8 `embed` row for serving only.** The
+embed model itself is unchanged: bge-m3, 1024-d, multilingual (§3.4 stands for
+*which* model; this note decides *where it runs*). The defect this fixes: the
+`embed` profile pointed at `local` (`http://localhost:8010/v1`), which is the
+llama.cpp `llama-server` hosting `gemma-4-26b-a4b-gguf` — a chat MoE whose GGUF
+is not an embedding model and which does not serve `POST /v1/embeddings`. ER
+name matching and insight diversity therefore fell back to the lexical
+heuristics *silently*.
+
+### 12.1 The three options, against the host's free VRAM
+
+Anchors: the config of record (64k ctx, `-b 4096 -ub 2048`, §2.8 of the
+runbook) measures **15,150 MiB used / 1,153 MiB free**; the runbook's
+headroom rule is ≥ 1 GiB free; one GPU tenant at a time (runbook §1);
+CUDA context alone is **~0.21 GiB** (runbook §2.7-B anchor). bge-m3 is 568M
+params; footprints below are **estimates [U]**, not measurements: fp16
+~2.2 GB, int8 ~1.1 GB, q8_0 GGUF ~0.6 GB.
+
+| Option | VRAM cost (est. [U] + measured context) | Verdict |
+|---|---|---|
+| (a) bge-m3 on GPU alongside the 26B | fp16 ~2.2 GB or int8 ~1.1 GB, or q8 GGUF ~0.6 GB; **+ ~0.21 GiB second CUDA context + activation buffers (est. 0.1–0.4 GiB)** ⇒ ≥ 0.9–1.3 GiB total against **1,153 MiB free** | **Rejected on arithmetic.** Even the smallest footprint consumes the entire measured headroom and breaks the ≥1 GiB rule; any variance OOMs the *required* text profile to serve an optional one. The same-server variant (`--embedding` on :8010) is not a fallback either: the served 26B chat GGUF has no embedding head, so "alongside" always means a second GPU process — forbidden by the one-tenant rule. |
+| (b) bge-m3 on CPU, in-process | **0 MiB VRAM**; ~2.2 GB fp32 / ~1.1 GB int8 system RAM (est. [U]) of 32 GB | **Chosen.** Workload is small (ER names ≤ 32 tokens; insight sentences; hundreds per run, not millions), the Core Ultra 9 HX covers a 568M encoder for that scale [U — `python -m fmd.llm.embed_bench` is the named test], the sentence-transformers path is the reference pooling/normalisation (no GGUF conversion drift), and it is deterministic per fixed input/build. Same posture the runbook already takes for Docling T1 (CPU deliberately, runbook §6). |
+| (c) second small GGUF, own llama.cpp instance | GPU: same arithmetic as (a) — rejected; CPU: 0 MiB VRAM but a second process, port, `--pooling cls`/`-ub` config surface and GGUF conversion between us and the reference vectors | **Rejected as redundant.** On GPU it inherits (a)'s failure; on CPU it buys nothing over (b) and adds exactly the kind of second server this runbook documents as a failure domain. Revisit only if a measured ER batch misses the embed budget and the CPU path cannot be tuned (`FMD_EMBED_BATCH`, threads). |
+
+**Decision: (b).** `FMD_EMBED_PROVIDER=cpu` (default), in-process
+sentence-transformers, weights prefetched once by the operator. The decision is
+reversible without code changes: `FMD_EMBED_PROVIDER=embed_openai` points the
+same profile at any OpenAI-compatible `POST /v1/embeddings` endpoint (llama.cpp
+`--embedding` on :8011, or hosted), and `embed_bench` re-runs as the acceptance
+test either way. Cost accounting: v1 forbids paid APIs; the default route keeps
+that true at zero egress.
+
+### 12.2 Failure semantics (no silent degradation)
+
+* Backend/model absent ⇒ `embeddings_unavailable` is **recorded** (router
+  doctor row, ER audit note, `insight_sets.coverage_json.embedding_mode`) and
+  the documented lexical features (token Jaccard + char ratio + acronym +
+  context) keep running with the mode surfaced. The fallback is a *reported
+  state*, not a silent downgrade.
+* Dimension mismatch ⇒ **rejected** (`dimension_mismatch`), never truncated;
+  count mismatches and out-of-order batches are contract errors too.
+* Named test for the throughput claim: `uv run python -m fmd.llm.embed_bench`
+  (runbook §8 documents expected output shape; the numbers are the operator's,
+  not this document's — none are quoted here and none were invented).
+
+### 12.3 What would change this decision
+
+* `embed_bench` shows the CPU path missing the ER/insight latency budgets on
+  real corpora: first tune `FMD_EMBED_BATCH`/threads, then try an int8 ONNX
+  export, and only then put bge-m3 GGUF behind `embed_openai` on :8011 —
+  accepting that the 26B must drop to 32k context to make VRAM room.
+* The text model leaves the card or drops below 64k by policy: re-run the
+  §12.1 arithmetic; fp16 GPU co-residency becomes plausible above ~2.5 GiB
+  free and is then worth measuring.
+* A hosted embeddings endpoint with bge-m3-compatible quality enters the
+  no-paid-API boundary: it is an env switch (`embed_openai`), not a fork.

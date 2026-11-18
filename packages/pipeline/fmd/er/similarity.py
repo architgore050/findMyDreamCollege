@@ -1,9 +1,17 @@
 """Stage 3 — similarity scoring (brief §10).
 
 Token/character similarity (rapidfuzz when installed, ``difflib`` otherwise),
-alias-type-aware comparison and an optional bge-m3 embedding path behind a
-capability check. The output is a heuristic, calibrated-ish probability plus the
-features that produced it, so a reviewer can audit a merge.
+alias-type-aware comparison and an optional embedding path behind a capability
+gate. The output is a heuristic, calibrated-ish probability plus the features
+that produced it, so a reviewer can audit a merge.
+
+The embedding path is never silent: when the backend or model is absent (or
+fails at runtime), the scorer records the canonical ``embeddings_unavailable``
+mode with the cause, keeps the documented lexical features (token Jaccard +
+character ratio + acronym + context), and ``features.embedding`` stays ``None``
+so the audit trail shows which evidence was used. Backend selection is
+config/env driven (``FMD_EMBED_PROVIDER``), never a code branch (see
+``fmd.llm.embeddings``).
 
 This is not yet Fellegi–Sunter: there are no configured m/u priors (see report).
 """
@@ -14,7 +22,7 @@ import hashlib
 import logging
 import math
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Any, Protocol
 
 from fmd.er.config import ERConfig, Lexicon, SimilarityConfig
 from fmd.er.normalise import normalise_name, normalise_text
@@ -78,6 +86,35 @@ class EmbeddingBackend(Protocol):
     def similarity(self, left: str, right: str) -> float: ...
 
 
+class RouterEmbeddings:
+    """Adapter from an ``fmd.llm`` embedding backend to pairwise similarity.
+
+    Wraps any ``fmd.llm.embeddings.EmbeddingBackend`` (OpenAI-compatible HTTP or
+    the in-process CPU backend) with a per-text vector cache, so repeated names
+    inside one run cost one embed call each. Cosine similarity is clamped to
+    [0, 1] like every other feature.
+    """
+
+    name: str
+
+    def __init__(self, backend: Any, *, cache: dict[str, list[float]] | None = None) -> None:
+        self._backend = backend
+        self.name = f"router:{backend.name}:{getattr(backend, 'model', '')}".rstrip(":")
+        self._vectors = cache if cache is not None else {}
+
+    def _embed(self, texts: Sequence[str]) -> None:
+        missing = [text for text in texts if text not in self._vectors]
+        if not missing:
+            return
+        batch = self._backend.embed(missing)
+        for text, vector in zip(missing, batch.vectors, strict=True):
+            self._vectors[text] = list(vector)
+
+    def similarity(self, left: str, right: str) -> float:
+        self._embed([left, right])
+        return cosine(self._vectors[left], self._vectors[right])
+
+
 class SentenceTransformerEmbedder:
     """bge-m3 via sentence-transformers; lazy, CPU-friendly, embedding-cached."""
 
@@ -113,7 +150,17 @@ class SentenceTransformerEmbedder:
 
 
 class EmbeddingScorer:
-    """Capability-gated embedding similarity with an in-memory pair cache."""
+    """Capability-gated embedding similarity with an in-memory pair cache.
+
+    ``mode`` is the surfaced contract: ``"embeddings"`` while the backend
+    works, ``"embeddings_unavailable"`` (with ``reason`` naming the exact
+    missing piece) once the backend is absent or has failed — the documented
+    lexical features remain in use either way.
+    """
+
+    #: Canonical mode token, mirrored in run summaries and audit output.
+    MODE_EMBEDDINGS = "embeddings"
+    MODE_UNAVAILABLE = "embeddings_unavailable"
 
     def __init__(
         self,
@@ -121,19 +168,49 @@ class EmbeddingScorer:
         *,
         model_name: str = "BAAI/bge-m3",
         cache: dict[str, float] | None = None,
+        reason: str | None = None,
     ) -> None:
-        self.reason: str | None = None
-        if backend is None:
+        self.reason: str | None = reason
+        if backend is None and reason is None:
             if SentenceTransformerEmbedder.available():
                 backend = SentenceTransformerEmbedder(model_name)
             else:
-                self.reason = "sentence-transformers not installed"
+                self.reason = (
+                    "sentence-transformers is not installed: run `uv sync --all-extras` "
+                    "in packages/pipeline, or set FMD_EMBED_PROVIDER to a declared "
+                    "openai_compatible embeddings provider"
+                )
         self.backend = backend
         self._cache = cache if cache is not None else {}
+
+    @classmethod
+    def from_models(
+        cls,
+        models: Any,
+        *,
+        cache: dict[str, float] | None = None,
+    ) -> EmbeddingScorer:
+        """Build the scorer from the registry's ``embed`` profile (config/env).
+
+        A missing backend/model is recorded as ``embeddings_unavailable`` with
+        the factory's remediation message — never a silent lexical run.
+        """
+        from fmd.llm.embeddings import EmbeddingsUnavailable, build_embedding_backend
+
+        try:
+            backend = build_embedding_backend(models)
+        except EmbeddingsUnavailable as exc:
+            return cls(cache=cache, reason=str(exc))
+        return cls(backend=RouterEmbeddings(backend), cache=cache)
 
     @property
     def available(self) -> bool:
         return self.backend is not None
+
+    @property
+    def mode(self) -> str:
+        """``"embeddings"`` when the backend works, else ``embeddings_unavailable``."""
+        return self.MODE_EMBEDDINGS if self.available else self.MODE_UNAVAILABLE
 
     def similarity(self, left: str, right: str) -> float | None:
         if self.backend is None:
@@ -144,6 +221,9 @@ class EmbeddingScorer:
         try:
             score = max(0.0, min(1.0, float(self.backend.similarity(left, right))))
         except Exception as exc:  # noqa: BLE001 - degradation must never break ER
+            # Deactivate the path for the rest of the run: one failure is
+            # recorded loudly (mode + reason + audit note), not retried per pair.
+            self.backend = None
             self.reason = f"embedding backend failed: {exc}"
             LOGGER.warning("ER similarity: %s", self.reason)
             return None
@@ -326,6 +406,7 @@ def cosine(left: Sequence[float], right: Sequence[float]) -> float:
 __all__ = [
     "EmbeddingBackend",
     "EmbeddingScorer",
+    "RouterEmbeddings",
     "SentenceTransformerEmbedder",
     "candidate_sort_key",
     "char_ratio",
