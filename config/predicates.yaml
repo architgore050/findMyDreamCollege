@@ -26,7 +26,7 @@
 # unflagged derived vocabulary). A predicate not in `predicates` or `aliases`
 # is reported as unknown, never silently ignored.
 
-version: "2026-11-18.1"
+version: "2026-11-18.2"
 
 predicates:
   # ---------------------------------------------------------------- accreditation
@@ -77,6 +77,18 @@ predicates:
     label: "Seats available"
     unit_kind: count
     scoring: {kind: transform, transform: seats}
+  seats.admitted:
+    unit_kind: count
+    label: "Admitted (filled) seats"
+    notes: >-
+      Evidence/filter input: the filled count is a demand signal, never scored
+      directly. Guarded against exceeding the sanctioned intake at extraction.
+  seats.duration_months:
+    unit_kind: months
+    label: "Programme duration printed on a seat-matrix row"
+    notes: >-
+      Consumed by programme materialisation into programmes.duration_months
+      when present. Never derived: semesters are not converted to months.
   seats.government_quota:
     unit_kind: count
   seats.management_quota:
@@ -97,6 +109,19 @@ predicates:
     unit_kind: percent
     requires_denominator: true
     scoring: {kind: percent}
+  placement.salary_period:
+    unit_kind: text
+    label: "Printed salary period"
+    notes: >-
+      Document-level period claim; supplies the period a salary span may omit
+      (recorded as qualifier period_source on the money claim). A salary that
+      ends up with no period anywhere is rejected, never annualised.
+  placement.recruiters_count:
+    unit_kind: count
+    label: "Distinct recruiting organisations"
+    notes: >-
+      Evidence-only: a recruiter count is a demand signal and a gaming-resistance
+      input ("recruiter list without counts"), not a scored component.
   placement.internship_counted_as_employment:
     unit_kind: boolean
   placement.basis:
@@ -116,12 +141,34 @@ predicates:
     unit_kind: text
   fee.currency:
     unit_kind: text
+  fee.period:
+    unit_kind: text
+    label: "Document-level fee period (year | semester | month)"
+    notes: >-
+      Supplies the period a money span may omit (recorded as qualifier
+      period_source on the fee claim). A fee that ends up with no period
+      anywhere is rejected, never annualised by default.
   fee.tuition:
     unit_kind: money
     requires_period: true
   fee.hostel:
     unit_kind: money
     requires_period: true
+  fee.mess:
+    unit_kind: money
+    requires_period: true
+    label: "Mess / food charge"
+    notes: >-
+      Evidence-only input to the hostel living scenario (fmd/cost owns the
+      TCOA build; this registry row only validates and reports the claim).
+  fee.other:
+    unit_kind: money
+    requires_period: true
+    label: "Other printed fee (transport, internet, sports, misc)"
+    notes: >-
+      Evidence-only. Distinct from fee.mandatory (exam/library/lab/development),
+      which the golden placement fixture pins; both stay so neither wording is
+      forced into the other.
   fee.mandatory:
     unit_kind: money
     requires_period: true
@@ -353,12 +400,22 @@ predicates:
 # Legacy spellings seen in committed fixtures and the pre-namespace scorer
 # vocabulary. Declared, so resolving them is explicit; still reported through
 # `alias` on the resolved rule so a caller can log deprecated usage.
+#
+# The wave-2 aliases below are the alternate spellings the fee/seat/placement
+# field list is known by. They resolve to the canonical extraction predicates
+# (which the golden set and scoring pin) instead of emitting the same fact
+# twice under two names.
 aliases:
   seats: seats.total
+  seats.sanctioned: seats.total
   naac_grade: accreditation.naac_grade
   recognition_status: accreditation.recognition_status
   internship_hours: curriculum.internship_hours
   internship_months: curriculum.internship_months
   placement_rate: placement.rate
+  placement.eligible: placement.eligible_count
+  placement.placed: placement.placed_count
+  placement.median_salary: salary.median
+  placement.highest_salary: salary.highest_package
   median_salary: salary.median
   highest_package: salary.highest_package

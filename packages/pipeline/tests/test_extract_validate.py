@@ -343,6 +343,120 @@ def test_fee_money_claims_carry_period_and_currency() -> None:
     assert values["fee.total_first_year"].unit == "INR"
 
 
+# ------------------------------------------------------------------ wave-2 money guards
+
+
+def test_fee_money_without_any_period_is_rejected() -> None:
+    text = "Tuition fee: INR 85000\n"
+    document = FeeStructure(tuition_amount=field("Tuition fee: INR 85000"))
+
+    result = validate_document(document, text, extraction_id=1, entity_id=2, observed_at=OBSERVED)
+
+    assert result.claims == []
+    rejection = next(item for item in result.rejections if item.field == "tuition_amount")
+    assert rejection.reason == "missing_period"
+    assert "fee_period" in rejection.detail
+
+
+def test_fee_period_sibling_supplies_the_period_with_provenance() -> None:
+    text = "Tuition fee: INR 85000\nAll fees are charged per semester.\n"
+    document = FeeStructure(
+        fee_period=field("All fees are charged per semester"),
+        tuition_amount=field("Tuition fee: INR 85000"),
+    )
+
+    result = validate_document(document, text, extraction_id=1, entity_id=2, observed_at=OBSERVED)
+
+    assert result.rejections == []
+    tuition = next(claim for claim in result.claims if claim.predicate == "fee.tuition")
+    assert tuition.qualifier["period"] == "per_semester"
+    assert tuition.qualifier["period_source"] == "fee.period"
+    assert tuition.qualifier["fee_period"] == "semester"
+
+
+def test_fee_period_sibling_cannot_be_mapped_still_rejects() -> None:
+    text = "Tuition fee: INR 85000\nThe fee schedule is revised from time to time.\n"
+    document = FeeStructure(
+        fee_period=field("The fee schedule is revised from time to time"),
+        tuition_amount=field("Tuition fee: INR 85000"),
+    )
+
+    result = validate_document(document, text, extraction_id=1, entity_id=2, observed_at=OBSERVED)
+
+    rejection = next(item for item in result.rejections if item.field == "tuition_amount")
+    assert rejection.reason == "missing_period"
+
+
+def test_mess_and_other_fees_extract_with_their_own_period() -> None:
+    text = "Mess charge: Rs. 2,400 per month\nTransport fee: Rs. 6,000 per year\n"
+    document = FeeStructure(
+        mess_amount=field("Mess charge: Rs. 2,400 per month"),
+        other_amount=field("Transport fee: Rs. 6,000 per year"),
+    )
+
+    result = validate_document(document, text, extraction_id=1, entity_id=2, observed_at=OBSERVED)
+
+    assert result.rejections == []
+    values = {claim.predicate: claim for claim in result.claims}
+    assert values["fee.mess"].value == 2400
+    assert values["fee.mess"].qualifier["period"] == "per_month"
+    assert values["fee.other"].value == 6000
+    assert values["fee.other"].qualifier["period"] == "per_year"
+
+
+def test_salary_period_sibling_supplies_the_period_with_provenance() -> None:
+    text = "Median salary: INR 35000\nSalaries are quoted per month.\n"
+    document = PlacementReport(
+        salary_period=field("Salaries are quoted per month"),
+        median_salary=field("Median salary: INR 35000"),
+    )
+
+    result = validate_document(document, text, extraction_id=1, entity_id=2, observed_at=OBSERVED)
+
+    assert result.rejections == []
+    salary = next(claim for claim in result.claims if claim.predicate == "salary.median")
+    assert salary.value == 35000
+    assert salary.qualifier["period"] == "per_month"
+    assert salary.qualifier["period_source"] == "placement.salary_period"
+
+
+def test_admitted_exceeding_sanctioned_intake_is_rejected() -> None:
+    from fmd.extract.schemas import SeatMatrix
+
+    text = "Sanctioned intake: 40\nAdmitted: 55\n"
+    document = SeatMatrix(
+        total_seats=field("Sanctioned intake: 40"),
+        admitted=field("Admitted: 55"),
+    )
+
+    result = validate_document(document, text, extraction_id=1, entity_id=2, observed_at=OBSERVED)
+
+    rejection = next(item for item in result.rejections if item.field == "admitted")
+    assert rejection.guard == "admitted_exceeds_sanctioned_intake"
+    assert outcome_for(result, "admitted").outcome == (
+        "rejected_guard:admitted_exceeds_sanctioned_intake"
+    )
+
+
+def test_admitted_within_sanctioned_intake_and_duration_extract() -> None:
+    from fmd.extract.schemas import SeatMatrix
+
+    text = "Sanctioned intake: 40\nAdmitted: 38\nDuration (months): 24\n"
+    document = SeatMatrix(
+        total_seats=field("Sanctioned intake: 40"),
+        admitted=field("Admitted: 38"),
+        duration_months=field("Duration (months): 24"),
+    )
+
+    result = validate_document(document, text, extraction_id=1, entity_id=2, observed_at=OBSERVED)
+
+    assert result.rejections == []
+    values = {claim.predicate: claim for claim in result.claims}
+    assert values["seats.admitted"].value == 38
+    assert values["seats.duration_months"].value == 24
+    assert values["seats.duration_months"].unit == "months"
+
+
 def test_parse_number_handles_printed_formats_but_refuses_magnitudes() -> None:
     assert parse_number("1,800 hours") == 1800
     assert parse_number("₹85,000") == 85000

@@ -70,6 +70,11 @@ class FieldSpec:
     qualifier; ``denominator_field`` names the sibling field that supplies it.
     ``period_required`` marks a field whose printed period must come from the
     span itself (a salary without "per month"/"per annum" is UNKNOWN).
+    ``period_source`` names the sibling field whose *text* value supplies the
+    period when the span does not print one (a document-level ``fee.period`` or
+    ``placement.salary_period`` claim): the money claim still carries the
+    period on its own qualifier, but the value is quoted evidence from the same
+    document, never a default.
     ``value_pattern`` optionally narrows a free-text span to the meaningful
     phrase (still a verbatim substring of the resolved span).
     """
@@ -81,6 +86,7 @@ class FieldSpec:
     denominator_field: str | None = None
     period: Period | None = None
     period_required: bool = False
+    period_source: str | None = None
     value_pattern: str | None = None
     context: bool = False
 
@@ -115,6 +121,10 @@ class FamilyDocument(BaseModel):
             if spec.denominator_field is not None and spec.denominator_field not in cls.SPECS:
                 raise ValueError(
                     f"{cls.FAMILY}.{name}: unknown denominator_field {spec.denominator_field!r}"
+                )
+            if spec.period_source is not None and spec.period_source not in cls.SPECS:
+                raise ValueError(
+                    f"{cls.FAMILY}.{name}: unknown period_source {spec.period_source!r}"
                 )
 
     def fields(self) -> Iterator[tuple[str, FieldSpec, ExtractedField | None]]:

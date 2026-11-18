@@ -1433,6 +1433,78 @@ disjoint components (seats vs internship months), so `compare()` returns
 `not_comparable` and no ordering is published. The numbers are evidence, not a
 shortlist.
 
+## Wave-2 fee/seat/placement predicate table (2026-11-18, WS-FEE-SEAT-SCHEMA)
+
+The measured yield was accreditation/curriculum heavy and fee/seat poor: of 32
+claims, `fee.tuition` and placement salary were effectively absent, so the
+affordability/DSR25 half of the product had no evidence to score. Wave 2 adds
+the missing fields to the `fee_structure` / `seat_matrix` / `placement_report`
+families, the guards that keep them honest, and their registry rows. The
+predicate table below is the authoritative summary; `config/predicates.yaml`
+remains the machine-readable source of truth (version `2026-11-18.2`). No
+weight value changed: every new predicate is evidence-only (`component: null`)
+because scoring them would require new `weights.yaml` transforms, which is a
+scoring-workstream change, not an extraction one.
+
+| Predicate | Component | unit_kind | Period / denominator | Emitted by | Notes |
+|---|---|---|---|---|---|
+| `fee.mess` | null | money | period required | fee_structure v4 | mess/food charge; evidence-only |
+| `fee.other` | null | money | period required | fee_structure v4 | transport/internet/sports/misc; distinct from `fee.mandatory` |
+| `fee.period` | null | text | — | fee_structure v4 | document-level period (`year`\|`semester`\|`month`); supplies the period a money span omits |
+| `seats.admitted` | null | count | — | seat_matrix v4 | filled count; guarded ≤ sanctioned intake |
+| `seats.duration_months` | null | months | — | seat_matrix v4 | consumed by programme materialisation; never derived from semesters |
+| `placement.salary_period` | null | text | — | placement_report v3 | document-level salary period; supplies the period a salary span omits |
+| `placement.recruiters_count` | null | count | — | placement_report v3 | distinct recruiters; gaming-resistance evidence |
+
+Alternate spellings are declared **aliases**, not extra emitting fields — the
+golden placement fixture pins the canonical names
+(`placement.eligible_count`, `placement.placed_count`, `salary.median`,
+`salary.highest_package`) and the golden seat-matrix entry pins `seats.total`,
+so re-emitting the same fact under a second name would double-count claims and
+break the eval. The registry accepts both spellings and resolves them to one
+row: `seats.sanctioned → seats.total`, `placement.eligible →
+placement.eligible_count`, `placement.placed → placement.placed_count`,
+`placement.median_salary → salary.median`, `placement.highest_salary →
+salary.highest_package`.
+
+**Guards added with the fields** (all in `fmd/extract/validate.py`, all
+reject — never coerce):
+
+* **Money requires currency + period on the claim.** A money field whose span
+  prints no period takes it from the sibling claim named by the new
+  `FieldSpec.period_source` (`fee.period`, `placement.salary_period`); the
+  claim records that provenance as `qualifier.period_source`. A money field
+  that ends up with no period anywhere is rejected `missing_period` — the old
+  silent `per_year` default on fee fields is gone. Currency behaviour is
+  unchanged: printed in the span, or inherited from the `fee.currency`
+  sibling for the fee family.
+* **`admitted_exceeds_sanctioned_intake`** — `seats.admitted` > `seats.total`
+  rejects the admitted claim (same shape as `placed_exceeds_eligible`).
+* Every existing guard still fires: denominator on rates, placed ≤ eligible,
+  rate ≤ 100% and consistent with printed counts, quotas ≤ sanctioned intake,
+  uncertain column header, out-of-band values.
+
+**Row-context discipline is unchanged** and extends to the new columns: a
+value in a sanctioned/admitted column resolves only inside the table block its
+`context` names, and `qualifier.row` carries `{row_label, column_header,
+value_cell, table_page}`, so 18 identical programme rows stay distinguishable.
+
+**Prompts:** `fee_structure@v4` and `seat_matrix@v4` (both were at v3) and
+`placement_report@v3` (was at v2) — each family keeps all previous versions,
+and v1–v3/v1–v2 remain replayable. The recorded replay fixture for the
+placement pipeline tests was re-recorded under the v3 prompt hash; the golden
+placement entry still replays its committed v2-era `llm_fixture` directly, so
+golden provenance stays 1.0.
+
+**Programme materialisation** consumes `seats.sanctioned` and
+`seats.duration_months` when present (`DEFAULT_PROGRAMME_MAPPING` and the
+`config/sources.yaml → institution_sites.params.programme_mapping` block list
+them after their canonical siblings, so canonical claims win when both
+exist). There is still no derivation: `curriculum.semesters` is never
+converted to months, and a `seats.duration_months` claim whose unit is not
+months is ignored. Every consumed claim id lands in
+`programmes.field_sources` under its own predicate.
+
 ## Dedupe audit (2026-11-18)
 
 The 19:22 crawl dropped 73 of 94 fetched documents as `near_duplicate_simhash`.
