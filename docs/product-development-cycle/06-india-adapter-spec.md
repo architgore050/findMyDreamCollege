@@ -441,7 +441,7 @@ This is the highest-variance adapter and the main source of `outcomes` evidence.
 | **Where placement numbers actually live** | (1) **NAAC SSR** — the Self-Study Report submitted before a NAAC peer team visit; Criterion 5/6/7 annexures carry placement tables (`number of students placed`, `median salary`, recruiter names). (2) **AQAR** — annual, published by the college, with a "Placement and Higher Studies" table per programme. (3) **NIRF DCS submission mirrors** — colleges post their own "NIRF 2025 Data" PDFs (the DCS itself is login-walled ⛔, the college's mirror is not). (4) **Annual report / IQAC report**. (5) **Prospectus** (fees, seats, hospital tie-ups). (6) **Placement cell page** (usually marketing). |
 | **Verified pattern (structure, not URL)** | NAAC results themselves are at `naac.gov.in/images/docs/AccreditationResults/...` — SSRs are **not** there ✅ (YAML note correct: "SSR/AQAR PDFs live on college sites, not here") |
 | **Discovery mechanism (ordered, cheapest first)** | 1. **Sitemap**: `https://<domain>/sitemap.xml`, `/wp-sitemap.xml`, `/sitemap_index.xml` (tnmgrmu ✅ `wp-sitemap.xml`). 2. **Well-known paths** (probe, expect 404): `/naac`, `/iqac`, `/naac/ssr*`, `/nirf`, `/placement*`, `/downloads`, `/documents`. 3. **Site search** (`/?s=SSR`, `/?s=placement+report`) on WordPress hosts. 4. **SearXNG templates** (§4.10). 5. **Common Crawl index** for `*.ac.in` PDFs whose URL contains `ssr\|aqar\|nirf\|placement`. |
-| **File-name heuristics that pay** | `(SSR\|AQAR\|NIRF\|placement\|annual.?report\|prospectus).*\.pdf`, `(cycle\|CYCLE)[-_ ]?[12]`, `criteria[-_ ]?[5-7]`, `DCS`, `AISHE`. Combine with a fetch of the anchor text |
+| **File-name heuristics that pay** | `(SSR\|AQAR\|NIRF\|placement\|annual.?report\|prospectus).*\.pdf`, `(cycle\|CYCLE)[-_ ]?[12]`, `criteria[-_ ]?[5-7]`, `DCS`, `AISHE`. Combine with a fetch of the anchor text. **Superseded for ordering (2026-11-18)** by the evidence-type table below: the generic patterns still gate the shared classifier, but the boost that decides crawl order is `params.evidence_types` |
 | **XHR replay** | n/a (static files). But college sites are frequently on shared hosting with Cloudflare ⇒ expect tier escalation here more than anywhere else |
 | **Raw fields** | Programme name, batch year, `no. of students graduated`, `no. placed`, `median / max salary`, recruiter list, higher-studies count, internship site names, hospital bed counts |
 | **Map** | `outcomes.placement_rate` (**denominator mandatory** in `qualifier_json`), `outcomes.median_salary`, `outcomes.p25_salary`, `outcomes.n`, `outcomes.recruiter_count`, `clinical.tied_hospitals[]`, `clinical.beds`, `cost.equipment`, `programmes.seats` |
@@ -453,6 +453,65 @@ This is the highest-variance adapter and the main source of `outcomes` evidence.
 | **Trust / fraud** | **Low, and adversarial.** Documented gaming patterns to encode as red flags on the *claim*: (a) placement rate with no denominator ("100 % placement"); (b) "highest package" as the headline with no median/P25; (c) rounded figures (₹3,00,000, ₹4,50,000) across years; (d) recruiters named without counts; (e) offers counted as joinings; (f) programme-level table silently aggregating all streams; (g) internship stipends presented as salaries; (h) YoY jump > 2σ peers; (i) SSR copy-pasted between sister institutions (simhash catches this — reuse the snapshot dedupe) |
 | **Accept** | Domain-level fixture: a committed mini-corpus of 3 real SSR/AQAR PDFs (one born-digital, one scanned, one with a merged-cell table) + an assertion that the extractor finds a placement table with a **denominator** or returns `unknown`. Plus a negative fixture: a "100 % placement" slide with no denominator ⇒ claim rejected by the validation gate |
 | **Non-negotiable** | Internships are **not** employment. A "1-year internship at Apollo" line is `clinical.internship_site`, never `outcomes.placed` |
+
+#### 4.9.1 Evidence targeting (W1, 2026-11-18)
+
+The measured 50-domain bulk-ramp crawl linked 47 documents as accreditation 27 /
+placement 10 / curriculum 9 / **seat_matrix 1 / fee_structure 0** — the
+per-domain document cap (`max_documents_per_domain: 3`) was spent on
+SSR/AQAR/NIRF mirrors because fee and seat vocabulary never scored. Three
+registry-driven mechanisms in `fmd/adapters/institution_site.py` fix the
+ordering and the budget; every value lives in `config/sources.yaml →
+institution_sites.params` and is overridable per deployment.
+
+1. **Evidence-type boost table** (`evidence_types` + `evidence_type_weights`).
+   Each entry matches at filename (link URL) and anchor level; weights are
+   added to the link score of both documents and navigation targets:
+   seat|intake|sanctioned|seat matrix → `seat_matrix` (+40), fee|tuition|hostel|mess|fee
+   structure → `fee_structure` (+40), prospectus|admission brochure →
+   `prospectus` (+25), placement|annual report|AQAR|SSR → `placement` (+15),
+   NIRF|DCS → `nirf` (+12). "Admission brochure" moved **out** of
+   `deprioritise_patterns` (it was a budget sink there; the brochure itself is
+   fee/seat evidence) — the deprioritised vocabulary is now news|events|gallery|press|
+   media-release|tender|recruitment|staff circular. The evidence-type patterns
+   also participate in *classification*: a `/admissions/fee-structure` page
+   carries no generic navigation signal and would otherwise be dropped before
+   scoring.
+2. **Administrative-fee negative case.** The observed misclassification risk:
+   `Guidelines … Fee for recognition of Institution as Research Centre for
+   Ph.D. Course` (RUHS, 2026-11-17) — an administrative order whose URL token
+   "fee" is an institution-paid charge, never a student fee structure. Two
+   layers veto it: per-type `negative` patterns in the evidence-type table (no
+   boost, no reserved slot, no family hint on that link), and
+   `FamilyRule.negative_{url,anchor,text}_tokens` in `fmd/plan/rules.py`
+   (a match cancels the vote of the channel it appears in, recorded as
+   `*_vetoed` in the planner signals). Pinned by tests in
+   `tests/test_plan.py`, `tests/test_plan_phases.py` (the committed
+   `fee_structure_cover.txt` — the real cover text — now abstains instead of
+   planning `fee_structure`) and `tests/test_adapters_institution_site.py`.
+3. **PDF-first budget reserve** (`pdf_first_reserve_percent: 50`). A share of
+   `max_documents_per_domain` may only be filled by *evidence-typed* documents
+   (a non-vetoed evidence-type match). News, tender, gallery, staff-circular
+   and untitled documents can only fill the unreserved remainder, so
+   navigation-grade documents cannot consume a domain's evidence budget. With
+   3 slots at 50 %, non-evidence documents are capped at 1; unused reserved
+   capacity is never handed to non-evidence documents. (Navigation pages never
+   enter the document queue — the practical consumers the reserve gates are
+   the non-evidence *documents* a domain publishes.)
+4. **Family hints at anchor/filename level.** `seat_matrix` and
+   `fee_structure` entries declare `family:` plus a `hint:` pattern subset (the
+   strong phrases — "fee structure", "seat matrix", "sanctioned intake" — not
+   the bare boost vocabulary). When a hint pattern matches and the veto does
+   not, the adapter carries `metadata["family"]`, which the frontier persists
+   as `documents.extraction_family` and the planner accepts as a *reference*
+   hint. A registry-declared `extraction_family` always outranks it, and a
+   heuristic Phase-B text can still outrank a *heuristic* family — the hint
+   precedence is unchanged from the planner contract.
+
+Acceptance fixtures: `tests/fixtures/adapters/institution_site_evidence_listing_snippet.html`
+(seat/fee PDFs outrank news and galleries; the administrative-order URL gets no
+boost and no family) and `tests/fixtures/plan/fee_admin_order.txt` (planner-level
+abstention). All offline: no test opens a socket.
 
 ### 4.10 Discovery sources (`searxng`, `common_crawl_index`) — templates WS-C depends on
 

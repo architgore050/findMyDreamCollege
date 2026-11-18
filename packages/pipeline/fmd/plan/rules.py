@@ -10,6 +10,13 @@ model, and a deployment can replace :data:`DEFAULT_RULES` wholesale.
 * ``extension`` matches the URL's file extension.
 * ``text`` tokens match the first page(s) of extracted text.
 
+``negative_*`` tokens are the veto channel. A URL like
+``Guidelines-…-Fee-for-recognition-of-Institution-as-Research-Centre-for-Ph.D-Course``
+contains the token ``fee`` but the fee is an administrative charge paid by the
+institution, not a student fee structure. When a negative token matches a
+channel, that channel's positive vote is cancelled (and the veto is recorded in
+the returned signals), so the family cannot be declared from it alone.
+
 Weights and the accept floor are separate from the rules so a stricter run does
 not need a code fork. A rule that scores on three independent tokens is stronger
 than one that repeats a single token, because each token contributes once.
@@ -42,6 +49,12 @@ class FamilyRule:
     anchor_tokens: tuple[str, ...] = ()
     text_tokens: tuple[str, ...] = ()
     extensions: tuple[str, ...] = ()
+    #: Phrases that mark an administrative sense of an otherwise evidential
+    #: word ("fee" in *Fee for recognition of Institution as Research Centre*).
+    #: A match cancels the vote of the channel it appears in.
+    negative_url_tokens: tuple[str, ...] = ()
+    negative_anchor_tokens: tuple[str, ...] = ()
+    negative_text_tokens: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -76,6 +89,39 @@ DEFAULT_RULES = PlanRules(
                 "fee and other details",
             ),
             extensions=(),
+            # Observed 2026-11-17 (RUHS): "Guidelines … Fee for recognition of
+            # Institution as Research Centre for Ph.D. Course" — an
+            # administrative order whose URL token "fee" is an institution-paid
+            # charge, never a student fee structure. Any of these phrases
+            # cancels the fee vote of the channel it appears in.
+            negative_url_tokens=(
+                "fee for recognition",
+                "recognition of institution",
+                "research centre",
+                "research center",
+                "affiliation fee",
+                "inspection fee",
+                "revaluation fee",
+                "re-evaluation fee",
+            ),
+            negative_anchor_tokens=(
+                "fee for recognition",
+                "recognition of institution",
+                "research centre",
+                "research center",
+                "affiliation fee",
+                "inspection fee",
+            ),
+            negative_text_tokens=(
+                "fee for recognition",
+                "recognition of institution",
+                "research centre",
+                "research center",
+                "affiliation fee",
+                "inspection fee",
+                "revaluation fee",
+                "re-evaluation fee",
+            ),
         ),
         FamilyRule(
             family="seat_matrix",
@@ -152,6 +198,15 @@ class FamilyScore:
     signals: dict[str, int]
 
 
+def _rule_negatives(rule: FamilyRule) -> dict[str, tuple[str, ...]]:
+    """Negative tokens per signal channel; tokens are normalised per match."""
+    return {
+        "url": rule.negative_url_tokens,
+        "anchor": rule.negative_anchor_tokens,
+        "text": rule.negative_text_tokens,
+    }
+
+
 def score_families(
     *,
     url: str = "",
@@ -165,6 +220,7 @@ def score_families(
     anchor_key = normalise(anchor_text)
     text_key = normalise(text_sample)
     extension = extension_of(url)
+    haystacks = {"url": url_key, "anchor": anchor_key, "text": text_key}
 
     scores: list[FamilyScore] = []
     for rule in rules.families:
@@ -174,6 +230,14 @@ def score_families(
             "extension": int(bool(extension) and extension in rule.extensions),
             "text": _matches(rule.text_tokens, text_key),
         }
+        # A negative-context phrase cancels the vote of the channel it appears
+        # in; the veto itself stays visible in the signals for the run ledger.
+        negatives = _rule_negatives(rule)
+        for channel, tokens in negatives.items():
+            hits = _matches(tokens, haystacks[channel]) if tokens else 0
+            if hits:
+                signals[f"{channel}_vetoed"] = hits
+                signals[channel] = 0
         score = (
             signals["url"] * weights.url
             + signals["anchor"] * weights.anchor

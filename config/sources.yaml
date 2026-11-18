@@ -793,11 +793,13 @@ sources:
       skip_patterns:
         - '(?i)(login|sign[-_ ]?in|sign[-_ ]?up|wp-login|register|apply[-_ ]?online)'
       # A navigation page that matches this is not worth a hop: news, events,
-      # galleries and admission-brochure pages are the budget sinks of a college
-      # site. Documents are only ranked last, never dropped.
+      # galleries, tenders and staff circulars are the budget sinks of a college
+      # site. Documents are only ranked last, never dropped. "Admission
+      # brochure" moved OUT of this list on 2026-11-18: the brochure itself is
+      # fee/seat evidence, so it is boosted via evidence_types instead.
       deprioritise_patterns:
         - '(?i)(news|events?|gallery|photo[-_ ]?gallery|press|media[-_ ]?release)'
-        - '(?i)(tender|recruitment|admission[-_ ]?brochure|admissions?[-_ ]?(page|open|form|process))'
+        - '(?i)(tender|recruitment|staff[-_ ]?circular|circular[-_ ]?for[-_ ]?staff)'
       # Link ordering only; the classification gate lives in fmd/adapters/links.py.
       link_weights:
         document: 10
@@ -807,6 +809,64 @@ sources:
         navigate_anchor: 3
         navigate_filename: 2
         deprioritised: -50
+      # Evidence-type boost table (W1 2026-11-18). The measured 50-domain run
+      # linked accreditation 27 / placement 10 / curriculum 9 / seat_matrix 1 /
+      # fee_structure 0: the document cap was spent on SSR/AQAR/NIRF mirrors
+      # because fee and seat vocabulary never scored. Each entry matches at
+      # filename (link URL) and anchor level; `hint` is the strong phrase subset
+      # that carries a family hint to the planner; `negative` vetoes the type on
+      # a link whose "fee"/"seat" word is administrative (the observed case was
+      # "Guidelines … Fee for recognition of Institution as Research Centre for
+      # Ph.D. Course" — never a fee_structure). Entries here override the
+      # matching defaults in fmd/adapters/institution_site.py per type.
+      evidence_types:
+        seat_matrix:
+          family: seat_matrix
+          filename:
+            - '(?i)(seat[-_ ]?matrix|seat[-_ ]?availability|sanctioned[-_ ]?(intake|strength|seats)|intake[-_ ]?capacity|\bintake\b|\bseats?\b)'
+          anchor:
+            - '(?i)(seat matrix|sanctioned intake|intake capacity|number of seats|seat availability|total seats|\bintake\b)'
+          hint:
+            - '(?i)(seat[-_ ]?matrix|sanctioned[-_ ]?(intake|strength)|intake[-_ ]?capacity|number of seats|seat availability)'
+          negative:
+            - '(?i)(fee for recognition|recognition of institution|research cent(re|er)|affiliation fee|inspection fee|re-?valuation fee)'
+        fee_structure:
+          family: fee_structure
+          filename:
+            - '(?i)(fee[-_ ]?structure|fee[-_ ]?schedule|fee[-_ ]?details|tuition[-_ ]?fee|hostel[-_ ]?fee|mess[-_ ]?fee|\bfees?\b)'
+          anchor:
+            - '(?i)(fee structure|fee details|fee schedule|tuition fee|hostel fee|mess fee|fee notification)'
+          hint:
+            - '(?i)(fee[-_ ]?structure|fee[-_ ]?schedule|tuition[-_ ]?fee|hostel[-_ ]?fee|mess[-_ ]?fee)'
+          negative:
+            - '(?i)(fee for recognition|recognition of institution|research cent(re|er)|affiliation fee|inspection fee|re-?valuation fee)'
+        prospectus:
+          filename:
+            - '(?i)(prospectus|admission[-_ ]?brochure)'
+          anchor:
+            - '(?i)(prospectus|admission brochure)'
+        placement:
+          filename:
+            - '(?i)(placement|annual[-_ ]?report|aqar|ssr|self[-_ ]?study|iqac)'
+          anchor:
+            - '(?i)(placement|annual report|aqar|ssr|self study|iqac)'
+        nirf:
+          filename:
+            - '(?i)(nirf|dcs)'
+          anchor:
+            - '(?i)(nirf|dcs)'
+      evidence_type_weights:
+        seat_matrix: 40
+        fee_structure: 40
+        prospectus: 25
+        placement: 15
+        nirf: 12
+      # PDF-first budget reserve (W1 2026-11-18): this share of
+      # max_documents_per_domain may only be filled by evidence-typed documents
+      # (a non-vetoed evidence_types match). News, tender, gallery and untitled
+      # documents can only fill the remainder, so navigation-grade documents
+      # cannot consume the evidence budget of a domain.
+      pdf_first_reserve_percent: 50
       # Evidence targeting: how many inventory-discovered domains one run may
       # crawl, and how they are ranked. `naac_bonus` only applies when an
       # accreditation claim already names the domain.
