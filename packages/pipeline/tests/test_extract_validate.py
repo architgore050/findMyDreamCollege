@@ -268,7 +268,7 @@ def test_seat_quotas_cannot_exceed_sanctioned_intake() -> None:
 
     text = "Sanctioned intake: 60\nGovernment quota: 50\nManagement quota: 20\n"
     document = SeatMatrix(
-        total_seats=field("Sanctioned intake: 60"),
+        intake=field("Sanctioned intake: 60"),
         government_quota=field("Government quota: 50"),
         management_quota=field("Management quota: 20"),
     )
@@ -278,6 +278,27 @@ def test_seat_quotas_cannot_exceed_sanctioned_intake() -> None:
     assert {rejection.guard for rejection in result.rejections} == {
         "quotas_exceed_sanctioned_intake"
     }
+
+
+def test_aggregate_seats_also_bound_row_counts_when_no_intake_row_is_extracted() -> None:
+    """A document-stated total still bounds a row's admitted count.
+
+    `seats.total` is the aggregate scope (a printed Total row); it is a weaker
+    bound than the row's own intake, but it is still an upper bound — the guard
+    must not vanish just because the matrix has no per-row intake column.
+    """
+    from fmd.extract.schemas import SeatMatrix
+
+    text = "Total: 136\nAdmitted: 200\n"
+    document = SeatMatrix(
+        aggregate_seats=field("Total: 136"),
+        admitted=field("Admitted: 200"),
+    )
+
+    result = validate_document(document, text, extraction_id=1, entity_id=2, observed_at=OBSERVED)
+
+    rejection = next(item for item in result.rejections if item.field == "admitted")
+    assert rejection.guard == "admitted_exceeds_sanctioned_intake"
 
 
 def test_rate_without_denominator_is_rejected() -> None:
@@ -425,7 +446,7 @@ def test_admitted_exceeding_sanctioned_intake_is_rejected() -> None:
 
     text = "Sanctioned intake: 40\nAdmitted: 55\n"
     document = SeatMatrix(
-        total_seats=field("Sanctioned intake: 40"),
+        intake=field("Sanctioned intake: 40"),
         admitted=field("Admitted: 55"),
     )
 
@@ -443,7 +464,7 @@ def test_admitted_within_sanctioned_intake_and_duration_extract() -> None:
 
     text = "Sanctioned intake: 40\nAdmitted: 38\nDuration (months): 24\n"
     document = SeatMatrix(
-        total_seats=field("Sanctioned intake: 40"),
+        intake=field("Sanctioned intake: 40"),
         admitted=field("Admitted: 38"),
         duration_months=field("Duration (months): 24"),
     )

@@ -1,0 +1,13 @@
+{
+  "content": {
+    "judgements": [
+      {
+        "key": "t02",
+        "verdict": "wrong_field",
+        "reason": "recorded verdict for a row value presented as the aggregate (repair re-issue)"
+      }
+    ]
+  },
+  "tokens_in": 900,
+  "tokens_out": 120
+}

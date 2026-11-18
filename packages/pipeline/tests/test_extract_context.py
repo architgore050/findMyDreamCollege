@@ -144,7 +144,7 @@ def test_row_identity_is_part_of_the_claim_qualifier() -> None:
     tables = [college_table(1), college_table(2)]
     text = linearise(tables)
     document = SeatMatrix(
-        total_seats=ExtractedField(
+        intake=ExtractedField(
             quote="B.Sc. Medical Laboratory Technology 20",
             context="Institute 2 Medical College",
             confidence=0.9,
@@ -154,7 +154,7 @@ def test_row_identity_is_part_of_the_claim_qualifier() -> None:
     result = validate(document, text, tables=tables)
 
     assert result.rejections == []
-    claim = next(claim for claim in result.claims if claim.predicate == "seats.total")
+    claim = next(claim for claim in result.claims if claim.predicate == "seats.intake")
     assert claim.value == 20
     assert claim.qualifier["disambiguation"] == "context_row"
     assert claim.qualifier["context_quote"] == "Institute 2 Medical College"
@@ -199,7 +199,7 @@ def test_wave2_seat_columns_stay_row_scoped_and_column_safe() -> None:
     ]
     text = linearise(tables)
     document = SeatMatrix(
-        total_seats=ExtractedField(
+        intake=ExtractedField(
             quote="B.Sc. Medical Laboratory Technology 20",
             context="Institute 2 Medical College",
             confidence=0.9,
@@ -211,7 +211,7 @@ def test_wave2_seat_columns_stay_row_scoped_and_column_safe() -> None:
 
     assert result.rejections == []
     by_predicate = {claim.predicate: claim for claim in result.claims}
-    total = by_predicate["seats.total"]
+    total = by_predicate["seats.intake"]
     admitted = by_predicate["seats.admitted"]
     assert total.value == 20
     assert admitted.value == 18
@@ -261,7 +261,7 @@ def test_context_that_names_a_block_without_the_quote_is_rejected() -> None:
 
     result = validate(
         SeatMatrix(
-            total_seats=ExtractedField(
+            intake=ExtractedField(
                 quote="B.Sc. Nutrition 15",
                 context="Institute 1 Medical College",
                 confidence=0.9,
@@ -295,9 +295,7 @@ def test_ambiguous_quote_without_context_stays_unknown() -> None:
 
     result = validate(
         SeatMatrix(
-            total_seats=ExtractedField(
-                quote="B.Sc. Medical Laboratory Technology 20", confidence=0.9
-            )
+            intake=ExtractedField(quote="B.Sc. Medical Laboratory Technology 20", confidence=0.9)
         ),
         text,
         tables=tables,
@@ -349,7 +347,7 @@ def test_uncertain_column_header_rejects_a_numeric_claim() -> None:
 
     result = validate(
         SeatMatrix(
-            total_seats=ExtractedField(
+            intake=ExtractedField(
                 quote="B.Sc. Medical Laboratory Technology 20",
                 context="Institute 1 Medical College",
                 confidence=0.9,
@@ -362,7 +360,7 @@ def test_uncertain_column_header_rejects_a_numeric_claim() -> None:
     assert result.claims == []
     rejection = result.rejections[0]
     assert rejection.reason == "uncertain_column_header"
-    outcome = next(item for item in result.outcomes if item.field == "total_seats")
+    outcome = next(item for item in result.outcomes if item.field == "intake")
     assert outcome.outcome == "rejected"
 
 
@@ -437,12 +435,10 @@ def test_numeric_value_comes_from_the_value_cell_not_the_serial_number() -> None
     assert resolution.status == "resolved"
 
     document = SeatMatrix(
-        total_seats=ExtractedField(
-            quote=quote, context="Institute 2 Medical College", confidence=0.9
-        )
+        intake=ExtractedField(quote=quote, context="Institute 2 Medical College", confidence=0.9)
     )
     result = validate(document, text, tables=tables)
-    claim = next(claim for claim in result.claims if claim.predicate == "seats.total")
+    claim = next(claim for claim in result.claims if claim.predicate == "seats.intake")
     assert claim.value == 20, "the serial number must not become the intake"
     assert claim.qualifier["row"]["value_cell"] == "20"
 

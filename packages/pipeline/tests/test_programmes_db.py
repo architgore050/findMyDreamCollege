@@ -99,7 +99,7 @@ def test_upsert_is_idempotent_and_replaces_materialised_fields(pg_database) -> N
             credential_level="degree",
             normalised_name="bsc mlt",
             seats=40,
-            field_sources={"curriculum.programme_name": "1", "seats.total": "2"},
+            field_sources={"curriculum.programme_name": "1", "seats.intake": "2"},
         )
     )
     assert created is True
@@ -145,7 +145,7 @@ def test_materialisation_claims_only_evidence_and_supported(pg_database) -> None
         institution.id,
         evidence_extraction,
         evidence_len,
-        "seats.total",
+        "seats.intake",
         10,
         unit="count",
         status="rejected",
@@ -195,7 +195,7 @@ def test_programme_stage_end_to_end_against_postgres(pg_database) -> None:
         institution.id,
         extraction_id,
         text_len,
-        "seats.total",
+        "seats.intake",
         50,
         unit="count",
     )
@@ -213,7 +213,7 @@ def test_programme_stage_end_to_end_against_postgres(pg_database) -> None:
     assert set(row.field_sources) == {
         "curriculum.programme_name",
         "curriculum.duration_months",
-        "seats.total",
+        "seats.intake",
     }
 
     again = RunSummary(run_id="test2", stage="ingest", started_at=utcnow())

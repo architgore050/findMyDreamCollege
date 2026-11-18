@@ -909,8 +909,13 @@ sources:
           - seats.duration_months
         internship_month_predicates:
           - curriculum.internship_months
+        # `seats.intake` is the per-programme sanctioned intake (the Stanley
+        # seat-matrix case); `seats.sanctioned` is its declared alias.
+        # `seats.total` is the aggregate vocabulary and is deliberately not
+        # listed: an aggregate across programmes must never be written into one
+        # programme's seats column. `seats.admitted` is never intake.
         seats_predicates:
-          - seats.total
+          - seats.intake
           - seats.sanctioned
         medium_predicates:
           - curriculum.medium

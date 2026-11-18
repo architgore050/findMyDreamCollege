@@ -10,6 +10,7 @@ from fmd.extract.schemas import (
     FAMILIES,
     ExtractedField,
     FamilyDocument,
+    SeatMatrix,
     UnknownFamily,
     predicate_specs,
     schema_for,
@@ -54,15 +55,20 @@ def test_every_family_declares_a_real_prompt_file_history_with_labels() -> None:
 
 
 def test_every_family_keeps_v1_v2_and_tabular_families_add_their_next_version() -> None:
-    # fee_structure/seat_matrix were at v3, so wave 2 ships v4 for them;
-    # placement_report was at v2, so its next version is v3. Every other
-    # family stays at its current latest, and old files are kept everywhere.
-    tabular_v4 = {"seat_matrix", "fee_structure"}
+    # fee_structure was at v3, so wave 2 shipped v4 for it; seat_matrix went to
+    # v4 in wave 2 and to v5 with the seat-semantics split (intake vs
+    # aggregate); placement_report was at v2, so its next version is v3. Every
+    # other family stays at its current latest, and old files are kept
+    # everywhere.
+    tabular_v4 = {"fee_structure"}
+    tabular_v5 = {"seat_matrix"}
     for family in FAMILIES:
         versions = prompt_versions(family)
         assert {"v1", "v2"}.issubset(set(versions)), f"{family} must keep v1 and v2"
         prompt = load_prompt(family)
-        if family in tabular_v4:
+        if family in tabular_v5:
+            expected = "v5"
+        elif family in tabular_v4:
             expected = "v4"
         elif family == "placement_report":
             expected = "v3"
@@ -78,6 +84,32 @@ def test_every_family_keeps_v1_v2_and_tabular_families_add_their_next_version() 
         assert "context" in prompt.text
         assert "together they must identify exactly one location" in prompt.text
         wave_prompt = load_prompt(family, "v4")
+        assert "context" in wave_prompt.text
+        assert "together they must identify exactly one location" in wave_prompt.text
+
+
+SEAT_SEMANTICS_CONTRACT_MARKERS = (
+    "seats.intake",
+    "seats.total",
+    "sanctioned intake capacity printed for ONE programme row at ONE institution",
+    "ONLY for a total the document itself states as a total",
+    "Never copy one into the other",
+    "a row value is not a total, and a total is not one programme's intake",
+    "`aggregate_seats` is null",
+)
+
+
+def test_seat_matrix_v5_states_the_intake_vs_aggregate_split() -> None:
+    """The v5 prompt is where the extractor learns the seat-semantics split."""
+    prompt = load_prompt("seat_matrix", "v5")
+    flattened = " ".join(prompt.text.split()).lower()
+    for marker in SEAT_SEMANTICS_CONTRACT_MARKERS:
+        assert " ".join(marker.split()).lower() in flattened, (
+            f"seat_matrix@v5 is missing the split statement {marker!r}"
+        )
+    # The v4/v3 row-context contract survives the split.
+    for version in ("v3", "v4", "v5"):
+        wave_prompt = load_prompt("seat_matrix", version)
         assert "context" in wave_prompt.text
         assert "together they must identify exactly one location" in wave_prompt.text
 
@@ -211,6 +243,12 @@ def test_predicate_vocabulary_is_registry_compatible() -> None:
     assert specs["fee.period"].unit_kind == "text"
     assert specs["seats.admitted"].unit_kind == "count"
     assert specs["seats.duration_months"].unit_kind == "months"
+    # The seat-semantics split: the row-scoped intake and the document-stated
+    # aggregate are two different fields with two different predicates.
+    assert specs["seats.intake"].unit_kind == "count"
+    assert specs["seats.total"].unit_kind == "count"
+    assert "intake" in SeatMatrix.SPECS and "aggregate_seats" in SeatMatrix.SPECS
+    assert "total_seats" not in SeatMatrix.SPECS  # the ambiguous name is gone
     assert specs["placement.salary_period"].unit_kind == "text"
     assert specs["placement.recruiters_count"].unit_kind == "count"
     assert specs["placement.rate"].is_rate is True

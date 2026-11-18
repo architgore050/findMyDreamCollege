@@ -33,9 +33,15 @@ from fmd.er.normalise import normalise_name
 #: Predicate vocabulary is data. The defaults mirror the committed registry so
 #: offline tests and one-off scripts work without a config dir; production
 #: always reads ``params.programme_mapping`` from the institution-site source.
-#: ``seats.sanctioned`` and ``seats.duration_months`` are the wave-2 seat-matrix
-#: predicates; both are consumed when present and never invented. Semesters are
-#: still not converted to months.
+#: ``seats.intake`` (and its declared ``seats.sanctioned`` alias) is the
+#: wave-2 seat-matrix predicate for the sanctioned-seats field: a per-programme
+#: row value. ``seats.total`` is the aggregate vocabulary and is deliberately
+#: NOT consumed here — an aggregate across programmes/institutions must never
+#: be written into one programme's ``seats`` column. ``seats.admitted`` is a
+#: filled-count demand signal and is never treated as intake. Both
+#: ``seats.intake``/``seats.sanctioned`` and ``seats.duration_months`` are
+#: consumed when present and never invented. Semesters are still not converted
+#: to months.
 DEFAULT_PROGRAMME_MAPPING: dict[str, Any] = {
     "name_predicates": [
         "curriculum.programme_name",
@@ -47,7 +53,7 @@ DEFAULT_PROGRAMME_MAPPING: dict[str, Any] = {
         "seats.duration_months",
     ],
     "internship_month_predicates": ["curriculum.internship_months"],
-    "seats_predicates": ["seats.total", "seats.sanctioned"],
+    "seats_predicates": ["seats.intake", "seats.sanctioned"],
     "medium_predicates": ["curriculum.medium", "programme.medium"],
     "affiliated_university_predicates": [
         "curriculum.affiliated_university",

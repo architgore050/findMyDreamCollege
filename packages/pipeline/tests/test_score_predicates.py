@@ -52,8 +52,26 @@ def test_namespaced_predicates_map_to_components_and_units(registry) -> None:
 def test_alias_resolution_is_explicit(predicate_registry) -> None:
     resolved = predicate_registry.resolve("seats")
     assert resolved is not None
-    assert resolved.predicate == "seats.total"
+    # The bare legacy spelling meant one programme's sanctioned seat count,
+    # so it resolves to the row-scoped predicate (W2 seat-semantics).
+    assert resolved.predicate == "seats.intake"
     assert resolved.alias_of == "seats"
+
+
+def test_descriptions_travel_with_the_rule_for_the_verifier(predicate_registry) -> None:
+    """The registry hands the verifier each predicate's meaning, scope included."""
+    intake = predicate_registry.resolve("seats.intake")
+    assert intake is not None
+    assert "THIS programme" in intake.description
+    total = predicate_registry.resolve("seats.total")
+    assert total is not None
+    assert "aggregate" in total.description.lower()
+    # An alias resolves to the canonical description, never an empty one.
+    sanctioned = predicate_registry.resolve("seats.sanctioned")
+    assert sanctioned is not None
+    assert sanctioned.description == intake.description
+    # Canonical rows always carry one.
+    assert predicate_registry.resolve("seats.total").description
 
 
 def test_unit_mismatch_is_rejected(predicate_registry) -> None:

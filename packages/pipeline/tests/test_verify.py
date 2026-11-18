@@ -204,6 +204,7 @@ def test_expected_type_comes_from_the_predicate_registry(registry) -> None:
         predicates=registry.predicates,
     )
     assert verifier._expected_type("seats.total") == "count"
+    assert verifier._expected_type("seats.intake") == "count"
     assert verifier._expected_type("placement.eligible_count") == "count"
     assert verifier._expected_type("fee.tuition") == "money+period"
     assert verifier._expected_type("salary.median") == "money+period"
@@ -211,6 +212,40 @@ def test_expected_type_comes_from_the_predicate_registry(registry) -> None:
     assert verifier._expected_type("accreditation.naac_grade") == "grade"
     assert verifier._expected_type("seats.intake_year") == "text"
     assert verifier._expected_type("predicates.not.in.the.registry") is None
+
+
+def test_description_comes_from_the_predicate_registry(registry) -> None:
+    """verify@v3: the verifier receives the registry's definition, scope included."""
+    verifier = Verifier(
+        ScriptedRouter(lambda keys, _repair, _call: dict.fromkeys(keys, "supported")),
+        policy=_policy(),
+        predicates=registry.predicates,
+    )
+    intake = verifier._description("seats.intake")
+    assert intake and "THIS programme" in intake and "THIS institution" in intake
+    total = verifier._description("seats.total")
+    assert total and "aggregate" in total.lower()
+    # Both seat predicates say what the other is not, so the model can tell a
+    # row value from an aggregate.
+    assert "aggregate" in intake.lower() and "never" in total.lower()
+    # An alias resolves to its canonical row's description; an unknown
+    # predicate has none.
+    assert verifier._description("seats.sanctioned") == intake
+    assert verifier._description("predicates.not.in.the.registry") is None
+
+
+def test_field_payload_carries_the_description_and_never_the_value(registry) -> None:
+    verifier = Verifier(
+        ScriptedRouter(lambda keys, _repair, _call: dict.fromkeys(keys, "supported")),
+        policy=_policy(),
+        predicates=registry.predicates,
+    )
+    claim = ClaimView("k1", "seats.intake", "3. B.Sc. Medical Laboratory Technology\n20", 0, 40)
+    filled = verifier._with_expected(claim)
+    payload = field_payload(filled)
+    assert payload["expected"] == "count"
+    assert "THIS programme" in payload["description"]
+    assert "value" not in payload
 
 
 def test_verify_claims_fill_expected_but_never_the_value(registry) -> None:
@@ -229,6 +264,7 @@ def test_verify_claims_fill_expected_but_never_the_value(registry) -> None:
     assert router.calls[0]["keys"] == ["claim-1"]
     user = router.calls[0]["user"]
     assert '"expected": "money+period"' in user
+    assert '"description"' in user  # the registry's definition travels (verify@v3)
     assert '"context"' in user and STANLEY in user
     assert '"row_label"' in user
     assert '"column_header"' not in user  # qualifier did not resolve one
@@ -258,6 +294,43 @@ REPAIR_V2_CONTRACT_MARKERS = (
 )
 
 
+VERIFY_V3_CONTRACT_MARKERS = (
+    "description",
+    "the registry's one-sentence definition",
+    "per-row vs aggregate",
+    "judge whether the value the quote wraps belongs to the field as described",
+    "a row-scoped quote is correct",
+    "a single programme row's value presented under an aggregate field",
+    "does the value this quote wraps belong to this row and this column",
+    "wrong_field",
+    "never output a value",
+)
+
+REPAIR_V3_CONTRACT_MARKERS = (
+    "description",
+    "one-sentence `description` of the field",
+    "its meaning and scope",
+    "a row-scoped quote is correct",
+    "a single programme row's value under an aggregate field stays",
+    "does the value this quote wraps belong to this row and this column",
+    "genuinely wrong association",
+    "never emit a value",
+)
+
+
+def test_v3_prompts_state_the_description_and_scope_contract() -> None:
+    for name, markers in (
+        ("verify", VERIFY_V3_CONTRACT_MARKERS),
+        ("verify_repair", REPAIR_V3_CONTRACT_MARKERS),
+    ):
+        prompt = load_prompt(name, "v3")
+        flattened = " ".join(prompt.text.split()).lower()
+        for marker in markers:
+            assert " ".join(marker.split()).lower() in flattened, (
+                f"{name}@v3 is missing the contract statement {marker!r}"
+            )
+
+
 def test_v2_prompts_state_the_quote_shape_and_row_contract() -> None:
     for name, markers in (
         ("verify", VERIFY_V2_CONTRACT_MARKERS),
@@ -271,7 +344,7 @@ def test_v2_prompts_state_the_quote_shape_and_row_contract() -> None:
             )
 
 
-def test_verify_prompt_family_is_complete_and_v2_is_latest(registry) -> None:
+def test_verify_prompt_family_is_complete_and_v3_is_latest(registry) -> None:
     """The verify family keeps its history: contiguous v1..vN, every file real."""
     for name in ("verify", "verify_repair"):
         versions = prompt_versions(name)
@@ -280,7 +353,7 @@ def test_verify_prompt_family_is_complete_and_v2_is_latest(registry) -> None:
             f"{name} prompt history must be contiguous v1..vN with every earlier "
             f"version kept; got {versions}"
         )
-        assert {"v1", "v2"}.issubset(set(versions))
+        assert {"v1", "v2", "v3"}.issubset(set(versions))
         for version in versions:
             prompt = load_prompt(name, version)
             assert prompt.path == PROMPTS_DIR / name / f"{version}.md"
@@ -290,10 +363,12 @@ def test_verify_prompt_family_is_complete_and_v2_is_latest(registry) -> None:
                 assert prompt.version in prompt.text, (
                     f"{name}/{version}.md must carry its version label in the body"
                 )
-        assert load_prompt(name).version == "v2"
+        assert load_prompt(name).version == "v3"
     assert load_prompt("verify", "v1").ref == "verify@v1"
+    assert load_prompt("verify", "v2").ref == "verify@v2"
     assert load_prompt("verify_repair", "v1").ref == "verify_repair@v1"
-    assert VerifyPolicy.load(registry.models).prompt_version == "v2"
+    assert load_prompt("verify_repair", "v2").ref == "verify_repair@v2"
+    assert VerifyPolicy.load(registry.models).prompt_version == "v3"
 
 
 # --------------------------------------------------------------------------- synthetic fixture
@@ -355,7 +430,11 @@ def test_row_context_fixture_supports_the_stanley_claim_and_rejects_the_counterf
     assert decisions["s01"].status == "supported"
     assert decisions["s01"].row_context is True
     assert decisions["s01"].expected_type == "count"
-    assert decisions["s01"].prompt_version == "verify@v2"
+    assert decisions["s01"].prompt_version == "verify@v3"
+    # s01 is now seats.intake (W2 seat-semantics): the payload the model judged
+    # described a per-programme field, so the row quote was correct.
+    payload_by_key = {claim.view.key: claim.view.predicate for claim in case.claims}
+    assert payload_by_key["s01"] == "seats.intake"
 
     assert decisions["s02"].status == "rejected"
     assert decisions["s02"].verdict == "wrong_field"
@@ -389,6 +468,95 @@ def test_row_context_fixture_eval_reports_the_same_numbers(registry) -> None:
     assert payload["correct_rejected"] == 0
     assert payload["verified_rate"] == 1.0
     assert payload["calls"] == 2 and payload["repairs"] == 1
+
+
+# --------------------------------------------------------------------------- seat semantics case
+
+SEAT_CASE_DIR = TESTS / "fixtures" / "verify" / "seat_semantics_v3"
+
+
+def test_seat_semantics_fixture_supports_the_row_intake_and_rejects_the_row_as_total(
+    registry,
+) -> None:
+    """The seat split, offline: same value 20, two predicates, opposite fates.
+
+    t01 is the Stanley claim as `seats.intake`: the registry description says
+    the field is the sanctioned intake for THIS programme at THIS institution,
+    so the row-scoped quote is correct and must be supported. t02 is the SAME
+    quote asserted as `seats.total`: the description says that field is only
+    for an aggregate the document itself states, so a row value stays
+    wrong_field, repair included. t03 is the genuine aggregate (the Total row
+    the Stanley block prints) and verifies as `seats.total`. t04 is a second
+    row-scoped intake on the Chengalpattu block. t05 is the money guard: a
+    bare amount with no printed period is `absent`, unchanged by the split.
+    """
+    case = load_case(SEAT_CASE_DIR)
+    assert len(case.claims) == 5
+    router = build_router(registry.models, mock=True, fixtures_dir=str(case.fixtures_dir))
+    verifier = Verifier(router, predicates=registry.predicates)
+    run, metrics = run_case(case, verifier)
+
+    decisions = {decision.key: decision for decision in run.decisions}
+    # Row-scoped seats.intake is supported — the Stanley fix this wave ships.
+    assert decisions["t01"].status == "supported"
+    assert decisions["t01"].row_context is True
+    assert decisions["t01"].expected_type == "count"
+    assert decisions["t01"].prompt_version == "verify@v3"
+
+    # The same value labelled seats.total is rejected: wrong scope, not a
+    # missing number.
+    assert decisions["t02"].status == "rejected"
+    assert decisions["t02"].verdict == "wrong_field"
+    assert decisions["t02"].repair_attempted is True
+    assert decisions["t02"].reason == "verifier_wrong_field_after_repair"
+
+    # A genuine document-stated aggregate row still verifies as total.
+    assert decisions["t03"].status == "supported"
+    assert decisions["t03"].row_context is True
+    assert decisions["t03"].expected_type == "count"
+
+    # A second row-scoped intake claim is supported on its own row.
+    assert decisions["t04"].status == "supported"
+
+    # Money-without-period is still rejected immediately.
+    assert decisions["t05"].status == "rejected"
+    assert decisions["t05"].verdict == "absent"
+    assert decisions["t05"].repair_attempted is False
+    assert decisions["t05"].expected_type == "money+period"
+
+    payload = metrics.as_dict()
+    assert payload["fabrication_caught"] == 2
+    assert payload["fabricated_total"] == 2
+    assert payload["false_accepts"] == 0
+    assert payload["correct_rejected"] == 0
+    assert payload["supported"] == 3
+    assert payload["rejected"] == 2
+    assert payload["verified_rate"] == 1.0
+    assert run.calls == 2  # one bundle (all five share the small page) + one repair
+    assert run.repairs == 1
+
+
+def test_seat_semantics_fixture_eval_reports_the_same_numbers(registry) -> None:
+    payload = evaluate_fixture_dir(SEAT_CASE_DIR, registry)
+    assert payload["fabrication_caught"] == 2
+    assert payload["false_accepts"] == 0
+    assert payload["correct_rejected"] == 0
+    assert payload["verified_rate"] == 1.0
+    assert payload["calls"] == 2 and payload["repairs"] == 1
+
+
+def test_seat_semantics_fixture_quotes_and_contexts_resolve() -> None:
+    manifest = json.loads((SEAT_CASE_DIR / "case.json").read_text(encoding="utf-8"))
+    text = (SEAT_CASE_DIR / manifest["text_file"]).read_text(encoding="utf-8")
+    for claim in manifest["claims"]:
+        assert claim["quote"] in text
+        if "context" in claim:
+            assert claim["context"] in text
+    # The discrimination pair: one quote, two different predicates.
+    assert manifest["claims"][0]["quote"] == manifest["claims"][1]["quote"]
+    assert manifest["claims"][0]["predicate"] != manifest["claims"][1]["predicate"]
+    # The genuine aggregate quotes the document's own Total row.
+    assert manifest["claims"][2]["quote"].startswith("Total")
 
 
 def test_row_context_fixture_quotes_and_contexts_resolve() -> None:
@@ -622,7 +790,7 @@ def test_verification_persists_only_its_own_columns() -> None:
         assert claim_id in {1, 2}
         assert verification.status == "supported"
         assert verification.verified_by is None  # scripted router has no profile
-        assert verification.notes["prompt_version"] == "verify@v2"
+        assert verification.notes["prompt_version"] == "verify@v3"
         assert verification.notes["verdict"] == "supported"
 
 

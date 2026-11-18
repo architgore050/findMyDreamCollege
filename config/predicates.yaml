@@ -1,4 +1,4 @@
-# Authoritative predicate registry (WS-SCORE-ALIAS).
+# Authoritative predicate registry (WS-SCORE-ALIAS; seat split W2 seat-semantics).
 #
 # One row per predicate. The extractor emits namespaced predicates
 # (`seats.total`, `curriculum.internship_months`, ...); scoring maps each of
@@ -11,6 +11,12 @@
 #   unit_kind     money | count | hours | months | years | percent | ratio |
 #                 grade | boolean | date | text. A claim whose unit contradicts
 #                 this is rejected, never coerced.
+#   description   one sentence stating exactly what the predicate means and its
+#                 SCOPE (per-row vs aggregate, per-year vs total). This is the
+#                 authority the second-pass verifier receives for every claim:
+#                 it judges whether the quoted value belongs to the field as
+#                 described, so a vague description mis-verifies. Required for
+#                 every row; the registry refuses to load without one.
 #   requires_denominator  rate claims must carry a cohort denominator in
 #                 `qualifier_json` (invariant: rates need a denominator).
 #   requires_period       money claims must carry a printed period
@@ -26,92 +32,191 @@
 # unflagged derived vocabulary). A predicate not in `predicates` or `aliases`
 # is reported as unknown, never silently ignored.
 
-version: "2026-11-18.2"
+version: "2026-11-18.3"
 
 predicates:
   # ---------------------------------------------------------------- accreditation
   accreditation.institution_name:
     unit_kind: text
+    description: >-
+      The institution's printed name as the document states it (a name label,
+      never a count, date or status).
   accreditation.programme_name:
     unit_kind: text
+    description: >-
+      The programme's printed name on an accreditation or approval document,
+      scoped to that document's institution (a per-row label, not an aggregate).
   accreditation.naac_grade:
     component: academic_quality
     label: "NAAC grade"
     unit_kind: grade
     scoring: {kind: transform, transform: naac_grade}
+    description: >-
+      The NAAC accreditation grade the document awards to THIS institution
+      (letter grade such as A+); institution-scoped, current as of the cycle
+      the document names.
   accreditation.recognition_status:
     component: academic_quality
     label: "Recognition status"
     unit_kind: text
     scoring: {kind: transform, transform: recognition_status}
+    description: >-
+      The regulator's recognition wording for THIS programme at THIS
+      institution (recognised / conditional / not recognised), as the document
+      prints it; never inferred from an institution-level statement.
   accreditation.body:
     unit_kind: text
+    description: >-
+      The name of the accreditation or regulatory body whose approval or grade
+      the document records.
   accreditation.valid_until:
     unit_kind: date
+    description: >-
+      The date through which the recorded accreditation or approval remains
+      valid, as printed on the document.
 
   # ---------------------------------------------------------------- curriculum
   curriculum.programme_name:
     unit_kind: text
+    description: >-
+      The programme's printed name on a curriculum, syllabus or prospectus
+      document, scoped to the institution that publishes it.
   curriculum.duration_months:
     unit_kind: months
+    description: >-
+      The programme's total duration printed in months for THIS programme; a
+      per-programme total, not one semester's or one year's length.
   curriculum.semesters:
     unit_kind: count
+    description: >-
+      The number of semesters the programme's curriculum states; a per-programme
+      total. Never converted into months by extraction.
   curriculum.internship_hours:
     component: clinical_training
     label: "Internship hours"
     unit_kind: hours
     scoring: {kind: transform, transform: internship_hours}
+    description: >-
+      The total printed internship hours for THIS programme across its whole
+      curriculum (e.g. NCAHP's 1,800); a programme total, not one posting's.
   curriculum.internship_months:
     component: clinical_training
     label: "Internship months"
     unit_kind: months
     scoring: {kind: transform, transform: internship_months}
+    description: >-
+      The total printed internship duration in months for THIS programme across
+      its whole curriculum; a programme total, not one semester's.
 
   # ---------------------------------------------------------------- seats
+  # seats.intake vs seats.total is the W2 seat-semantics split: a seat matrix
+  # prints one number per programme row per institution, and sometimes a Total
+  # row. A row value must never be published as an aggregate and an aggregate
+  # must never be attached to one programme.
   seats.intake_year:
     unit_kind: text
+    description: >-
+      The admission cycle (e.g. "A.Y. 2024-2025") the seat matrix or intake
+      document covers; document-scoped, one cycle.
   seats.programme_name:
     unit_kind: text
-  seats.total:
+    description: >-
+      The programme's printed label on the seat-matrix row the other seat
+      fields are resolved against; per-row, and the context that makes a seat
+      count attributable to one programme.
+  seats.intake:
     component: admission_realism
-    label: "Seats available"
+    label: "Sanctioned intake (this programme)"
     unit_kind: count
     scoring: {kind: transform, transform: seats}
+    description: >-
+      The sanctioned intake capacity printed for THIS programme at THIS
+      institution — one row of a seat matrix under its intake/sanctioned
+      column; per-row, per admission cycle. Never an aggregate and never a
+      filled/admitted count.
+  seats.total:
+    component: admission_realism
+    label: "Aggregate seats (document-stated total)"
+    unit_kind: count
+    scoring: {kind: transform, transform: seats}
+    description: >-
+      An aggregate seat total that the document itself states as a total (a
+      printed "Total" row summing programmes at an institution, or an
+      institution-wide/all-institutions figure); aggregate scope only. A value
+      quoted from a single programme row must never be emitted here — that is
+      seats.intake.
   seats.admitted:
     unit_kind: count
     label: "Admitted (filled) seats"
+    description: >-
+      The number of seats actually filled or admitted for THIS programme row at
+      THIS institution, printed in an admitted/filled column; per-row, per
+      admission cycle. A demand signal, never scored directly, and guarded
+      against exceeding the sanctioned intake at extraction.
     notes: >-
       Evidence/filter input: the filled count is a demand signal, never scored
       directly. Guarded against exceeding the sanctioned intake at extraction.
   seats.duration_months:
     unit_kind: months
     label: "Programme duration printed on a seat-matrix row"
+    description: >-
+      The programme duration in months printed on the seat-matrix row or its
+      legend for THIS programme; per-row, a programme total. Never derived:
+      semesters or years are not converted to months.
     notes: >-
       Consumed by programme materialisation into programmes.duration_months
       when present. Never derived: semesters are not converted to months.
   seats.government_quota:
     unit_kind: count
+    description: >-
+      The government/state-quota seat count printed for THIS programme row at
+      THIS institution; per-row. Must not exceed the row's sanctioned intake.
   seats.management_quota:
     unit_kind: count
+    description: >-
+      The management/NRI/paid-quota seat count printed for THIS programme row at
+      THIS institution; per-row. Must not exceed the row's sanctioned intake.
   seats.quota_note:
     unit_kind: text
+    description: >-
+      The verbatim wording of the quota split printed for a seat-matrix row;
+      per-row explanatory text, never a number.
 
   # ---------------------------------------------------------------- placement
   placement.cohort_year:
     unit_kind: count
+    description: >-
+      The calendar year of the placement cohort a report covers; one report's
+      cohort, not a multi-year figure.
   placement.eligible_count:
     unit_kind: count
+    description: >-
+      The number of students eligible for placement in the report's cohort,
+      for THIS programme (or the stated branch scope); the denominator of the
+      placement rate.
   placement.placed_count:
     unit_kind: count
+    description: >-
+      The number of students of the cohort reported placed, for THIS programme
+      (or the stated branch scope); the numerator of the placement rate.
+      Internships never count as placements.
   placement.rate:
     component: outcomes
     label: "Placement rate"
     unit_kind: percent
     requires_denominator: true
     scoring: {kind: percent}
+    description: >-
+      The share of the eligible cohort reported placed, for THIS programme (or
+      stated branch scope) in the report's cohort year; per-year, needs its
+      eligible-count denominator. Internships are not placements.
   placement.salary_period:
     unit_kind: text
     label: "Printed salary period"
+    description: >-
+      The pay period the placement document prints for its salary figures
+      (per annum / per month); document-level text that supplies the period a
+      money span may omit. Not an amount.
     notes: >-
       Document-level period claim; supplies the period a salary span may omit
       (recorded as qualifier period_source on the money claim). A salary that
@@ -119,31 +224,59 @@ predicates:
   placement.recruiters_count:
     unit_kind: count
     label: "Distinct recruiting organisations"
+    description: >-
+      The number of distinct organisations the report says recruited from the
+      cohort; per-cohort. A demand signal and gaming-resistance input, not a
+      scored component.
     notes: >-
       Evidence-only: a recruiter count is a demand signal and a gaming-resistance
       input ("recruiter list without counts"), not a scored component.
   placement.internship_counted_as_employment:
     unit_kind: boolean
+    description: >-
+      Whether the placement report itself counts internships as employment for
+      its numbers; report-scoped flag. True is a report-integrity red flag.
   placement.basis:
     unit_kind: text
+    description: >-
+      The verbatim statement of what the placement figures count (eligible /
+      registered / passed students); document-scoped wording.
 
   # ---------------------------------------------------------------- salary
   salary.median:
     unit_kind: money
     requires_period: true
+    description: >-
+      The median salary the document reports for the cohort/branch it names,
+      with a printed pay period; per-cohort. A raw salary is never scored
+      against an invented basket.
     notes: "Derived salary-vs-cost-of-living ratios are separate claims; a raw salary is never scored against an invented basket."
   salary.highest_package:
     unit_kind: money
     requires_period: true
+    description: >-
+      The highest reported salary package for the cohort/branch the document
+      names, with a printed pay period; a single-offer extreme, per-cohort —
+      never a typical salary.
 
   # ---------------------------------------------------------------- fees
   fee.academic_year:
     unit_kind: text
+    description: >-
+      The academic year the fee document's figures apply to; document-scoped,
+      one year.
   fee.currency:
     unit_kind: text
+    description: >-
+      The currency the fee document prints its amounts in; document-level, and
+      the only source a fee span may inherit its currency from.
   fee.period:
     unit_kind: text
     label: "Document-level fee period (year | semester | month)"
+    description: >-
+      The pay period the fee document states for its amounts (year / semester /
+      month); document-level text that supplies the period a money span may
+      omit. Not an amount.
     notes: >-
       Supplies the period a money span may omit (recorded as qualifier
       period_source on the fee claim). A fee that ends up with no period
@@ -151,13 +284,24 @@ predicates:
   fee.tuition:
     unit_kind: money
     requires_period: true
+    description: >-
+      The tuition fee printed for THIS programme (or the institution-level fee
+      the document says applies to it) with the printed currency and period;
+      per-year or per the printed period, never an aggregate over years.
   fee.hostel:
     unit_kind: money
     requires_period: true
+    description: >-
+      The hostel charge the document prints, with currency and period;
+      accommodation-only, per the printed period — never including mess or
+      other living costs.
   fee.mess:
     unit_kind: money
     requires_period: true
     label: "Mess / food charge"
+    description: >-
+      The mess/food charge the document prints, with currency and period;
+      food-only, per the printed period — kept separate from hostel rent.
     notes: >-
       Evidence-only input to the hostel living scenario (fmd/cost owns the
       TCOA build; this registry row only validates and reports the claim).
@@ -165,6 +309,10 @@ predicates:
     unit_kind: money
     requires_period: true
     label: "Other printed fee (transport, internet, sports, misc)"
+    description: >-
+      Any other printed fee the document lists (transport, internet, sports,
+      misc), with currency and period; per the printed period. Distinct from
+      fee.mandatory so neither wording is forced into the other.
     notes: >-
       Evidence-only. Distinct from fee.mandatory (exam/library/lab/development),
       which the golden placement fixture pins; both stay so neither wording is
@@ -172,46 +320,95 @@ predicates:
   fee.mandatory:
     unit_kind: money
     requires_period: true
+    description: >-
+      The mandatory institutional charges the document lists (exam/library/lab/
+      development), with currency and period; per the printed period.
   fee.total_first_year:
     unit_kind: money
     requires_period: true
+    description: >-
+      The first-year total fee the document itself states as a total; one
+      year's scope. Never a multi-year aggregate and never recomputed by
+      extraction.
   fee.period_note:
     unit_kind: text
+    description: >-
+      The verbatim wording that qualifies a fee's period (e.g. "payable per
+      semester"); document-scoped explanatory text, never a number.
 
   # ---------------------------------------------------------------- exams
   exam.name:
     unit_kind: text
+    description: >-
+      The admission exam's printed name on the notification or calendar; one
+      exam per claim.
   exam.cycle_year:
     unit_kind: count
+    description: >-
+      The admissions cycle year the exam notification covers; one cycle, not a
+      recurring schedule.
   exam.registration_opens:
     unit_kind: date
+    description: >-
+      The date the named exam's registration opens, for the stated cycle; one
+      exam, one cycle.
   exam.registration_closes:
     unit_kind: date
+    description: >-
+      The date the named exam's registration closes, for the stated cycle; one
+      exam, one cycle.
   exam.date:
     unit_kind: date
+    description: >-
+      The date the named exam is held, for the stated cycle; one sitting, not a
+      range.
   exam.requires_travel:
     unit_kind: boolean
+    description: >-
+      Whether sitting the named exam requires travelling outside the candidate's
+      stated location tolerance, as the notification's centre policy implies;
+      per-exam, a hard-filter input.
   exam.fee:
     unit_kind: money
     requires_period: true
+    description: >-
+      The exam registration fee the notification prints, with currency; a
+      one_time amount — the printed period, if any, must say so.
 
   # ---------------------------------------------------------------- cost of living
   cost.city:
     unit_kind: text
+    description: >-
+      The city a cost-of-living basket applies to; one city per claim.
   cost.basket_period:
     unit_kind: text
+    description: >-
+      The period the cost-of-living basket's figures cover (monthly /
+      annually); document-scoped text, not an amount.
   cost.rent_monthly:
     unit_kind: money
     requires_period: true
+    description: >-
+      The monthly rent for a typical student dwelling in the named city, with
+      currency; per-month by definition. Not a programme fee.
   cost.food_monthly:
     unit_kind: money
     requires_period: true
+    description: >-
+      The monthly food cost in the named city's basket, with currency;
+      per-month by definition.
   cost.transport_monthly:
     unit_kind: money
     requires_period: true
+    description: >-
+      The monthly transport cost in the named city's basket, with currency;
+      per-month by definition.
   cost.utilities_monthly:
     unit_kind: money
     requires_period: true
+    description: >-
+      The monthly utilities cost (electricity, water, internet) in the named
+      city's basket, with currency; per-month by definition.
 
   # ---------------------------------------------------------------- derived outcomes
   internship_to_offer_conversion_12m:
@@ -220,22 +417,35 @@ predicates:
     unit_kind: percent
     requires_denominator: true
     scoring: {kind: percent}
+    description: >-
+      The share of interns who received employment offers within 12 months,
+      with its intern denominator; derived, per cohort. Internships are never
+      counted as employment upstream of this.
   registration_conversion_12m:
     component: outcomes
     label: "Registration conversion (12m)"
     unit_kind: percent
     requires_denominator: true
     scoring: {kind: percent}
+    description: >-
+      The share of graduates who obtained professional registration within 12
+      months, with its graduate denominator; derived, per cohort.
   salary_growth_3y:
     component: outcomes
     label: "Salary growth over 3 years"
     unit_kind: percent
     scoring: {kind: percent}
+    description: >-
+      The growth in salary from entry to three years out, for the cohort the
+      source tracks; derived, a three-year span, never one year's figure.
   p25_salary_to_col_ratio:
     component: outcomes
     label: "P25 salary relative to city cost of living"
     unit_kind: ratio
     scoring: {kind: saturating, scale: 1.0}
+    description: >-
+      The 25th-percentile entry salary divided by the city's cost-of-living
+      basket, both for the same city and period; derived, unitless ratio.
 
   # ---------------------------------------------------------------- derived clinical
   nabl_accredited_lab:
@@ -243,21 +453,33 @@ predicates:
     label: "NABL-accredited training lab"
     unit_kind: boolean
     scoring: {kind: presence}
+    description: >-
+      Whether the institution's training lab holds NABL accreditation, per the
+      cited NABL listing; institution-scoped, current as of the listing.
   nabh_hospital:
     component: clinical_training
     label: "NABH-accredited hospital access"
     unit_kind: boolean
     scoring: {kind: presence}
+    description: >-
+      Whether the institution's teaching hospital holds NABH accreditation, per
+      the cited NABH listing; institution-scoped, current as of the listing.
   departments_rotated:
     component: clinical_training
     label: "Departments rotated"
     unit_kind: count
     scoring: {kind: saturating, scale: 6.0}
+    description: >-
+      The number of distinct clinical departments the curriculum or document
+      says students rotate through, for THIS programme; a programme total.
   lab_equipment_verified:
     component: clinical_training
     label: "Lab equipment verified"
     unit_kind: boolean
     scoring: {kind: presence}
+    description: >-
+      Whether the document itself evidences the lab equipment list for THIS
+      programme; programme-scoped flag.
 
   # ---------------------------------------------------------------- derived academic
   autonomous_status:
@@ -265,16 +487,27 @@ predicates:
     label: "Autonomous status"
     unit_kind: boolean
     scoring: {kind: presence}
+    description: >-
+      Whether the institution holds autonomous status per the cited UGC list;
+      institution-scoped, current as of the list.
   faculty_count:
     component: academic_quality
     label: "Faculty count"
     unit_kind: count
     scoring: {kind: saturating, scale: 40.0}
+    description: >-
+      The number of faculty the document reports for the institution (or the
+      stated department scope); institution-scoped total, not a programme's
+      share.
   nirf_rank_institution:
     component: academic_quality
     label: "NIRF institution-level proxy"
     unit_kind: count
     scoring: {kind: decay, scale: 100.0}
+    description: >-
+      The institution's NIRF rank in the cited year's category; an
+      institution-level proxy signal for the stated year, never programme-level
+      evidence.
 
   # ---------------------------------------------------------------- derived financing
   loan_terms_published:
@@ -282,21 +515,33 @@ predicates:
     label: "Published loan terms"
     unit_kind: boolean
     scoring: {kind: presence}
+    description: >-
+      Whether the cited lender/scheme page publishes concrete loan terms the
+      pipeline can quote; lender-scheme-scoped flag. Never an approval.
   subsidy_eligible:
     component: financing_feasibility
     label: "Subsidy eligibility"
     unit_kind: boolean
     scoring: {kind: presence}
+    description: >-
+      Whether the cited scheme page's eligibility wording covers the programme
+      profile in question; scheme-scoped, per the scheme's own criteria.
   collateral_free_available:
     component: financing_feasibility
     label: "Collateral-free option"
     unit_kind: boolean
     scoring: {kind: presence}
+    description: >-
+      Whether the cited lender/scheme offers a collateral-free loan up to the
+      threshold its page prints; lender-scheme-scoped.
   student_work_legal_hours:
     component: financing_feasibility
     label: "Legal student-work entitlement"
     unit_kind: hours
     scoring: {kind: saturating, scale: 20.0}
+    description: >-
+      The weekly hours the cited rule allows students to work legally; a
+      per-week cap from regulation, not an earned amount.
 
   # ---------------------------------------------------------------- derived student life
   city_safety_index:
@@ -304,26 +549,41 @@ predicates:
     label: "City safety index"
     unit_kind: percent
     scoring: {kind: percent}
+    description: >-
+      The cited index's safety score for the city, for the index's own year and
+      methodology; city-scoped, one index, one year.
   hostel_available:
     component: student_life_safety
     label: "Hostel availability"
     unit_kind: boolean
     scoring: {kind: presence}
+    description: >-
+      Whether the document says hostel accommodation exists at THIS
+      institution; institution-scoped presence, not capacity or price.
   gender_safety_measures:
     component: student_life_safety
     label: "Gender-safety measures"
     unit_kind: boolean
     scoring: {kind: presence}
+    description: >-
+      Whether the document evidences gender-safety measures at THIS
+      institution; institution-scoped presence, not a rating.
   support_services_count:
     component: student_life_safety
     label: "Support services"
     unit_kind: count
     scoring: {kind: saturating, scale: 3.0}
+    description: >-
+      The number of distinct student support services the document lists for
+      THIS institution; institution-scoped count of services, not users.
   review_aspect_safety:
     component: student_life_safety
     label: "Review: safety aspect"
     unit_kind: percent
     scoring: {kind: percent}
+    description: >-
+      The share of reviews mentioning the safety aspect positively, per the
+      review corpus and period the NLP run states; corpus-scoped.
 
   # ---------------------------------------------------------------- derived admission
   cutoff_pct:
@@ -331,16 +591,27 @@ predicates:
     label: "Cutoff vs applicant marks"
     unit_kind: percent
     scoring: {kind: cutoff_margin, scale: 10.0}
+    description: >-
+      The closing cutoff percentile/marks for THIS programme in the stated
+      counselling round and year; per-programme, per-round. Filter/margin
+      input against the applicant's marks.
   eligibility_min_aggregate_pct:
     component: admission_realism
     label: "Eligibility margin"
     unit_kind: percent
     scoring: {kind: eligibility_margin, scale: 8.0}
+    description: >-
+      The minimum aggregate percentage eligibility rule for THIS programme; a
+      per-programme threshold, not an admitted cohort's average.
   applicants_per_seat:
     component: admission_realism
     label: "Applicants per seat"
     unit_kind: ratio
     scoring: {kind: decay, scale: 10.0}
+    description: >-
+      The ratio of applicants to the sanctioned intake for THIS programme in
+      the stated cycle; per-programme, per-cycle. The denominator is seats,
+      never applicants.
 
   # ---------------------------------------------------------------- derived affordability
   dsr25:
@@ -348,54 +619,117 @@ predicates:
     label: "DSR25 (first-year EMI / P25 salary)"
     unit_kind: ratio
     scoring: {kind: cost_band}
+    description: >-
+      The first-year loan EMI divided by the P25 entry salary, both for the
+      same programme and city; derived, unitless ratio.
   affordability_gap:
     component: affordability_roi
     label: "Family out-of-pocket / annual income"
     unit_kind: ratio
     scoring: {kind: cost_band}
+    description: >-
+      The family's out-of-pocket share of first-year cost divided by annual
+      income; derived, unitless ratio for the stated profile and year.
 
   # ---------------------------------------------------------------- filter / derived inputs
   credential_level:
     unit_kind: text
+    description: >-
+      The credential level a programme awards (degree / diploma /
+      lateral_entry / certificate); per-programme classification.
   eligibility_min_pcb_pct:
     unit_kind: percent
+    description: >-
+      The minimum PCB (physics/chemistry/biology) percentage the eligibility
+      rule requires for THIS programme; a per-programme threshold.
   eligibility_max_age:
     unit_kind: count
+    description: >-
+      The maximum candidate age the eligibility rule allows for THIS
+      programme, in years; a per-programme threshold.
   eligibility_requires_subjects:
     unit_kind: text
+    description: >-
+      The verbatim subject-requirement wording of the eligibility rule for
+      THIS programme; per-programme text, not a number.
   language_test_required:
     unit_kind: text
+    description: >-
+      The language test the admission rule names as required for THIS
+      programme; per-programme text.
   language_min_score:
     unit_kind: ratio
+    description: >-
+      The minimum score the rule requires on the named language test, on that
+      test's own scale; a per-programme threshold.
   medium_of_instruction:
     unit_kind: text
+    description: >-
+      The instruction medium the document states for THIS programme;
+      per-programme text.
   exam_required:
     unit_kind: text
+    description: >-
+      The admission exam the rule names for THIS programme; per-programme
+      text, not a date or score.
   exam_registration_opens:
     unit_kind: date
+    description: >-
+      The date registration opens for the exam THIS programme requires, for
+      the stated cycle; one exam, one cycle.
   exam_registration_closes:
     unit_kind: date
+    description: >-
+      The date registration closes for the exam THIS programme requires, for
+      the stated cycle; one exam, one cycle.
   exam_requires_travel:
     unit_kind: boolean
+    description: >-
+      Whether the exam THIS programme requires must be sat outside the
+      applicant's travel tolerance; per-exam, a hard-filter input.
   intake_cycles:
     unit_kind: count
+    description: >-
+      The number of admission intakes per year the document states for THIS
+      programme; per-programme, per-year count.
   tcoa:
     unit_kind: money
     requires_period: true
+    description: >-
+      The total cost of attendance computed for THIS programme and city, with
+      currency and period; derived, one year's scope unless stated as
+      multi-year.
   tcoa_lo:
     unit_kind: money
     requires_period: true
+    description: >-
+      The lower bound of the TCOA interval for THIS programme, same currency
+      and period as tcoa; derived, never a printed fee.
   tcoa_hi:
     unit_kind: money
     requires_period: true
+    description: >-
+      The upper bound of the TCOA interval for THIS programme, same currency
+      and period as tcoa; derived, never a printed fee.
   net_price:
     unit_kind: money
     requires_period: true
+    description: >-
+      The cost of attendance net of the stated grants/scholarships for THIS
+      programme, with currency and period; derived, one year's scope.
   p25_first_year_salary:
     unit_kind: money
     requires_period: true
+    description: >-
+      The 25th-percentile first-year salary for the programme's placement
+      city, with currency and printed period; derived, per cohort. Never a
+      mean or a highest package.
   autonomous:
     unit_kind: boolean
+    description: >-
+      Whether THIS institution is autonomous, per the cited list; a
+      filter-input duplicate of autonomous_status kept for the filter layer's
+      vocabulary.
 
 # Legacy spellings seen in committed fixtures and the pre-namespace scorer
 # vocabulary. Declared, so resolving them is explicit; still reported through
@@ -405,9 +739,14 @@ predicates:
 # field list is known by. They resolve to the canonical extraction predicates
 # (which the golden set and scoring pin) instead of emitting the same fact
 # twice under two names.
+#
+# Seat aliases point at `seats.intake` (W2 seat-semantics): both legacy
+# spellings meant "the sanctioned seat count for one programme", which is a
+# row-scoped value. `seats.total` is the aggregate vocabulary and is emitted
+# only when a document states a total itself.
 aliases:
-  seats: seats.total
-  seats.sanctioned: seats.total
+  seats: seats.intake
+  seats.sanctioned: seats.intake
   naac_grade: accreditation.naac_grade
   recognition_status: accreditation.recognition_status
   internship_hours: curriculum.internship_hours
