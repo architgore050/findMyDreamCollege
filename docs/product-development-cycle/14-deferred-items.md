@@ -32,10 +32,12 @@ hotfix, because it is unbounded (no page cap, no time budget) and stalled a run 
 minutes. That is a **development-mode** setting, not the product policy.
 
 **Policy to implement (D18):**
-1. **One primary OCR engine: T2** (Qwen3-VL-8B via vLLM, block-level bboxes, Apache-2.0).
-   T2b (PaddleOCR-VL) stays as an alternate backend, CPU-only on this host. Docling's internal
-   RapidOCR is a **bounded fallback only** (`auto`), never the default — three engines producing
-   three transcripts of one page makes provenance unreproducible.
+1. **One primary OCR engine: RapidOCR (PaddleOCR models) on GPU** — purpose-built, far cheaper
+   per page than a VLM, and the operator's preference. Qwen3-VL is demoted to an *evidence-only
+   fallback* for pages where RapidOCR's Devanagari output fails a measured chrF++ gate; it is not
+   a default. PaddleOCR-VL stays as an alternate. Docling's internal RapidOCR instance is never
+   left implicitly enabled — if used, it is the same engine, bounded, with recorded metadata.
+   One engine per page, one transcript, engine+version in the claim qualifier.
 2. **Never remove visibility.** Every scanned page records `bbox_granularity: block` plus the
    OCR engine + version in the claim qualifier, so a reviewer can always see what was read and
    by what. Aborted OCR is a visible `acquisition_budget_exceeded`, never a silent zero.
