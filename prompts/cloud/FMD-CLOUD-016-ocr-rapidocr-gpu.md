@@ -35,6 +35,25 @@ CONTEXT / DECISION (treat as fixed):
   accurate than Qwen3-VL. Ship the measurement and the decision rule; the numbers decide.
 - LLM work stays on **Gemma 4 26B A4B** (already locked); do not introduce other LLMs here.
 
+MEASURED EVIDENCE (local test, 2026-11-19 — treat as ground truth, do not re-derive):
+- **PP-OCRv5 Devanagari works.** Dense Hindi page at 200 dpi: page CER **10.9%**, line recall 13/18,
+  mean line similarity 0.991. Digits and dates round-trip exactly (`31.01.2024`, `2010–2011`).
+- Packages: `rapidocr` **3.10.0** (NOT `rapidocr-onnxruntime` — that wheel ships Chinese PP-OCRv4
+  only and has no `lang_type`), `onnxruntime` 1.32.0, `pypdfium2` 5.15.2.
+- Models to pin: det `PP-OCRv6_det_small.onnx` (bundled), rec **`devanagari_PP-OCRv5_rec_mobile.onnx`**
+  (7.94 MB, sha256 d6f0a906…52c91e) + `ppocrv5_devanagari_dict.txt`. Devanagari is a first-class
+  `LangRec` value; no URL guessing.
+- **GPU cannot run alongside the 26B LLM** on this 16 GB card: with llama-server resident only
+  ~688 MiB was free; onnxruntime CUDA needs ~1.5–2 GiB and OOMs (three attempts, 64–143 MB
+  allocations). Therefore **`device: cpu` is the default**, at **2.33 s/page (25.8 pages/min; a
+  200-page scan ≈ 8 min)**. GPU support is opt-in for batch runs with the LLM server stopped, and the
+  reason must be recorded.
+- Known defects to handle, not hide: **virama/conjunct errors** (`शक्ति→शक्ि`, `विश्व→विश्ष`,
+  `राष्ट्रीय→राष्टीय`), watermark junk boxes with confidence <0.7, and Devanagari digits (०१२३) are
+  **untested** in this corpus. Drop boxes below the configured confidence floor and record the count.
+- Ground truth for `scripts/ocr_validate.py`: doc 61 (`gsv.ac.in` Hindi annual report) pages 3/5/7 have
+  a real Unicode text layer; use it to compute CER/chrF++ instead of inventing transcripts.
+
 SCOPE — FILES YOU OWN:
 - fmd/acquire/tiers.py (T2 backend selection), fmd/acquire/types.py (engine metadata)
 - new fmd/acquire/rapidocr_backend.py
@@ -48,8 +67,8 @@ SCOPE — FILES YOU OWN:
 FORBIDDEN: fmd/extract/** fmd/verify/** fmd/score/** fmd/plan/** fmd/fetch/** fmd/db/** db/migrations/** apps/** .env
 
 ACCEPTANCE
-1. **RapidOCR on GPU** as `T2.backend: rapidocr` (default on this host):
-   - `device: cuda` when onnxruntime-gpu + a CUDA provider is available, else `cpu` with a recorded reason;
+1. **RapidOCR on CPU by default** as `T2.backend: rapidocr` (measured 25.8 pages/min); GPU optional only in batch mode with the LLM server stopped, recorded in metadata:
+   - `device: cpu` default; `cuda` opt-in and must fail with a recorded `cuda_unavailable_vram` reason rather than crash when free VRAM < configured floor;
    - PP-OCRv5 server det+rec models for **Devanagari/Hindi and Latin**, ids in config;
    - block-level bboxes, page number, engine metadata (`engine`, `engine_version`, `model_ids`)
      persisted on the claim qualifier.

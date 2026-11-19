@@ -41,11 +41,12 @@ minutes. That is a **development-mode** setting, not the product policy.
    full-pipeline engine. One engine per page, one transcript, engine+version+model ids in the
    claim qualifier.
 
-   **This is a provisional preference, not a measured one.** The known gap: no published Hindi
-   accuracy for PP-OCRv5 vs Qwen3-VL on Indian institutional scans. It is settled in one
-   afternoon with `scripts/ocr_validate.py --ground-truth` on 5-10 real scans: compare CER and
-   chrF++ per engine. If PP-OCRv5 loses by >5 chrF++ on Devanagari, the fallback becomes the
-   default for Devanagari pages (mixed-engine per page, still one transcript each).
+   **Measured (2026-11-19, local):** PP-OCRv5 Devanagari page CER **10.9%** on a dense Hindi page,
+   25.8 pages/min on CPU (2.33 s/page), 200 pp ≈ 8 min. GPU is **not** usable while the 26B is
+   resident (688 MiB free vs ~1.5–2 GiB needed) — CPU is the default; GPU only in batch mode with
+   the LLM stopped. Known defects: virama/conjunct errors (`शक्ति→शक्ि`), watermark boxes with
+   confidence <0.7, Devanagari digits untested. Qwen3-VL remains the fallback for conjunct-heavy
+   pages; the mixed-engine rule stays.
 2. **Never remove visibility.** Every scanned page records `bbox_granularity: block` plus the
    OCR engine + version in the claim qualifier, so a reviewer can always see what was read and
    by what. Aborted OCR is a visible `acquisition_budget_exceeded`, never a silent zero.
