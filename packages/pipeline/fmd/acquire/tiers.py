@@ -6,8 +6,12 @@ Order (all thresholds in ``config/acquire.yaml``):
    tables/two-column layout, Latin script → T0 is enough.
 2. Tables / two-column layout → T1 Docling (layout + table structure).
 3. Image-only pages, a T1 table-confidence below the configured floor, or
-   Devanagari text → T2 PaddleOCR-VL.
-4. T2's Indic self-check fails → T2b Qwen3-VL (vLLM).
+   Devanagari text → T2 OCR. ``backends.T2.backend`` selects the engine:
+   ``rapidocr`` (in-process PP-OCR via the RapidOCR runner, default on this
+   host), ``qwen3vl`` (vLLM endpoint) or ``paddleocr`` (alternate engine).
+4. T2's Indic self-check fails → the configured Devanagari fallback
+   (``backends.T2.devanagari_fallback``: the Qwen3-VL endpoint, or the T2b
+   tier) — never a silent mojibake transcript.
 5. Repetition-loop / entropy / length anomaly **in OCR output** → T3 human
    queue, never claims. T0/T1 output is never refused on length: a born-digital
    table is evidence, and the page-median rule is a log diagnostic there.
@@ -15,6 +19,10 @@ Order (all thresholds in ``config/acquire.yaml``):
 Heavy dependencies are imported inside the tier functions. A base install
 imports this module and runs T0; T1/T2/T2b raise :class:`TierUnavailable` with
 the exact fix. CI runs T0 plus injected fakes only.
+
+Budget aborts (page/time) and device failures raise :class:`AcquisitionFailed`
+with stable ``acquisition_failed:`` reasons and are **never** converted into a
+cheaper-tier fallback: an aborted OCR publishes no partial claims (D18).
 """
 
 from __future__ import annotations
@@ -43,6 +51,10 @@ from fmd.acquire.guards import (
     OCR_TIERS,
     born_digital_length_warnings,
     detect_anomalies,
+)
+from fmd.acquire.rapidocr_backend import (
+    RapidOCRBackend,
+    RapidOCRSettings,
 )
 from fmd.acquire.tables import associate_headers, table_confidence
 from fmd.acquire.types import (
@@ -705,6 +717,33 @@ class OCRBackend(Protocol):
     def extract(self, data: bytes) -> dict[str, Any]: ...
 
 
+#: T2 engine selection matrix (``backends.T2.backend``). ``rapidocr`` runs the
+#: PP-OCR ONNX graphs in-process (the runner, not a model); ``qwen3vl`` and
+#: ``paddleocr`` speak the shared ``/extract`` HTTP contract through
+#: ``endpoint_env``. Qwen3-VL is never the default and never removed.
+T2_BACKENDS = ("rapidocr", "qwen3vl", "paddleocr")
+
+
+def t2_backend(policy: AcquirePolicy) -> str:
+    """The configured T2 engine, validated against the selection matrix."""
+    spec = policy.backend("T2")
+    backend = str(getattr(spec, "backend", "") or "qwen3vl").strip().lower()
+    if backend not in T2_BACKENDS:
+        raise AcquisitionFailed(
+            f"{ACQUISITION_FAILED_PREFIX}unknown_t2_backend",
+            f"backends.T2.backend {backend!r} is not one of {', '.join(T2_BACKENDS)}",
+        )
+    return backend
+
+
+def _rapidocr_extract(data: bytes, *, spec: Any, policy: AcquirePolicy) -> ExtractedDoc:
+    """In-process RapidOCR (PP-OCR) T2 — no HTTP service, no endpoint env."""
+    settings = RapidOCRSettings.from_spec(spec, env=dict(os.environ))
+    backend = RapidOCRBackend(settings)
+    payload = backend.extract(data)
+    return _ocr_doc(payload, tier="T2", spec=spec, policy=policy)
+
+
 def t2_extract(
     data: bytes,
     *,
@@ -713,14 +752,26 @@ def t2_extract(
     policy: AcquirePolicy | None = None,
     timeout: float = 120.0,
 ) -> ExtractedDoc:
-    """PaddleOCR-VL (block-level boxes) behind a backend or HTTP endpoint."""
+    """T2 OCR through the configured backend (rapidocr | qwen3vl | paddleocr)."""
     policy = policy or AcquirePolicy.load()
     spec = policy.backend("T2")
+    if backend is not None:
+        return _ocr_tier(
+            "T2",
+            data,
+            spec=spec,
+            backend=backend,
+            endpoint=endpoint,
+            timeout=timeout,
+            policy=policy,
+        )
+    if t2_backend(policy) == "rapidocr":
+        return _rapidocr_extract(data, spec=spec, policy=policy)
     return _ocr_tier(
         "T2",
         data,
         spec=spec,
-        backend=backend,
+        backend=None,
         endpoint=endpoint,
         timeout=timeout,
         policy=policy,
@@ -735,7 +786,12 @@ def t2b_extract(
     policy: AcquirePolicy | None = None,
     timeout: float = 120.0,
 ) -> ExtractedDoc:
-    """Qwen3-VL Devanagari fallback (vLLM). Interface-only without an endpoint."""
+    """T2b: the alternate OCR engine (PaddleOCR-VL in this registry).
+
+    Retained and selectable, never deleted. When ``T2.backend`` is not
+    ``qwen3vl`` it is also the legacy self-check fallback target; the
+    configured ``T2.devanagari_fallback`` picks Qwen3-VL instead.
+    """
     policy = policy or AcquirePolicy.load()
     spec = policy.backend("T2b")
     return _ocr_tier(
@@ -868,7 +924,36 @@ def _ocr_doc(
         blocks=tuple(blocks),
         bbox_granularity=str(spec.granularity),
         table_confidence=float(table_conf) if table_conf is not None else None,
+        engine_meta=_engine_meta_of(payload, spec),
     )
+
+
+def _engine_meta_of(payload: dict[str, Any], spec: Any) -> dict[str, Any] | None:
+    """Engine provenance from the payload, synthesised for HTTP backends.
+
+    The in-process RapidOCR backend ships a full ``engine_meta`` block; the
+    ``/extract`` HTTP services report ``engine`` / ``tool_version`` / ``model``
+    keys, which are folded into the same shape so every OCR path records
+    engine + version + model ids (never silently mixed).
+    """
+    explicit = payload.get("engine_meta")
+    if isinstance(explicit, dict):
+        return dict(explicit)
+    engine = payload.get("engine") or payload.get("tool")
+    if engine is None:
+        return None
+    model_ids = payload.get("model_ids")
+    if not isinstance(model_ids, dict):
+        model = payload.get("model")
+        model_ids = {"model": model} if model else {}
+    return {
+        "engine": str(engine),
+        "engine_version": payload.get("engine_version") or payload.get("tool_version"),
+        "model_ids": model_ids,
+        "device": payload.get("device"),
+        "device_reason": payload.get("device_reason"),
+        "granularity": str(spec.granularity),
+    }
 
 
 def _ocr_pages(payload: dict[str, Any], blocks: list[TextBlock]) -> list[PageGeometry]:
@@ -1060,6 +1145,11 @@ def run_tiers(
 
     try:
         result = (t2 or t2_extract)(data)
+    except AcquisitionFailed:
+        # A budget abort (D18) or a device failure is not a "use the flat text
+        # instead" signal: no partial claims, the document is parked with the
+        # stable reason and the run continues with the next document.
+        raise
     except TierUnavailable as exc:
         return _fallback(base, "T2", exc)
     result = apply_anomaly_guard(result, policy)
@@ -1069,27 +1159,75 @@ def run_tiers(
     if any(ord(char) in _DEVANAGARI for char in result.text):
         ratio = indic_self_check(result.text)
         if ratio < policy.indic_self_check_min_ratio:
-            try:
-                fallback = (t2b or t2b_extract)(data)
-            except TierUnavailable as exc:
+            fallback_doc, fallback_note = _devanagari_fallback(
+                data,
+                base=base,
+                t2b=t2b,
+                policy=policy,
+                ratio=ratio,
+            )
+            if fallback_doc is None:
                 return replace(
                     result,
                     tier="T3",
                     needs_review=True,
-                    notes=result.notes
-                    + (
-                        f"T2 Indic self-check {ratio:.3f} < "
-                        f"{policy.indic_self_check_min_ratio:g}; T2b unavailable: {exc}",
-                    ),
+                    notes=result.notes + (fallback_note or "",),
                 )
-            fallback = apply_anomaly_guard(fallback, policy)
-            if fallback.ocr_anomaly or fallback.needs_review:
-                return fallback
+            fallback_doc = apply_anomaly_guard(fallback_doc, policy)
+            if fallback_doc.ocr_anomaly or fallback_doc.needs_review:
+                return fallback_doc
             return replace(
-                fallback,
-                notes=fallback.notes + (f"T2b after Indic self-check {ratio:.3f}",),
+                fallback_doc,
+                notes=fallback_doc.notes + (fallback_note,),
             )
     return result
+
+
+def _devanagari_fallback(
+    data: bytes,
+    *,
+    base: ExtractedDoc,
+    t2b: Any,
+    policy: AcquirePolicy,
+    ratio: float,
+) -> tuple[ExtractedDoc | None, str | None]:
+    """The configured Devanagari fallback after a failed Indic self-check.
+
+    ``backends.T2.devanagari_fallback`` selects the engine: ``qwen3vl`` (the
+    vLLM endpoint behind ``backends.T2.endpoint_env`` — Qwen3-VL stays fully
+    wired as the Devanagari fallback, never the default, never silent) or
+    ``t2b`` (the alternate engine tier, the legacy behaviour). An injected
+    ``t2b`` callable keeps its legacy precedence so tests and callers that
+    provide one get exactly what they passed.
+    """
+    spec = policy.backend("T2")
+    configured = str(getattr(spec, "devanagari_fallback", "") or "").strip().lower()
+    note_prefix = (
+        f"T2 Indic self-check {ratio:.3f} < {policy.indic_self_check_min_ratio:g}"
+    )
+    if t2b is None and configured == "qwen3vl" and t2_backend(policy) != "qwen3vl":
+        try:
+            fallback = _ocr_tier(
+                "T2",
+                data,
+                spec=spec,
+                backend=None,
+                endpoint=None,
+                timeout=120.0,
+                policy=policy,
+            )
+        except AcquisitionFailed:
+            raise
+        except TierUnavailable as exc:
+            return None, (
+                f"{note_prefix}; qwen3vl fallback unavailable: {exc}"
+            )
+        return fallback, f"{note_prefix}; qwen3vl fallback engine recorded"
+    try:
+        fallback = (t2b or t2b_extract)(data)
+    except TierUnavailable as exc:
+        return None, f"{note_prefix}; T2b unavailable: {exc}"
+    return fallback, f"{note_prefix}; T2b fallback run"
 
 
 def _fallback(base: ExtractedDoc, tier: str, exc: Exception) -> ExtractedDoc:
@@ -1125,6 +1263,7 @@ def _version(distribution: str) -> str | None:
 
 __all__ = [
     "ARTIFACTS_UNAVAILABLE_OFFLINE",
+    "T2_BACKENDS",
     "AcquirePolicy",
     "OCRBackend",
     "TierDecision",
@@ -1140,6 +1279,7 @@ __all__ = [
     "select_tier",
     "t0_extract",
     "t1_extract",
+    "t2_backend",
     "t2_extract",
     "t2b_extract",
 ]

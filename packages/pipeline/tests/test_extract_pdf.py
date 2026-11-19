@@ -185,10 +185,21 @@ def test_docling_import_is_lazy_and_failure_names_the_fix(
 def test_t2_is_interface_only_without_an_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Endpoint-backed T2 (qwen3vl) without FMD_T2_URL names the env var."""
+    from tests.test_acquire_tiers import _policy_with_t2_backend
+
     monkeypatch.delenv("FMD_T2_URL", raising=False)
     with pytest.raises(TierUnavailable) as excinfo:
-        t2_extract(b"%PDF-1.4")
+        t2_extract(b"%PDF-1.4", policy=_policy_with_t2_backend("qwen3vl"))
     assert "FMD_T2_URL" in str(excinfo.value)
+
+
+def test_t2_rapidocr_is_the_registry_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The registry default T2 is the in-process RapidOCR engine of record."""
+    from fmd.acquire.tiers import AcquirePolicy, t2_backend
+
+    monkeypatch.delenv("FMD_T2_BACKEND", raising=False)
+    assert t2_backend(AcquirePolicy.load()) == "rapidocr"
 
 
 def test_t2_accepts_an_injected_backend() -> None:
