@@ -18,14 +18,21 @@ READ FIRST:
 - fmd/acquire/types.py, fmd/acquire/guards.py
 - infra/ocr/** (existing OCR service contract)
 
-CONTEXT / DECISION (from the operator, treat as fixed):
-- **RapidOCR (PaddleOCR-family models) on GPU is the primary OCR engine for T2.** It is
-  purpose-built for detection+recognition, far cheaper per page than a VLM, and the operator
-  prefers it. Run it on CUDA via onnxruntime-gpu; CPU is the bounded fallback.
-- **Qwen3-VL is demoted to an evidence-only fallback** for pages whose Devanagari output fails a
-  measured gate. It must not be the default and must not be silently used.
-- **One engine per page.** Engine name/version/model id is recorded in the claim qualifier so the
-  transcript is reproducible. Never leave Docling's implicit RapidOCR instance unbounded.
+CONTEXT / DECISION (treat as fixed):
+- **RapidOCR is the RUNNER, not the model.** It is an ONNX-runtime wrapper. The models it loads are
+  **PaddleOCR PP-OCRv5 server det+rec**, including a Devanagari/Hindi recognition model and a Latin
+  one. Pin model ids in config; no hardcoded paths.
+- **Primary path: PP-OCRv5 via RapidOCR on onnxruntime-gpu (CUDA)**, CPU as bounded fallback.
+  Purpose-built detection+recognition is far cheaper per page than a VLM; a VLM on a 200-page scan
+  is exactly what stalled us before.
+- **Table structure is NOT OCR's job.** Docling/TableFormer keeps it (already in T1).
+- **Qwen3-VL-8B stays fully wired and selectable**, as the Devanagari fallback and as a T2 backend
+  option. It is not removed and not silently used. PaddleOCR-VL stays as the alternate full
+  pipeline. No engine is deleted by this patch.
+- **One engine per page, one transcript.** Engine name, version and model ids recorded in the
+  claim qualifier, so a mixed-engine corpus is still reproducible.
+- **This preference is provisional until measured.** Ship `scripts/ocr_validate.py --ground-truth`
+  and the decision rule below; do not present PP-OCRv5 as proven more accurate than Qwen3-VL.
 - LLM work stays on **Gemma 4 26B A4B** (already locked); do not introduce other LLMs here.
 
 SCOPE — FILES YOU OWN:
@@ -66,7 +73,14 @@ ACCEPTANCE
    rejects an unknown backend.
 8. Runbook: how to serve/verify RapidOCR on GPU, VRAM expectation, how to run the small-batch
    validation, and the explicit statement that shipping requires OCR enabled and measured.
-9. Do NOT download models in tests. Do NOT change LLM profiles.
+9. **Validation gate + decision rule (required deliverable).** `scripts/ocr_validate.py --ground-truth`
+   must compare PP-OCRv5 and Qwen3-VL on the same 5–10 real scans, reporting CER, chrF++ and
+   pages/min per engine, and exiting non-zero if fewer than 3 documents had ground truth. Document
+   the committed rule: if PP-OCRv5 is within ~5 chrF++ of Qwen on Devanagari, keep PP-OCRv5
+   everywhere; if it loses by more, route Devanagari pages to Qwen while Latin stays on PP-OCRv5 —
+   with the per-page engine recorded so the corpus stays reproducible. Do not claim a winner in the
+   patch; the numbers decide.
+10. Do NOT download models in tests. Do NOT change LLM profiles.
 
 CONSTRAINTS: no network in tests; no secrets; scoped diff; visibility is non-negotiable — every
 scanned page must record engine + version + granularity.
