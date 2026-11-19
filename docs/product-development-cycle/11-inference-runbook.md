@@ -795,14 +795,46 @@ manifest (ModelScope `RapidAI/RapidOCR@v3.10.0`):
 One-time prefetch (sha256-verified by the runner's manifest, re-verified by us):
 
 ```bash
-uv pip install "rapidocr>=3.10" "onnxruntime>=1.32"   # runner (see infra/ocr/requirements.txt)
+# Runner from the package extra (don't install into a hand-made env):
+uv sync --extra ocr                                    # rapidocr, onnxruntime, pypdfium2
+# Development/CI installs every workstream extra, OCR included:
+uv sync --all-extras
 uv run python scripts/ocr_validate.py --prefetch      # → $FMD_RAPIDOCR_MODELS (default data/rapidocr-models)
 ```
+
+Verify the install is real (packages, pinned models, execution provider) with:
+
+```bash
+uv run fmd llm doctor
+# ocr  engine=rapidocr  device=cpu  models=present  provider=cpu  status=ok
+```
+
+`models=present` means the configured det/rec files (and the rec dictionary)
+exist under `$FMD_RAPIDOCR_MODELS` — detection is by files on disk, never by a
+successful import. Any gap prints `status=unavailable:<reason>` instead of a
+green line: `rapidocr_missing`, `onnxruntime_missing`, `models_missing`,
+`cuda_unavailable_no_provider`, `cuda_unavailable_vram`. The base install never
+pulls the OCR stack; a package that was synced without the extra reports
+`unavailable:rapidocr_missing`.
+
+`backends.T2.models.artifacts_root` defaults to `data/rapidocr-models` (the
+prefetch target) and a relative root resolves against the repository checkout,
+not the process cwd. `FMD_RAPIDOCR_MODELS` still overrides it. This is the same
+value `fmd llm doctor` and the T2 runner read, so a green doctor line means the
+tier can resolve the same files.
+
+T2/T2b are OCR *acquisition* stages and return text; claim extraction routes
+them to `bulk_extract` (the local text model). They are never sent to
+`hard_pdf`, which is the optional hosted vision profile and degrades with
+`vision_unavailable` when unconfigured. A scan whose T1/Docling pass returns
+empty text escalates to T2, and a T2 failure on a sparse scan parks it in T3
+(`ocr_unavailable_sparse_scan`) instead of publishing page-number "text".
 
 Missing artifacts are a named failure (`models_missing: … prefetch with uv run
 python scripts/ocr_validate.py --prefetch`), never a download at serve time.
 A missing runner is `engine_not_installed: … uv pip install "rapidocr>=3.10"
-"onnxruntime>=1.32"`.
+"onnxruntime>=1.32"` at the backend (the package equivalent is
+`uv sync --extra ocr`).
 
 ### 3.1c Devanagari capability — proven, not assumed
 

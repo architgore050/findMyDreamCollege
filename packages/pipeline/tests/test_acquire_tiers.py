@@ -112,6 +112,67 @@ def test_image_only_page_routes_to_t2() -> None:
     assert plan_tiers(profile).tier == "T2"
 
 
+def test_whitespace_only_text_layer_is_image_only() -> None:
+    """A scan with only page-break newlines is image-only, not sparse text."""
+    doc = _doc("\n\n\n\n\n\n")
+    profile = probe(doc)
+    assert profile.char_count == 0
+    assert profile.image_only is True
+    assert plan_tiers(profile).tier == "T2"
+
+
+def test_empty_t1_result_escalates_to_t2_before_any_llm() -> None:
+    """Docling returning nothing on a scan must try OCR, not emit empty text."""
+    calls: list[str] = []
+    result = run_tiers(
+        b"ignored",
+        policy=_policy(),
+        t0=lambda _: _doc("Page 1 of 14"),
+        t1=lambda _: calls.append("T1") or _doc("", tier="T1"),
+        t2=lambda _: calls.append("T2") or _doc("Annual report total income 50000", tier="T2"),
+    )
+    assert calls == ["T1", "T2"]
+    assert result.tier == "T2"
+    assert "50000" in result.text
+
+
+def test_t1_artifacts_unavailable_on_a_scan_tries_t2() -> None:
+    """Offline Docling is not a dead end for a scan: T2 needs no HF artifacts."""
+    from fmd.acquire.errors import ArtifactsUnavailable
+
+    def unavailable(_: bytes) -> ExtractedDoc:
+        raise ArtifactsUnavailable("artifacts_unavailable_offline: no cache")
+
+    calls: list[str] = []
+    result = run_tiers(
+        b"ignored",
+        policy=_policy(),
+        t0=lambda _: _doc("Page 1 of 14"),
+        t1=unavailable,
+        t2=lambda _: calls.append("T2") or _doc("Annual report total income 50000", tier="T2"),
+    )
+    assert calls == ["T2"]
+    assert result.tier == "T2"
+    assert "T1 unavailable offline" in result.notes[0]
+
+
+def test_sparse_scan_t2_unavailable_routes_to_t3_not_the_llm() -> None:
+    """A page-number layer is not evidence: no T0 fallback, no claims."""
+    def unavailable(_: bytes) -> ExtractedDoc:
+        raise TierUnavailable("models_missing")
+
+    result = run_tiers(
+        b"ignored",
+        policy=_policy(),
+        t0=lambda _: _doc("शुल्क Page 1 of 14"),
+        t2=unavailable,
+    )
+    assert result.tier == "T3"
+    assert result.needs_review is True
+    assert result.review_reason == "ocr_unavailable_sparse_scan"
+    assert result.fallback_from == "T2"
+
+
 def test_devanagari_routes_to_t2_even_with_a_text_layer() -> None:
     doc = _doc(LONG_TEXT + " शुल्क और पात्रता की जानकारी।")
     assert plan_tiers(probe(doc)).tier == "T2"
@@ -132,6 +193,22 @@ def test_low_table_confidence_escalates_to_t2() -> None:
 def test_indic_self_check_scores_mojibake_low_and_hindi_high() -> None:
     assert indic_self_check("कुल शुल्क: ₹५०,००० प्रति वर्ष") > 0.5
     assert indic_self_check("क broken latin mojibake à¤•à¥") < 0.5
+
+
+def test_one_stray_devanagari_glyph_does_not_trigger_the_fallback() -> None:
+    """An English scan with one misread glyph stays on T2 (no fallback engine)."""
+    calls: list[str] = []
+    result = run_tiers(
+        b"ignored",
+        policy=_policy(),
+        t0=lambda _: _doc(""),
+        t2=lambda _: _doc(
+            "Annual report total income 50000 expenditure 42000 क", tier="T2"
+        ),
+        t2b=lambda _: calls.append("T2b") or _doc("", tier="T2b"),
+    )
+    assert calls == []
+    assert result.tier == "T2"
 
 
 def test_t2_escalates_to_t2b_when_indic_self_check_fails() -> None:
@@ -305,10 +382,12 @@ def test_t2_without_endpoint_is_an_explicit_tier_unavailable(
 
 
 def test_t2_rapidocr_without_models_names_the_prefetch(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     """The in-process default (rapidocr) without models names the prefetch."""
-    monkeypatch.delenv("FMD_RAPIDOCR_MODELS", raising=False)
+    # An explicit empty root: the registry's default now points at the checked-in
+    # data/rapidocr-models directory, so absence must be simulated, not assumed.
+    monkeypatch.setenv("FMD_RAPIDOCR_MODELS", str(tmp_path))
     with pytest.raises(TierUnavailable) as excinfo:
         t2_extract(b"%PDF-1.4")
     assert "models_missing" in str(excinfo.value)

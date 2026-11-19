@@ -253,9 +253,9 @@ def load_ground_truth_docs(
 
 def _document_bytes(doc_id: int, bytes_root: Path | None) -> bytes:
     """Snapshot bytes for a corpus document (DB ``snapshots.bytes_path``)."""
-    from fmd.config.loader import get_settings
     from fmd.db.connection import Database
-    from fmd.db.repositories import SnapshotRepository
+    from fmd.db.repositories import SnapshotsRepo
+    from fmd.settings import get_settings
 
     settings = get_settings()
     database_url = settings.database_url
@@ -264,7 +264,7 @@ def _document_bytes(doc_id: int, bytes_root: Path | None) -> bytes:
             f"doc {doc_id} needs DATABASE_URL (or pass --documents <pdf> with a local copy)"
         )
     db = Database(database_url)
-    record = SnapshotRepository(db).latest_for_document(doc_id)
+    record = SnapshotsRepo(db).latest_for_document(doc_id)
     if record is None:
         raise RuntimeError(f"doc {doc_id} has no snapshot in the corpus DB")
     path = Path(record.bytes_path)
@@ -560,7 +560,9 @@ def prefetch(models_root: Path) -> dict[str, Any]:
         "Rec.lang_type": "devanagari",
         "EngineConfig.onnxruntime.use_cuda": False,
     }
-    RapidOCR(params=params)  # resolves + downloads every missing pinned artifact
+    from fmd.acquire.rapidocr_backend import _enum_params
+
+    RapidOCR(params=_enum_params(params))  # resolves + downloads every missing pinned artifact
 
     pinned = {
         "devanagari_PP-OCRv5_rec_mobile.onnx": (
@@ -640,7 +642,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else 1
         )
 
-    if not args.ground_truth:
+    if not (args.ground_truth or args.doc or args.documents):
         parser.print_help()
         return 2
 
@@ -648,13 +650,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps(report, indent=2, ensure_ascii=False))
 
     scored = report["documents_with_ground_truth"]
-    if scored < MIN_DOCS_WITH_GROUND_TRUTH:
+    explicit_document = bool(args.doc or args.documents)
+    if scored < MIN_DOCS_WITH_GROUND_TRUTH and not explicit_document:
         print(
             f"\nERROR: only {scored} document(s) have ground truth; "
             f"need >= {MIN_DOCS_WITH_GROUND_TRUTH} (fix the missing documents above)",
             file=sys.stderr,
         )
         return 1
+    if scored < MIN_DOCS_WITH_GROUND_TRUTH:
+        print(
+            f"\nNOTE: {scored} explicit document(s) measured; a routing decision "
+            f"needs >= {MIN_DOCS_WITH_GROUND_TRUTH}. This is a single-document run.",
+            file=sys.stderr,
+        )
     if not report["aggregate"] or all(
         stats.get("chrf_pp_mean") is None for stats in report["aggregate"].values()
     ):
@@ -665,3 +674,33 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def _enum_params(params: dict) -> dict:
+    """rapidocr 3.10 requires Enum values, not strings (TypeError otherwise).
+
+    Discovered the hard way: the runner was mocked in tests, so this only surfaced
+    on the first real prefetch. Maps the string config to the package's enums when
+    they are importable, and leaves already-Enum values untouched.
+    """
+    from contextlib import suppress
+
+    try:
+        from rapidocr.utils.typings import LangRec, ModelType, OCRVersion
+    except Exception:  # older runner without these enums
+        return params
+    mapping = {
+        "Det.ocr_version": OCRVersion,
+        "Rec.ocr_version": OCRVersion,
+        "Det.model_type": ModelType,
+        "Rec.model_type": ModelType,
+        "Rec.lang_type": LangRec,
+    }
+    out = dict(params)
+    for key, enum_cls in mapping.items():
+        value = out.get(key)
+        if isinstance(value, str):
+            # leave invalid values alone; the runner reports a clear error
+            with suppress(ValueError):
+                out[key] = enum_cls(value)
+    return out

@@ -328,6 +328,39 @@ def test_no_rejections_are_silently_dropped_from_the_extraction_record(
     assert extractions.rows[0].structure["rejections"][0]["reason"] == "missing_denominator"
 
 
+def test_empty_tier_output_raises_before_any_claim_is_published(
+    tmp_path: Path, registry, monkeypatch
+) -> None:
+    """An empty OCR/scan result aborts the snapshot: no extraction, no claims."""
+    import fmd.extract.pipeline as pipeline_module
+    from fmd.acquire.errors import TierUnavailable
+    from fmd.acquire.types import ExtractedDoc
+
+    empty = ExtractedDoc(
+        text="",
+        page_map=[],
+        tables=[],
+        tier="T3",
+        tool="rapidocr",
+        notes=("models_missing: rec not found",),
+    )
+    monkeypatch.setattr(pipeline_module, "extract_document", lambda *a, **k: empty)
+    text = "ignored"
+    store = SnapshotStore(tmp_path)
+    digest = store.put(text.encode("utf-8"))
+    pipeline, extractions, claims = _pipeline(
+        tmp_path, registry, StubRouter(registry.models, {}), digest
+    )
+
+    with pytest.raises(TierUnavailable) as excinfo:
+        pipeline.run(ExtractTarget(snapshot_id=1, entity_id=3, family="placement_report"))
+
+    assert "every available tier produced empty text" in str(excinfo.value)
+    assert "tier=T3" in str(excinfo.value)
+    assert claims.rows == []
+    assert extractions.rows == []
+
+
 def test_claim_rows_match_the_claims_repo_shape(tmp_path: Path, registry) -> None:
     """A committed shape check: the pipeline builds ClaimCreate, not ad-hoc dicts."""
     assert ClaimsRepo.create is not None

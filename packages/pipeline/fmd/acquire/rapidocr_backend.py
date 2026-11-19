@@ -225,7 +225,7 @@ class RapidOCRSettings:
         return cls(
             device=device,
             min_free_vram_gib=float(getattr(spec, "min_free_vram_gib", 2.0) or 2.0),
-            models_root=Path(root).expanduser() if root else None,
+            models_root=_models_root(root),
             det_model_id=str(models.get("det", "") or ""),
             rec_model_id=str(models.get("rec", "") or ""),
             rec_keys_id=str(models.get("rec_keys", "") or ""),
@@ -405,11 +405,30 @@ class RapidOCRBackend:
         if not blocks:
             # Never let "the engine said nothing" read as a clean empty page:
             # an image-only page the engine cannot read goes to review (T3),
-            # it does not become a zero-text success.
+            # it does not become a zero-text success. The counts say *why*.
+            blank_pages = sum(1 for row in page_rows if row["blank"])
+            raw_boxes = sum(row["boxes_raw"] for row in page_rows)
+            if blank_pages == len(pages):
+                why = "every page is blank (no ink at the configured DPI)"
+            elif raw_boxes == 0:
+                why = (
+                    "the runner detected zero text boxes on non-blank pages "
+                    "(render DPI/model mismatch, not a blank document)"
+                )
+            elif raw_boxes == dropped_total:
+                why = (
+                    f"all {raw_boxes} detected boxes were below "
+                    f"min_box_confidence={self.settings.min_box_confidence:g}"
+                )
+            else:
+                why = "detected boxes produced no usable transcript"
             raise TierUnavailable(
-                f"{NO_TEXT_LAYER}: rapidocr found no text on {len(pages)} page(s); "
-                "the page is unreadable at these settings — route the document "
-                "to the human queue"
+                f"{NO_TEXT_LAYER}: rapidocr found no text on {len(pages)} page(s) "
+                f"[pages={len(pages)} blank={blank_pages} boxes_raw={raw_boxes} "
+                f"dropped_low_confidence={dropped_total} "
+                f"min_box_confidence={self.settings.min_box_confidence:g} "
+                f"dpi={self.settings.dpi}]; {why} — route the document to the "
+                "human queue"
             )
 
         engine_meta = _engine_meta(
@@ -503,6 +522,7 @@ class RapidOCRBackend:
             "blank": blank,
             "engine": ENGINE_NAME,
             "boxes": len(kept),
+            "boxes_raw": len(raw_texts),
             "dropped_low_confidence": dropped,
             "devanagari_digits_normalized": digits_kept,
             "conjunct_risk": risk,
@@ -510,10 +530,11 @@ class RapidOCRBackend:
             "kept_scores": kept_scores,
         }
         logger.info(
-            "ocr_progress page=%d/%d boxes=%d dropped=%d conjunct_risk=%s elapsed=%.1fs",
+            "ocr_progress page=%d/%d boxes=%d raw=%d dropped=%d conjunct_risk=%s elapsed=%.1fs",
             page_no,
             total_pages,
             row["boxes"],
+            row["boxes_raw"],
             dropped,
             risk,
             self._clock() - started,
@@ -549,7 +570,7 @@ def build_rapidocr_runner(
     }
     if device.startswith("cuda:"):
         params["EngineConfig.onnxruntime.cuda_ep_cfg.device_id"] = int(device.split(":", 1)[1])
-    return RapidOCR(params=params)
+    return RapidOCR(params=_enum_params(params))
 
 
 def _onnx_providers() -> list[str]:
@@ -630,6 +651,29 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in _TRUTHY
+
+
+def _repo_root() -> Path:
+    """Nearest directory holding ``config/countries.yaml`` (fallback: cwd)."""
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "config" / "countries.yaml").is_file():
+            return parent
+    return Path.cwd()
+
+
+def _models_root(value: str) -> Path | None:
+    """Resolve the artifacts root: env/config value, relative to the repo.
+
+    A relative root must not depend on the process cwd: ``make extract`` runs
+    ``cd packages/pipeline`` while ``uv run`` from the checkout runs at the
+    root. Both must find the same ``data/rapidocr-models``.
+    """
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = _repo_root() / path
+    return path
 
 
 def _find_model(model_id: str, root: Path | None, *, allow_bundled: bool) -> Path | None:
@@ -725,3 +769,33 @@ __all__ = [
     "normalise_devanagari_digits",
     "vram_free_gib",
 ]
+
+
+def _enum_params(params: dict) -> dict:
+    """rapidocr 3.10 requires Enum values, not strings (TypeError otherwise).
+
+    Discovered the hard way: the runner was mocked in tests, so this only surfaced
+    on the first real prefetch. Maps the string config to the package's enums when
+    they are importable, and leaves already-Enum values untouched.
+    """
+    from contextlib import suppress
+
+    try:
+        from rapidocr.utils.typings import LangRec, ModelType, OCRVersion
+    except Exception:  # older runner without these enums
+        return params
+    mapping = {
+        "Det.ocr_version": OCRVersion,
+        "Rec.ocr_version": OCRVersion,
+        "Det.model_type": ModelType,
+        "Rec.model_type": ModelType,
+        "Rec.lang_type": LangRec,
+    }
+    out = dict(params)
+    for key, enum_cls in mapping.items():
+        value = out.get(key)
+        if isinstance(value, str):
+            # leave invalid values alone; the runner reports a clear error
+            with suppress(ValueError):
+                out[key] = enum_cls(value)
+    return out

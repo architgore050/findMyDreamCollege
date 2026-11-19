@@ -166,8 +166,12 @@ class ExtractPipeline:
         data = self.store.get(snapshot.sha256)
         doc = extract_document(data, content_type=snapshot.content_type, policy=self.policy)
         if doc.is_empty:
+            engine = doc.engine_meta or {}
             raise TierUnavailable(
-                f"snapshot {snapshot.id}: every available tier produced empty text"
+                f"snapshot {snapshot.id}: every available tier produced empty text "
+                f"(tier={doc.tier} tool={doc.tool} pages={len(doc.pages or doc.page_map)} "
+                f"engine={engine.get('engine') or 'n/a'} "
+                f"notes={'; '.join(doc.notes) or 'none'})"
             )
         if doc.ocr_anomaly or doc.needs_review:
             # A decoder loop or a failed script self-check is not evidence. Route

@@ -37,6 +37,10 @@ tiers:
   # Devanagari codepoints / (Devanagari + Latin letters) on Devanagari lines, so
   # a mixed Hindi/English header still passes; Latin mojibake scores near 0.
   t2_indic_self_check_min_ratio: 0.5
+  # The self-check needs evidence. A transcript with fewer Devanagari
+  # codepoints than this is not a Hindi page (one stray glyph read off a logo
+  # must not push an English scan into the fallback engine).
+  t2_indic_self_check_min_chars: 5
   # Deterministic 1% field audit (sha256-keyed, never random).
   adjudication_sample_rate: 0.01
 
@@ -173,7 +177,11 @@ backends:
       sha256:
         det: "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f"
         rec: "d6f0a906580e3fa6b324a318718f1f31f268b6ea8ef985f91c2012a37f52c91e"
-      artifacts_root: ${FMD_RAPIDOCR_MODELS:-}
+      # Default matches the prefetch target documented in the runbook; a
+      # relative path resolves against the repository root (never the cwd), so
+      # `cd packages/pipeline && uv run …` and the repo root find the same
+      # files. FMD_RAPIDOCR_MODELS still wins when it is set.
+      artifacts_root: ${FMD_RAPIDOCR_MODELS:-data/rapidocr-models}
     # ---- service block (qwen3vl/paddleocr backends, unchanged contract) ----
     # Defaults are read by infra/ocr/server.py (FMD_OCR_CONFIG,
     # /config/acquire.yaml inside the container). Every value here is

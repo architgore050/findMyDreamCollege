@@ -566,11 +566,13 @@ def _cmd_eval(args: argparse.Namespace) -> int:
 
 
 def _cmd_llm_doctor(args: argparse.Namespace) -> int:
+    from fmd.acquire.ocr_doctor import diagnose_ocr
     from fmd.llm.doctor import doctor_report
 
     registry = load_registry(args.config_dir)
     live = bool(getattr(args, "live", False))
-    report = doctor_report(registry.models, live=live)
+    ocr = diagnose_ocr(registry.acquire.backends["T2"])
+    report = doctor_report(registry.models, live=live, ocr=ocr)
     if getattr(args, "json", False):
         print(
             json.dumps(
@@ -581,6 +583,7 @@ def _cmd_llm_doctor(args: argparse.Namespace) -> int:
                     "ok": report["ok"],
                     "live": report["live"],
                     "remediation": report["remediation"],
+                    "ocr": report["ocr"],
                 },
                 indent=2,
                 sort_keys=True,
@@ -622,6 +625,7 @@ def _cmd_llm_doctor(args: argparse.Namespace) -> int:
             print(
                 f"    degrades to {row['degrade_reason']} per document; text extraction still runs."
             )
+    print(report["ocr"]["line"])
     if report["remediation"]:
         print("remediation:")
         for line in report["remediation"]:

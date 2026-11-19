@@ -261,8 +261,38 @@ def test_missing_det_names_the_install(tmp_path, monkeypatch) -> None:
     backend = RapidOCRBackend(_settings(tmp_path / "unused", models_root=root))
     with pytest.raises(TierUnavailable) as excinfo:
         backend.resolve_models()
-    assert "PP-OCRv6_det_small.onnx" in str(excinfo.value)
-    assert "uv pip install" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "models_missing" in message
+    assert "det model" in message
+    assert "PP-OCRv6_det_small.onnx" in message
+    assert "uv pip install" in message
+
+
+def test_models_root_env_overrides_config_and_relative_config_uses_repo(
+    tmp_path, monkeypatch
+) -> None:
+    """Env root wins; a relative config root never depends on the process cwd."""
+    from types import SimpleNamespace
+
+    from fmd.acquire.rapidocr_backend import _repo_root
+
+    spec = SimpleNamespace(
+        device="cpu",
+        min_free_vram_gib=2.0,
+        models={
+            "det": "PP-OCRv6_det_small.onnx",
+            "rec": "devanagari_PP-OCRv5_rec_mobile.onnx",
+            "rec_keys": "ppocrv5_devanagari_dict.txt",
+            "artifacts_root": "data/rapidocr-models",
+            "sha256": {},
+        },
+    )
+    from_config = RapidOCRSettings.from_spec(spec, env={})
+    assert from_config.models_root == _repo_root() / "data" / "rapidocr-models"
+    assert from_config.models_root.is_absolute()
+
+    from_env = RapidOCRSettings.from_spec(spec, env={"FMD_RAPIDOCR_MODELS": str(tmp_path)})
+    assert from_env.models_root == tmp_path
 
 
 def test_missing_runner_names_the_install(tmp_path, monkeypatch) -> None:
@@ -350,7 +380,37 @@ def test_blank_pages_produce_no_text_layer_not_a_zero(monkeypatch, tmp_path) -> 
     _render(monkeypatch, _image(blank=True))
     with pytest.raises(TierUnavailable) as excinfo:
         backend.extract(b"pdf")
-    assert NO_TEXT_LAYER in str(excinfo.value)
+    message = str(excinfo.value)
+    assert NO_TEXT_LAYER in message
+    assert "blank=1" in message
+    assert "every page is blank" in message
+
+
+def test_zero_boxes_on_a_nonblank_page_names_the_reason(monkeypatch, tmp_path) -> None:
+    """An empty runner result is diagnosable: raw boxes, DPI, confidence floor."""
+    runner = FakeRunner([FakeOutput([], [])])
+    backend = RapidOCRBackend(_settings(tmp_path), runner=runner)
+    _render(monkeypatch, _image())
+    with pytest.raises(TierUnavailable) as excinfo:
+        backend.extract(b"pdf")
+    message = str(excinfo.value)
+    assert "boxes_raw=0" in message
+    assert "zero text boxes" in message
+    assert "dpi=" in message
+    assert "blank=0" in message
+
+
+def test_all_boxes_below_confidence_floor_is_named(monkeypatch, tmp_path) -> None:
+    runner = FakeRunner([FakeOutput(["weak guess"], [0.1])])
+    backend = RapidOCRBackend(_settings(tmp_path), runner=runner)
+    _render(monkeypatch, _image())
+    with pytest.raises(TierUnavailable) as excinfo:
+        backend.extract(b"pdf")
+    message = str(excinfo.value)
+    assert "boxes_raw=1" in message
+    assert "dropped_low_confidence=1" in message
+    assert "min_box_confidence=0.7" in message
+    assert "below" in message
 
 
 def test_progress_line_per_page(monkeypatch, tmp_path, caplog) -> None:

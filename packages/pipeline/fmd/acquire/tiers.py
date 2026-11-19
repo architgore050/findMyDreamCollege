@@ -69,6 +69,9 @@ TIER_ORDER = ("T0", "T1", "T2", "T2b", "T3")
 _DEVANAGARI = range(0x0900, 0x0980)
 #: Stable review reason (never prose): offline mode has no Docling artifacts.
 ARTIFACTS_UNAVAILABLE_OFFLINE = "artifacts_unavailable_offline"
+#: Stable review reason: OCR could not run and the source is a scan, so the
+#: whitespace "text layer" is not evidence (never send it to the LLM).
+OCR_UNAVAILABLE_SPARSE_SCAN = "ocr_unavailable_sparse_scan"
 _TRUTHY = {"1", "true", "yes", "on"}
 _DEVICES = {"cpu", "auto", "cuda"}
 
@@ -262,6 +265,10 @@ class AcquirePolicy:
         return float(self.acquire.tiers.t2_indic_self_check_min_ratio)
 
     @property
+    def indic_self_check_min_chars(self) -> int:
+        return int(getattr(self.acquire.tiers, "t2_indic_self_check_min_chars", 5))
+
+    @property
     def anomaly(self) -> Any:
         return self.acquire.anomaly
 
@@ -298,15 +305,18 @@ class TierDecision:
 def probe(doc: ExtractedDoc, policy: AcquirePolicy | None = None) -> ScanProfile:
     policy = policy or AcquirePolicy.load()
     pages = max(len(doc.pages or doc.page_map), 1)
-    chars = len(doc.text)
+    # Whitespace-only text (a scan's page breaks) is not a text layer: a PDF
+    # with 14 pages and 26 newlines is image-only, not "sparse text".
+    stripped = doc.text.strip()
+    chars = len(stripped)
     return ScanProfile(
         page_count=pages,
         char_count=chars,
         chars_per_page=chars / pages,
-        devanagari=any(ord(char) in _DEVANAGARI for char in doc.text),
+        devanagari=any(ord(char) in _DEVANAGARI for char in stripped),
         tables_detected=bool(doc.tables)
         or _looks_like_tables(
-            doc.text,
+            stripped,
             min_rows=policy.table_min_rows,
             min_numeric_columns=policy.table_min_numeric_columns,
         ),
@@ -1110,6 +1120,7 @@ def run_tiers(
     if decision.tier == "T0":
         return base
 
+    t1_note: str | None = None
     if decision.tier == "T1":
         try:
             result = (t1 or t1_extract)(data)
@@ -1118,30 +1129,47 @@ def run_tiers(
             # Re-raise so orchestration marks the document and the run failed.
             raise
         except ArtifactsUnavailable as exc:
-            # Offline with no local layout/table artifacts: this is not a reason
-            # to pretend T0's flat text answered a table/layout question. Route
-            # to the human queue with a stable, named reason.
-            return replace(
-                base,
-                tier="T3",
-                fallback_from="T1",
-                needs_review=True,
-                review_reason=ARTIFACTS_UNAVAILABLE_OFFLINE,
-                notes=base.notes + (f"T1 unavailable offline: {exc}",),
-            )
+            # Offline with no local layout/table artifacts. A scan has a next
+            # tier that needs no Docling artifacts (T2/RapidOCR), so try it
+            # before parking the document; a born-digital table/layout question
+            # is not answered by T0's flat text, so that still goes to T3.
+            if not _scan_needs_ocr(base, policy):
+                return replace(
+                    base,
+                    tier="T3",
+                    fallback_from="T1",
+                    needs_review=True,
+                    review_reason=ARTIFACTS_UNAVAILABLE_OFFLINE,
+                    notes=base.notes + (f"T1 unavailable offline: {exc}",),
+                )
+            decision = TierDecision("T2", decision.reasons + ("t1_artifacts_unavailable",))
+            t1_note = f"T1 unavailable offline: {exc}"
         except TierUnavailable as exc:
-            return _fallback(base, "T1", exc)
-        result = apply_anomaly_guard(result, policy)
-        if result.ocr_anomaly or result.needs_review:
-            return result
-        escalated = plan_tiers(probe(result, policy), policy)
-        if escalated.tier == "T2" and set(escalated.reasons) & {
-            "devanagari",
-            "low_table_confidence",
-        }:
-            decision = TierDecision("T2", decision.reasons + escalated.reasons)
-        else:
-            return result
+            if not _scan_needs_ocr(base, policy):
+                return _fallback(base, "T1", exc, policy)
+            decision = TierDecision("T2", decision.reasons + ("t1_unavailable",))
+            t1_note = f"T1 unavailable: {exc}"
+        if decision.tier != "T2":
+            result = apply_anomaly_guard(result, policy)
+            if result.ocr_anomaly or result.needs_review:
+                return result
+            escalated = plan_tiers(probe(result, policy), policy)
+            escalated_reasons = set(escalated.reasons)
+            if escalated.tier == "T2" and escalated_reasons & {
+                "devanagari",
+                "low_table_confidence",
+            }:
+                decision = TierDecision("T2", decision.reasons + escalated.reasons)
+            elif result.is_empty:
+                # Docling read no usable text from a scan (or only a page-break
+                # whitespace layer): the document is image-only, so OCR is the
+                # only tier that can answer. Never hand an empty T1 result to the
+                # claim-extraction LLM.
+                decision = TierDecision(
+                    "T2", decision.reasons + tuple(escalated.reasons or ("empty_t1_output",))
+                )
+            else:
+                return result
 
     try:
         result = (t2 or t2_extract)(data)
@@ -1151,12 +1179,19 @@ def run_tiers(
         # stable reason and the run continues with the next document.
         raise
     except TierUnavailable as exc:
-        return _fallback(base, "T2", exc)
+        return _fallback(base, "T2", exc, policy)
+    if t1_note:
+        result = replace(result, notes=result.notes + (t1_note,))
     result = apply_anomaly_guard(result, policy)
     if result.ocr_anomaly or result.needs_review:
         return result
 
     if any(ord(char) in _DEVANAGARI for char in result.text):
+        devanagari_chars = sum(1 for char in result.text if ord(char) in _DEVANAGARI)
+        if devanagari_chars < policy.indic_self_check_min_chars:
+            # A stray glyph is not a Hindi page; the fallback engine is not a
+            # routine for one OCR misread on an English scan.
+            return result
         ratio = indic_self_check(result.text)
         if ratio < policy.indic_self_check_min_ratio:
             fallback_doc, fallback_note = _devanagari_fallback(
@@ -1230,12 +1265,41 @@ def _devanagari_fallback(
     return fallback, f"{note_prefix}; T2b fallback run"
 
 
-def _fallback(base: ExtractedDoc, tier: str, exc: Exception) -> ExtractedDoc:
+def _scan_needs_ocr(base: ExtractedDoc, policy: AcquirePolicy) -> bool:
+    """True when T0 has no text layer worth trusting (a scan, not a table doc).
+
+    A table-like/sparse born-digital layer is still evidence: only an image-only
+    page, or sparse *unstructured* text (page numbers), is treated as a scan.
+    """
+    profile = probe(base, policy)
+    if profile.image_only:
+        return True
+    return (
+        profile.chars_per_page < policy.min_chars_per_page
+        and not profile.tables_detected
+    )
+
+
+def _fallback(
+    base: ExtractedDoc, tier: str, exc: Exception, policy: AcquirePolicy
+) -> ExtractedDoc:
     if base.is_empty:
         raise TierUnavailable(
             f"{tier} was selected but is unavailable ({exc}); T0 also produced no "
             "text, so this document cannot be extracted on this host."
         ) from exc
+    if tier in OCR_TIERS and _scan_needs_ocr(base, policy):
+        # A near-empty layer on a scan is page furniture, not evidence. Falling
+        # back to it would hand a 26-character "document" to the text LLM.
+        return replace(
+            base,
+            tier="T3",
+            fallback_from=tier,
+            needs_review=True,
+            review_reason=OCR_UNAVAILABLE_SPARSE_SCAN,
+            notes=base.notes
+            + (f"{tier} unavailable: {exc}", "sparse scan: T0 text is not evidence"),
+        )
     return replace(
         base,
         tier="T0",
