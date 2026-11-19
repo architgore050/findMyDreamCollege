@@ -536,6 +536,11 @@ def _docling_converter(
     from docling.document_converter import PdfFormatOption
 
     options = PdfPipelineOptions()
+    # HOTFIX (see prompts/cloud/FMD-CLOUD-014-acquisition-bounds.md): Docling's
+    # built-in OCR runs unbounded on CPU for image-only pages and can stall a run
+    # for hours. Default off; T2/T3 own OCR. Set FMD_DOCLING_OCR=1 to re-enable.
+    if os.environ.get("FMD_DOCLING_OCR", "0") not in {"1", "true", "yes"}:
+        options.do_ocr = False
     if artifacts is not None:
         options.artifacts_path = str(artifacts)
     if device is not None:
