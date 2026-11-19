@@ -145,6 +145,7 @@ def doctor_report(
     *,
     live: bool = False,
     transport: httpx.BaseTransport | None = None,
+    ocr: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profiles = [
         diagnose_profile(models, name, profile, live=live, transport=transport)
@@ -163,6 +164,7 @@ def doctor_report(
         "live": live,
         "remediation": remediation,
         "budgets": models.budgets.model_dump(),
+        "ocr": ocr,
     }
 
 
