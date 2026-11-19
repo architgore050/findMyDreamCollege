@@ -429,6 +429,25 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
                 f"acquire.yaml: backends.{tier}.granularity cannot be 'glyph'; OCR/human "
                 "tiers only provide span or block boxes."
             )
+        if tier == "T2":
+            backend_name = str(getattr(backend, "backend", "") or "").strip().lower()
+            if backend_name not in {"rapidocr", "qwen3vl", "paddleocr"}:
+                errors.append(
+                    f"acquire.yaml: backends.T2.backend {backend_name!r} is not one of "
+                    "rapidocr, qwen3vl, paddleocr (the selection matrix is closed; "
+                    "Qwen3-VL stays wired and selectable, never the default)."
+                )
+            models = getattr(backend, "models", None)
+            if backend_name == "rapidocr" and (
+                not isinstance(models, dict)
+                or not str(models.get("rec", "") or "").strip()
+                or not str(models.get("rec_keys", "") or "").strip()
+            ):
+                errors.append(
+                    "acquire.yaml: backends.T2.models must pin rec and rec_keys model ids "
+                    "(Devanagari recognition is a first-class LangRec value and must be "
+                    "explicit, not inferred)."
+                )
     tiers = acquire.tiers
     if tiers.text_min_chars_per_page <= 0:
         errors.append("acquire.yaml: tiers.text_min_chars_per_page must be > 0")

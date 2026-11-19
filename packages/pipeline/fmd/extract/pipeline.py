@@ -688,7 +688,7 @@ def _attach_bbox_provenance(claim: ClaimCreate, doc: ExtractedDoc) -> ClaimCreat
     cell), so a reviewer can see that this number belongs to this row.
     """
     if doc.canonical is None:
-        return claim
+        return _attach_engine_provenance(claim, doc)
     qualifier = dict(claim.qualifier or {})
     if claim.char_start is not None and claim.char_end is not None:
         hits = doc.canonical.bboxes(claim.char_start, claim.char_end)
@@ -715,6 +715,37 @@ def _attach_bbox_provenance(claim: ClaimCreate, doc: ExtractedDoc) -> ClaimCreat
         qualifier["table_cells_uncertain"] = any(
             table.column_header_uncertain for table in doc.tables
         )
+    return _attach_engine_provenance(claim.model_copy(update={"qualifier": qualifier}), doc)
+
+
+def _attach_engine_provenance(claim: ClaimCreate, doc: ExtractedDoc) -> ClaimCreate:
+    """Record the OCR engine that read the claim's page (W7, D18 visibility).
+
+    Additive only, keyed on the acquire-owned ``ExtractedDoc.engine_meta``:
+    born-digital tiers carry ``None`` and are untouched. An OCR claim records
+    engine + engine_version + model_ids + device in its qualifier, and the
+    page's measured flags (conjunct risk, dropped low-confidence boxes,
+    normalised Devanagari digits) — a mixed-engine corpus stays auditable.
+    """
+    engine_meta = doc.engine_meta
+    if not engine_meta:
+        return claim
+    qualifier = dict(claim.qualifier or {})
+    qualifier["ocr_engine"] = engine_meta.get("engine")
+    qualifier["ocr_engine_version"] = engine_meta.get("engine_version")
+    qualifier["ocr_model_ids"] = engine_meta.get("model_ids")
+    qualifier["ocr_device"] = engine_meta.get("device")
+    qualifier["ocr_device_reason"] = engine_meta.get("device_reason")
+    qualifier["ocr_granularity"] = engine_meta.get("granularity")
+    page_no = qualifier.get("page_no")
+    for row in engine_meta.get("pages") or []:
+        if isinstance(row, dict) and row.get("page") == page_no:
+            qualifier["conjunct_risk"] = row.get("conjunct_risk")
+            qualifier["ocr_dropped_low_confidence"] = row.get("dropped_low_confidence")
+            qualifier["devanagari_digits_normalized"] = row.get(
+                "devanagari_digits_normalized"
+            )
+            break
     return claim.model_copy(update={"qualifier": qualifier})
 
 

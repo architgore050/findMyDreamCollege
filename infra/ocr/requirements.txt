@@ -6,6 +6,17 @@
 # backends.T2b.service). It is not deleted — it is the second opinion engine.
 paddlepaddle-gpu==2.6.2
 paddleocr==3.7.0
+# --- RapidOCR runner (W7): the in-process T2 engine of record ----------------
+# RapidOCR is the RUNNER (an onnxruntime wrapper), not a model. The models it
+# loads are pinned in config/acquire.yaml:backends.T2.models — det
+# PP-OCRv6_det_small.onnx (bundled with the wheel) and the Devanagari rec
+# devanagari_PP-OCRv5_rec_mobile.onnx (sha256 d6f0a906…52c91e) with
+# ppocrv5_devanagari_dict.txt, prefetched once from ModelScope
+# RapidAI/RapidOCR@v3.10.0 via `uv run python scripts/ocr_validate.py
+# --prefetch`. The offline test install never downloads anything: tests mock
+# the runner session, and the base image does not install this file.
+rapidocr>=3.10,<4
+onnxruntime>=1.32,<2
 # pdfium (BSD-3) renders PDF pages to images in-process; no AGPL PyMuPDF here.
 pypdfium2==5.15.2
 pillow==13.0.0

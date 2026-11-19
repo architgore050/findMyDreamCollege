@@ -755,21 +755,86 @@ change: `test_adapters_registry` still asserts
 
 ---
 
-## 3. OCR stage (T2 Qwen3-VL / T2b PaddleOCR-VL)
-### 3.1 Why this engine
+## 3. OCR stage (T2: RapidOCR/PP-OCR default; Qwen3-VL + PaddleOCR-VL retained)
+### 3.1 Why this engine (amended 2026-11-19, measured)
 
-Qwen3-VL-8B-Instruct is the T2 engine because it is the only local option with a
-published real-scan Devanagari number (**chrF++ 75.2**, arXiv:2606.29213, doc 10
-§4) *and* because vLLM, not Paddle, has kernels for this GPU:
+T2's default backend is now **RapidOCR — the RUNNER, not the model** — an
+onnxruntime wrapper around PaddleOCR PP-OCR detection + recognition graphs,
+in-process, no HTTP service. Purpose-built detection+recognition is orders of
+magnitude cheaper per page than a VLM; a VLM over a 200-page scan is exactly
+what stalled the corpus (D18). The preference is **PROVISIONAL UNTIL MEASURED**:
+`scripts/ocr_validate.py --ground-truth` scores both engines over the same
+scans, and the decision rule (§3.8) — not this file — is what a measurement
+changes. Table structure stays Docling/TableFormer (T1); it is not OCR's job.
 
-| Fact | Value | How measured (2026-11-16) |
+| Backend | Where it runs | Role |
 |---|---|---|
-| `sm_120` in `torch.cuda.get_arch_list()` | yes | one-liner in §2.1 on `~/.venvs/fmd-vllm` |
-| vLLM supports the Qwen3-VL architecture | yes — `Qwen3VLForConditionalGeneration` | `ModelRegistry.get_supported_archs()` |
-| PaddlePaddle GPU wheels | stop at `sm_90` | wheel metadata; runbook §4 row |
+| `rapidocr` (default) | in-process (pipeline venv) | T2 engine of record, CPU default |
+| `qwen3vl` | `/extract` service on `FMD_T2_URL` | Devanagari fallback + selectable backend; never default, never removed, never silent |
+| `paddleocr` | `/extract` service, CPU-only on sm_120 | alternate full pipeline (T2b) |
 
-Licences: Qwen3-VL **Apache-2.0**, PaddleOCR-VL **Apache-2.0**. Surya/Marker stay
-rejected (OpenRAIL-M, $5 M revenue cap).
+Device policy is **measured, not assumed**: with llama-server resident
+(14.4 GiB) only ~688 MiB VRAM is free; onnxruntime CUDA needs ~1.5–2 GiB and
+OOMs there. So `device: cpu` is the default and measures **2.33 s/page
+(25.8 pages/min) — 200 pp ≈ 8 min**. `device: cuda` is opt-in for batch runs
+with the LLM server stopped; if free VRAM is below `min_free_vram_gib` (2.0),
+the CUDA path fails with a recorded `cuda_unavailable_vram` reason and the run
+continues on CPU — a device preference never crashes a run.
+
+### 3.1b Models are pinned (no URL guessing)
+
+`config/acquire.yaml:backends.T2.models` pins exact ids, from the runner's own
+manifest (ModelScope `RapidAI/RapidOCR@v3.10.0`):
+
+| File | Role | sha256 |
+|---|---|---|
+| `PP-OCRv6_det_small.onnx` | det (bundled with the runner wheel) | `090f04ab…1ff94f` |
+| `devanagari_PP-OCRv5_rec_mobile.onnx` | rec — Devanagari is a **first-class LangRec value** (`LangRec.DEVANAGARI`) | `d6f0a906…52c91e` |
+| `ppocrv5_devanagari_dict.txt` | rec dictionary | manifest-checked |
+
+One-time prefetch (sha256-verified by the runner's manifest, re-verified by us):
+
+```bash
+uv pip install "rapidocr>=3.10" "onnxruntime>=1.32"   # runner (see infra/ocr/requirements.txt)
+uv run python scripts/ocr_validate.py --prefetch      # → $FMD_RAPIDOCR_MODELS (default data/rapidocr-models)
+```
+
+Missing artifacts are a named failure (`models_missing: … prefetch with uv run
+python scripts/ocr_validate.py --prefetch`), never a download at serve time.
+A missing runner is `engine_not_installed: … uv pip install "rapidocr>=3.10"
+"onnxruntime>=1.32"`.
+
+### 3.1c Devanagari capability — proven, not assumed
+
+The configured rec model id is checked against the runner's model manifest,
+and a mock Devanagari page is asserted to route to the pinned model
+(`tests/test_acquire_rapidocr.py`). The real-GPU check, after prefetch:
+
+```bash
+uv run pytest packages/pipeline/tests/test_acquire_rapidocr.py -q   # manifest check runs (not skipped) when rapidocr is installed
+uv run python scripts/ocr_validate.py --ground-truth --engine rapidocr   # CER/chrF++ on doc 61 pages 3/5/7
+```
+
+Known, measured defects handled in the pipeline (not hidden): boxes under
+`min_box_confidence` (0.7) are dropped **and counted** per page;
+virama/conjunct sequences are error-prone (measured: शक्ति→शक्ि, विश्व→विश्ष) so
+pages with conjunct clusters at low confidence get a per-page `conjunct_risk`
+flag; Devanagari digits (०१२३) are normalised to ASCII when detected, logged,
+and counted — untested in our corpus, so never assumed correct.
+
+### 3.1d VRAM expectation (cuda opt-in)
+
+| Config | Free VRAM needed | What happens below the floor |
+|---|---|---|
+| `device: cpu` (default) | none | always runs; 2.33 s/page measured |
+| `device: cuda`, floor `min_free_vram_gib: 2.0` | ~1.5–2 GiB for the det+rec graphs | recorded `cuda_unavailable_vram` → CPU, run continues |
+| llama-server resident | ~688 MiB free measured | cuda is refused by name — do not force it |
+
+`FMD_OCR_DEVICE=cuda` (or acquire.yaml) opts in for a batch run with the LLM
+server stopped; `FMD_OCR_DEVICE=cpu` returns to the safe default. Licences:
+RapidOCR **Apache-2.0**, PP-OCRv5/v6 models **Apache-2.0** (ModelScope
+RapidAI/RapidOCR), PaddleOCR-VL **Apache-2.0**, Qwen3-VL **Apache-2.0**.
+Surya/Marker stay rejected (OpenRAIL-M, $5 M revenue cap).
 
 ### 3.2 Weights (once; ~10.6 GB on the default)
 
@@ -877,6 +942,15 @@ had ink. Upstream, T2 raises `TierUnavailable`:
   extracted on this host" → **no claims**, document queued for review;
 * page with usable T0 text → T0 fallback with a `T2 unavailable: ...` note.
 
+The in-process `rapidocr` backend (the T2 default) raises the same classes with
+its own stable codes: `models_missing: …` (names the prefetch command),
+`engine_not_installed: …` (names the install command),
+`no_text_layer: …` (unreadable image-only page → review), and
+`acquisition_failed:acquisition_budget_exceeded` (D18: page/time budget hit —
+no partial claims, the document is parked, the run continues with the next
+document). `cuda_unavailable_vram` / `cuda_unavailable_no_provider` are
+recorded reasons, not crashes: the backend continues on CPU.
+
 **Measured limitation (2026-11-16).** `tiers._ocr_tier` formats an
 `httpx.HTTPStatusError`, which carries only status and URL, so the note reads
 `T2 unavailable: ... 503 Service Unavailable` and the `vision_unavailable` label
@@ -900,6 +974,42 @@ Compose service `ocr-paddle` builds `infra/ocr/requirements.txt`
 per page**, not milliseconds. It is a second opinion for pages where Qwen3-VL
 fails the Indic self-check, not the bulk path. Selecting it for T2 instead is
 `FMD_OCR_BACKEND=paddleocr` on the `ocr` service.
+
+### 3.8 Measurement, decision rule, and what shipping requires
+
+**Shipping requires OCR enabled and measured.** An engine that has never been
+scored against the corpus is a preference, not a decision. The gate is:
+`uv run python scripts/ocr_validate.py --ground-truth` green (≥ 3 documents
+with ground truth, engines reachable, baseline printed) **and** the D18
+quality gates recorded (CER/chrF++ on real Hindi-header scans, block-granularity
+offset resolvability). Until then D18 stays "must ship, not shipped".
+
+Small batches first, always:
+
+```bash
+DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd \
+  uv run python scripts/ocr_validate.py --ground-truth --engine all --limit 3
+```
+
+* ground truth is doc 61 (gsv.ac.in Hindi annual report, pages 3/5/7) — its
+  **real Unicode text layer**, never an invented transcript;
+* reports CER, chrF++ and pages/min per engine, per document and aggregate,
+  with the 2026-11-19 baseline (CER 10.9 %, 25.8 pages/min) printed for
+  regression visibility;
+* refuses > 10 documents without `--i-know`; supports `--engine` and `--limit`;
+* engines that cannot run are **recorded** in the report, never silently skipped.
+
+**Committed decision rule** (the numbers decide, not the patch):
+
+1. PP-OCRv5 within ~5 chrF++ of Qwen3-VL on Devanagari → keep PP-OCRv5
+   everywhere (`T2.backend: rapidocr` stays).
+2. PP-OCRv5 loses by more → route conjunct-heavy / Devanagari pages to
+   Qwen3-VL (`FMD_T2_BACKEND=qwen3vl` per page via the fallback path or the
+   backend matrix), Latin stays on PP-OCRv5, per-page engine recorded in
+   `engine_meta.pages[].engine` and the claim qualifier.
+
+Either way the corpus stays reproducible: one engine per page, one transcript,
+engine + engine_version + model_ids on every scanned claim.
 
 ## 4. Common failures
 

@@ -31,6 +31,16 @@ disclosures; without vision they route to a human queue and the evidence is simp
 hotfix, because it is unbounded (no page cap, no time budget) and stalled a run for 25+
 minutes. That is a **development-mode** setting, not the product policy.
 
+**D18 status (W7 patch, 2026-11-19):** the bounded T2 tier is IMPLEMENTED — default backend
+`rapidocr` (PP-OCR det+rec over the RapidOCR runner, in-process), `device: cpu` default
+(measured 2.33 s/page ≈ 25.8 pages/min; cuda is opt-in with a recorded
+`cuda_unavailable_vram` fallback), pinned PP-OCRv6-det + PP-OCRv5-devanagari models,
+page/time budgets with `acquisition_budget_exceeded` abort semantics, per-page confidence
+floor + `conjunct_risk` + digit-normalisation accounting, engine metadata on every OCR claim,
+and Qwen3-VL retained as Devanagari fallback + selectable backend. **Not yet measured**: the
+`scripts/ocr_validate.py --ground-truth` run on real scans (doc 61 pages 3/5/7 seed) and the
+D18 quality gates — the engine preference is provisional until that run (runbook §3.8).
+
 **Policy to implement (D18):**
 1. **Primary OCR: PaddleOCR PP-OCRv5 server det+rec models, executed through RapidOCR on
    onnxruntime-gpu.** Rationale: purpose-built detector+recogniser, permissive licence, GPU

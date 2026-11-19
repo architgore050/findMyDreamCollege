@@ -4,15 +4,20 @@
 # Tiers
 #   T0  pdftext           born-digital text layer, per-glyph boxes
 #   T1  Docling           layout + tables on clean scans, item/table-cell boxes
-#   T2  Qwen3-VL          OCR, block-level boxes only (served through vLLM)
+#   T2  OCR               backend matrix: rapidocr (default) | qwen3vl | paddleocr
 #   T2b PaddleOCR-VL      alternate OCR engine; CPU-only on this sm_120 host
 #   T3  human queue       anomalies, low confidence; never an automated model
 #
-# T2 runs Qwen3-VL-8B because it is the only local option with a published
-# real-scan Devanagari number (chrF++ 75.2, arXiv:2606.29213) and because vLLM
-# ships sm_120 (Blackwell) kernels, which PaddlePaddle's GPU wheels do not.
-# PaddleOCR-VL is kept as the T2b engine: not deleted, but GPU-less on this host
-# (its wheels stop at sm_90), so it is offered on CPU only.
+# T2 backend matrix (W7, 2026-11-19). RapidOCR is the RUNNER, not the model: an
+# onnxruntime wrapper around PaddleOCR PP-OCR det+rec graphs. Purpose-built
+# detection+recognition is orders of magnitude cheaper per page than a VLM, and
+# a VLM over a 200-page scan is exactly what stalled the corpus (D18). This
+# preference is PROVISIONAL UNTIL MEASURED: `scripts/ocr_validate.py
+# --ground-truth` computes CER/chrF++/pages-min per engine over the same scans;
+# the committed decision rule (runbook §3.8) — not this file — is what a
+# measured result changes. Table structure is NOT OCR's job (Docling keeps it).
+# Qwen3-VL stays fully wired: the Devanagari fallback (T2.devanagari_fallback)
+# and a selectable T2 backend. No engine is deleted by this patch.
 #
 # Rejected and not to be reintroduced: PyMuPDF (AGPL), Surya/Marker weights
 # (OpenRAIL-M, $5M revenue cap), MiniCPM-OCR/GLM-OCR for Hindi (no `hi` in the
@@ -99,17 +104,80 @@ backends:
     # to T3 with that stable reason instead of a timeout.
     artifacts_path: ${FMD_DOCLING_ARTIFACTS:-}
   T2:
-    tool: qwen3-vl
-    model: Qwen3-VL-8B-Instruct
+    # ---- engine selection matrix -------------------------------------------
+    # rapidocr  — in-process PP-OCR det+rec over the RapidOCR runner
+    #             (onnxruntime). Default on this host. No HTTP service.
+    # qwen3vl   — Qwen3-VL-8B behind the /extract service (FMD_T2_URL). The
+    #             Devanagari fallback and an explicit alternate backend;
+    #             never the default, never removed, never silently used.
+    # paddleocr — PaddleOCR-VL behind the same /extract contract (start the
+    #             service with FMD_OCR_BACKEND=paddleocr; CPU-only on sm_120).
+    backend: ${FMD_T2_BACKEND:-rapidocr}
+    tool: rapidocr
+    model: PP-OCRv6-det-small + PP-OCRv5-devanagari-rec (RapidOCR runner)
     granularity: block
-    # The pipeline reads the URL from this env var only (no YAML default is
-    # consumed by fmd.acquire.tiers): FMD_T2_URL=http://localhost:8110 on the
-    # host, http://ocr:8110 inside compose (infra/docker-compose.yml, profile
-    # "ocr"). Unset => TierUnavailable and the page goes to the human queue.
+    # Used only when backend is qwen3vl/paddleocr: FMD_T2_URL=http://localhost:8110
+    # on the host, http://ocr:8110 inside compose (infra/docker-compose.yml,
+    # profile "ocr"). Unset => TierUnavailable and the page goes to review.
     endpoint_env: FMD_T2_URL
-    # Defaults for the `service:` block below are read by infra/ocr/server.py
-    # (FMD_OCR_CONFIG, /config/acquire.yaml inside the container). Every value
-    # here is env-overridable; nothing model-specific is hardcoded in Python.
+    # ---- device (MEASURED 2026-11-19, amendment) ---------------------------
+    # Default `cpu`: with llama-server resident (14.4 GiB) only ~688 MiB VRAM
+    # is free; onnxruntime CUDA needs ~1.5–2 GiB and OOMs. Measured CPU rate
+    # 2.33 s/page (25.8 pages/min) => 200 pp ≈ 8 min. `cuda` is opt-in for
+    # batch runs with the LLM server stopped; when free VRAM is below
+    # min_free_vram_gib the CUDA path fails with a recorded
+    # `cuda_unavailable_vram` reason and the run continues on CPU — a device
+    # preference never crashes a run. FMD_OCR_DEVICE overrides per shell.
+    device: ${FMD_OCR_DEVICE:-cpu}
+    # CUDA floor (GiB): onnxruntime CUDA EP needs ~1.5–2 GiB for these graphs.
+    min_free_vram_gib: 2.0
+    # ---- budgets (D18: bounded, visible, no partial claims) ----------------
+    # Per document. max_pages 250 / max_seconds 900 covers a 200-page annual
+    # report at the measured CPU rate (480 s) with headroom. An abort is a
+    # named `acquisition_failed:acquisition_budget_exceeded`, no claims are
+    # published, and the run continues with the next document.
+    max_pages: 250
+    max_seconds: 900
+    # Page raster: rendered at `dpi`, downscaled when the long side exceeds
+    # max_side_px (pages[].width/height report the analysed raster).
+    dpi: 200
+    max_side_px: 2400
+    # ---- output hygiene (measured defects handled, not hidden) -------------
+    # Boxes below this recognition confidence are dropped AND counted per page
+    # (`dropped_low_confidence`), never silently kept.
+    min_box_confidence: 0.7
+    # Virama/conjunct sequences are error-prone (शक्ति→शक्ि, विश्व→विश्ष): a page
+    # whose transcript contains conjunct clusters at low confidence (a dropped
+    # box, or mean box score under this ceiling) is flagged `conjunct_risk`.
+    conjunct_risk_score_max: 0.85
+    # Devanagari digits (०१२३) are untested in our corpus: normalise them to
+    # ASCII when detected, log it, and record the count per page.
+    normalise_devanagari_digits: true
+    # ---- Devanagari fallback (Qwen3-VL stays fully wired) ------------------
+    # After a failed Indic self-check, re-run the document through this engine:
+    #   qwen3vl — the vLLM endpoint behind endpoint_env (recorded per claim)
+    #   t2b     — the alternate-engine tier (legacy behaviour)
+    devanagari_fallback: qwen3vl
+    # ---- pinned models (no URL guessing; sha256 from the runner's manifest) -
+    # Source of truth: ModelScope RapidAI/RapidOCR@v3.10.0. Ids are FILE NAMES
+    # under `artifacts_root` (FMD_RAPIDOCR_MODELS); the det graph ships inside
+    # the runner wheel, rec + dict are prefetched once (sha256-checked) with
+    # `uv run python scripts/ocr_validate.py --prefetch`. Devanagari is a
+    # first-class LangRec value in the runner (LangRec.DEVANAGARI).
+    models:
+      det: PP-OCRv6_det_small.onnx
+      rec: devanagari_PP-OCRv5_rec_mobile.onnx
+      rec_keys: ppocrv5_devanagari_dict.txt
+      lang_rec: devanagari
+      source: modelscope:RapidAI/RapidOCR@v3.10.0
+      sha256:
+        det: "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f"
+        rec: "d6f0a906580e3fa6b324a318718f1f31f268b6ea8ef985f91c2012a37f52c91e"
+      artifacts_root: ${FMD_RAPIDOCR_MODELS:-}
+    # ---- service block (qwen3vl/paddleocr backends, unchanged contract) ----
+    # Defaults are read by infra/ocr/server.py (FMD_OCR_CONFIG,
+    # /config/acquire.yaml inside the container). Every value here is
+    # env-overridable; nothing model-specific is hardcoded in Python.
     service:
       backend: qwen3vl
       # vLLM on the host, OpenAI-compatible. `scripts/serve_ocr.sh vision-start`
@@ -130,10 +198,10 @@ backends:
       # Block boxes are requested on a 0..1000 grid and scaled to the analysed
       # raster, so a box always resolves inside its page box.
       bbox_space: normalized_1000
+      # Service-side render/budget knobs (infra/ocr/server.py) for the HTTP
+      # backends; the in-process rapidocr path reads the T2-level values above.
       dpi: 200
       max_pages: 40
-      # Long side of the analysed raster; larger pages are downscaled first and
-      # pages[].width/height report the analysed size (never the raw render).
       max_side_px: 2400
       timeout_s: 120
   T2b:

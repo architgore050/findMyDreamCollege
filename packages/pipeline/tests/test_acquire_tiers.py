@@ -297,10 +297,22 @@ def test_offline_t1_artifact_gap_routes_to_t3_not_flat_t0(
 def test_t2_without_endpoint_is_an_explicit_tier_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An endpoint-backed T2 (qwen3vl) without FMD_T2_URL names the env var."""
     monkeypatch.delenv("FMD_T2_URL", raising=False)
     with pytest.raises(TierUnavailable) as excinfo:
-        t2_extract(b"%PDF-1.4")
+        t2_extract(b"%PDF-1.4", policy=_policy_with_t2_backend("qwen3vl"))
     assert "FMD_T2_URL" in str(excinfo.value)
+
+
+def test_t2_rapidocr_without_models_names_the_prefetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The in-process default (rapidocr) without models names the prefetch."""
+    monkeypatch.delenv("FMD_RAPIDOCR_MODELS", raising=False)
+    with pytest.raises(TierUnavailable) as excinfo:
+        t2_extract(b"%PDF-1.4")
+    assert "models_missing" in str(excinfo.value)
+    assert "scripts/ocr_validate.py --prefetch" in str(excinfo.value)
 
 
 def test_t2b_without_endpoint_is_an_explicit_tier_unavailable(
@@ -434,18 +446,60 @@ def test_t1_docling_document_provides_table_cells_and_uncertainty() -> None:
 
 
 def test_t2_and_t2b_engines_come_from_the_registry() -> None:
-    """T2 is the sm_120-capable engine; T2b is the retained alternate."""
+    """T2 selects its engine from the matrix; T2b is the retained alternate."""
     policy = _policy()
 
-    assert policy.backend("T2").model == "Qwen3-VL-8B-Instruct"
-    assert policy.backend("T2").tool == "qwen3-vl"
-    assert policy.backend("T2b").tool == "paddleocr-vl"
-    assert policy.backend("T2").endpoint_env == "FMD_T2_URL"
-    assert policy.backend("T2b").endpoint_env == "FMD_T2B_URL"
-    # Service-side defaults live in the same registry entry, not in code.
+    # Default on this host: in-process PP-OCR via the RapidOCR runner, with the
+    # Devanagari rec model pinned as a first-class LangRec value.
+    assert policy.backend("T2").backend == "rapidocr"
+    assert policy.backend("T2").tool == "rapidocr"
+    assert policy.backend("T2").device == "cpu"  # measured: llama-server resident
+    models = policy.backend("T2").models
+    assert models["det"] == "PP-OCRv6_det_small.onnx"
+    assert models["rec"] == "devanagari_PP-OCRv5_rec_mobile.onnx"
+    assert models["rec_keys"] == "ppocrv5_devanagari_dict.txt"
+    assert models["lang_rec"] == "devanagari"
+    assert models["sha256"]["rec"].startswith("d6f0a906")
+    # Qwen3-VL stays fully wired: the Devanagari fallback and an alternate
+    # backend, never the default, never removed.
+    assert policy.backend("T2").devanagari_fallback == "qwen3vl"
     assert policy.backend("T2").service["backend"] == "qwen3vl"
+    assert policy.backend("T2").service["served_name"] == "Qwen3-VL-8B-Instruct"
+    assert policy.backend("T2").endpoint_env == "FMD_T2_URL"
+    assert policy.backend("T2b").tool == "paddleocr-vl"
+    assert policy.backend("T2b").endpoint_env == "FMD_T2B_URL"
     assert policy.backend("T2b").service["backend"] == "paddleocr"
     assert policy.backend("T2b").service["device"] == "cpu"
+
+
+def _policy_with_t2_backend(name: str) -> AcquirePolicy:
+    """The real registry with ``backends.T2.backend`` overridden (no mutation)."""
+    from fmd.config import get_registry
+    from fmd.config.models import AcquireBackend
+
+    acquire = get_registry().acquire.model_copy(deep=True)
+    spec = dict(acquire.backends["T2"].model_dump())
+    spec["backend"] = name
+    acquire.backends["T2"] = AcquireBackend(**spec)
+    return AcquirePolicy.load(acquire=acquire)
+
+
+@pytest.fixture
+def qwen_t2_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve ``FMD_T2_BACKEND=qwen3vl`` for one test, registry cache included.
+
+    ``run_tiers`` calls the real ``t2_extract`` without a policy argument (the
+    tier loads the registry itself), so the backend is switched through the
+    ``${FMD_T2_BACKEND:-rapidocr}`` interpolation and the registry cache is
+    rebuilt — and rebuilt again on teardown so the default never leaks.
+    """
+    from fmd.config.loader import reset_registry_cache
+
+    monkeypatch.setenv("FMD_T2_BACKEND", "qwen3vl")
+    reset_registry_cache()
+    yield
+    monkeypatch.undo()
+    reset_registry_cache()
 
 
 @pytest.mark.parametrize("status", [429, 500, 503])
@@ -467,13 +521,15 @@ def test_ocr_service_http_error_is_tier_unavailable(
     monkeypatch.setattr(tiers_module.httpx, "post", post)
 
     with pytest.raises(TierUnavailable) as excinfo:
-        t2_extract(b"%PDF-1.4")
+        t2_extract(
+            b"%PDF-1.4", policy=_policy_with_t2_backend("qwen3vl")
+        )
     assert "ocr.test" in str(excinfo.value)
     assert str(status) in str(excinfo.value)
 
 
 def test_unavailable_vision_engine_degrades_loudly_not_silently(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, qwen_t2_backend: None
 ) -> None:
     """A page with usable T0 text falls back to T0 and carries the reason."""
     import httpx
@@ -493,7 +549,7 @@ def test_unavailable_vision_engine_degrades_loudly_not_silently(
 
     result = run_tiers(
         b"ignored",
-        policy=_policy(),
+        policy=_policy_with_t2_backend("qwen3vl"),
         t0=lambda _: _doc(LONG_TEXT + " शुल्क और पात्रता की जानकारी।"),
         t2=t2_extract,
     )
@@ -510,7 +566,7 @@ def test_unavailable_vision_engine_degrades_loudly_not_silently(
 
 
 def test_image_only_page_with_no_vision_engine_produces_no_claims(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, qwen_t2_backend: None
 ) -> None:
     """The scanned-page path: no OCR, no text, so no claims and a review item."""
     import httpx
@@ -527,7 +583,12 @@ def test_image_only_page_with_no_vision_engine_produces_no_claims(
     monkeypatch.setattr(tiers_module.httpx, "post", post)
 
     with pytest.raises(TierUnavailable) as excinfo:
-        run_tiers(b"ignored", policy=_policy(), t0=lambda _: _doc(""), t2=t2_extract)
+        run_tiers(
+            b"ignored",
+            policy=_policy_with_t2_backend("qwen3vl"),
+            t0=lambda _: _doc(""),
+            t2=t2_extract,
+        )
     message = str(excinfo.value)
     assert "cannot be extracted on this host" in message
     assert "503" in message

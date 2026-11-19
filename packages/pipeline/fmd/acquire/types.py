@@ -91,6 +91,11 @@ class ExtractedDoc:
     review_reason: str | None = None
     two_column: bool = False
     table_confidence: float | None = None
+    #: OCR engine provenance (engine, engine_version, model_ids, device,
+    #: per-page confidence/flags). ``None`` for born-digital tiers (T0/T1),
+    #: a flat JSON-serialisable dict for OCR tiers — every scanned page
+    #: records what read it, so a mixed-engine corpus stays reproducible.
+    engine_meta: dict[str, Any] | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -140,6 +145,7 @@ class ExtractedDoc:
             "review_reason": self.review_reason,
             "two_column": self.two_column,
             "table_confidence": self.table_confidence,
+            "engine_meta": self.engine_meta,
             "table_cells_uncertain": any(table.column_header_uncertain for table in self.tables),
             "block_count": len(self.blocks),
         }
@@ -158,6 +164,7 @@ class ExtractedDoc:
             "anomalous_pages": list(self.anomalous_pages),
             "page_count": len(self.pages or self.page_map),
             "table_confidence": self.table_confidence,
+            "engine_meta": self.engine_meta,
         }
 
 
