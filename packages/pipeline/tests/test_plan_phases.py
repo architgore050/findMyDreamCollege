@@ -305,3 +305,114 @@ def test_plan_payload_exposes_the_deferred_state() -> None:
     assert plan.deferred is True
     assert plan.persisted_state == "planned"
     assert plan.persisted_reason == DEFER_CODE
+
+
+# --- W5 family coverage: the abstained corpus through both phases -------------
+# The measured 83-abstained set was dominated by annual reports, prospectuses
+# and NIRF submissions. Their filename defers at Phase A; the cover text
+# decides at Phase B. The negative corpus must still abstain without buying
+
+
+def test_annual_report_defers_then_links_accreditation() -> None:
+    url = "https://example.ac.in/sites/Annual-Report-2023-24.pdf"
+    document = _document(url)
+    planner = _planner(
+        [EntityCandidate(entity_id=7, canonical_name="Demo Institute of Health Sciences")]
+    )
+
+    phase_a = planner.plan(document, phase="a")
+    assert phase_a.family is None
+    assert phase_a.state == "defer_for_text"
+    assert phase_a.signals["structure_hint"] == "accreditation"
+
+    phase_b = planner.plan(
+        document,
+        text_sample=(FIXTURES / "annual_report.txt").read_text(encoding="utf-8"),
+        phase="b",
+    )
+    assert phase_b.family == "accreditation"
+    assert phase_b.state == "linked"
+    assert phase_b.entity_id == 7
+    assert phase_b.signals["secondary_hint"] == 1
+
+
+def test_prospectus_defers_then_resolves_by_its_fee_tables() -> None:
+    url = "https://example.ac.in/admissions/Prospectus-2025-26.pdf"
+    document = _document(url)
+    planner = _planner(
+        [EntityCandidate(entity_id=7, canonical_name="Demo Institute of Health Sciences")]
+    )
+
+    phase_a = planner.plan(document, phase="a")
+    assert phase_a.state == "defer_for_text"
+
+    phase_b = planner.plan(
+        document,
+        text_sample=(FIXTURES / "prospectus_fees.txt").read_text(encoding="utf-8"),
+        phase="b",
+    )
+    assert phase_b.family == "fee_structure"
+    assert phase_b.state == "linked"
+    assert phase_b.signals["prospectus_fee_table_rows"] >= 3
+
+
+def test_nirf_submission_defers_then_links_accreditation() -> None:
+    url = "https://example.ac.in/sites/NIRF-2024.pdf"
+    document = _document(url)
+    planner = _planner(
+        [EntityCandidate(entity_id=7, canonical_name="Demo Institute of Health Sciences")]
+    )
+
+    phase_a = planner.plan(document, phase="a")
+    assert phase_a.state == "defer_for_text"
+
+    phase_b = planner.plan(
+        document,
+        text_sample=(FIXTURES / "nirf_submission.txt").read_text(encoding="utf-8"),
+        phase="b",
+    )
+    assert phase_b.family == "accreditation"
+    assert phase_b.state == "linked"
+
+
+def test_negative_corpus_abstains_at_both_phases() -> None:
+    for fixture, url in (
+        ("staff_circular.txt", "https://example.ac.in/uploads/office-order-17119.pdf"),
+        ("tender_notice.txt", "https://example.ac.in/tenders/Tender-Notice-2025.pdf"),
+        ("convocation_notice.txt", "https://example.ac.in/uploads/Convocation-Notice-2025.pdf"),
+        ("exam_schedule.txt", "https://example.ac.in/exam/Exam-Schedule-2025.pdf"),
+        ("event_news_page.txt", "https://example.ac.in/events/annual-day-2025.pdf"),
+    ):
+        document = _document(url)
+        planner = _planner([EntityCandidate(entity_id=7, canonical_name=ENTITY_NAME)])
+
+        phase_a = planner.plan(document, phase="a")
+        phase_b = planner.plan(
+            document,
+            text_sample=(FIXTURES / fixture).read_text(encoding="utf-8"),
+            phase="b",
+        )
+        # Phase A may defer an exam-shaped URL for text (cheap, by design), but
+        # it must never declare a family; Phase B must abstain outright.
+        assert phase_a.family is None, fixture
+        assert phase_a.state in ("abstained", "defer_for_text"), fixture
+        assert phase_b.family is None and phase_b.state == "abstained", fixture
+        assert phase_b.abstain_reason == "family_undetected", fixture
+
+
+def test_structure_hint_resolves_when_the_text_layer_is_silent() -> None:
+    """The weakest tier: text read but silent, URL tokens below the floor."""
+    url = "https://example.ac.in/sites/Annual-Report-2023-24.pdf"
+    document = _document(url)
+    planner = _planner(
+        [EntityCandidate(entity_id=7, canonical_name="Demo Institute of Health Sciences")]
+    )
+
+    sample = (
+        "Demo Institute of Health Sciences\nThe accounts of the Institute are enclosed herewith."
+    )
+    plan = planner.plan(document, text_sample=sample, phase="b")
+
+    assert plan.family == "accreditation"
+    assert plan.signals["fallback"] == "structure_hint"
+    assert plan.state == "linked"

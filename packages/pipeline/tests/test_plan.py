@@ -12,6 +12,7 @@ import pytest
 
 from fmd.db.repositories import DocumentUpsert
 from fmd.er import Alias, EntityCandidate, ERConfig
+from fmd.extract.schemas import FAMILIES
 from fmd.plan import DocumentPlan, DocumentPlanner, detect_family
 from fmd.plan.rules import DEFAULT_RULES, PlanRules, SignalWeights, score_families
 
@@ -74,6 +75,198 @@ def test_detection_abstains_on_a_tie() -> None:
 
     assert family is None
     assert reason == "ambiguous_family"
+
+
+# --- W5 family coverage: signal channels (2026-11-19) -------------------------
+# The 83-abstained measurement (135 snapshots) was dominated by annual reports,
+# prospectuses and NIRF submissions whose text vocabulary never scored. The
+# channels below are the new evidence: heading-shaped lines, the cover-title
+# line, and tokens that recur across the sample.
+
+
+def test_heading_and_title_channels_are_recorded() -> None:
+    text = (FIXTURES / "annual_report.txt").read_text(encoding="utf-8")
+
+    family, confidence, signals, reason = detect_family(url=NEUTRAL_URL, text_sample=text)
+
+    assert family == "accreditation"
+    assert reason is None
+    assert signals["heading"] >= 1  # "Annual Report 2023-24" is heading-shaped
+    assert signals["title"] >= 1  # the cover names the document type
+    assert signals["title_decisive"] == 1  # cover identity decides the document
+    assert confidence > 0
+
+
+def test_recurring_channel_fires_on_repetition() -> None:
+    text = "\n".join(
+        ["Fee particulars of the B.Sc. MLT programme are:", "Tuition fee: Rs. 95000"]
+        + [f"Special fee {n}: Rs. {n}000" for n in range(1, 5)]
+    )
+
+    _, _, signals, _ = detect_family(url=NEUTRAL_URL, text_sample=text)
+
+    assert signals["recurring"] >= 1  # "fee"/"fees" occur far beyond recurring_min
+
+
+def test_recurring_channel_does_not_count_single_mentions() -> None:
+    # A single "fee" mention is not a fee structure: below recurring_min.
+    text = "The prospectus explains that one special fee is charged at admission."
+
+    _, _, signals, reason = detect_family(url=NEUTRAL_URL, text_sample=text)
+
+    assert signals.get("recurring", 0) == 0
+    assert reason == "family_undetected"
+
+
+def test_secondary_hint_marks_placement_sections_in_an_annual_report() -> None:
+    text = (FIXTURES / "annual_report.txt").read_text(encoding="utf-8")
+
+    family, _, signals, _ = detect_family(url=NEUTRAL_URL, text_sample=text)
+
+    assert family == "accreditation"
+    assert signals["secondary_hint"] == 1
+    assert signals["secondary_hint_family_score"] > 0
+
+
+def test_annual_report_without_placement_sections_has_no_hint() -> None:
+    text = (FIXTURES / "annual_report_no_placement.txt").read_text(encoding="utf-8")
+
+    family, _, signals, _ = detect_family(url=NEUTRAL_URL, text_sample=text)
+
+    assert family == "accreditation"
+    assert "secondary_hint" not in signals
+
+
+def test_prospectus_with_fee_tables_resolves_fee_structure() -> None:
+    text = (FIXTURES / "prospectus_fees.txt").read_text(encoding="utf-8")
+
+    family, confidence, signals, reason = detect_family(url=NEUTRAL_URL, text_sample=text)
+
+    assert family == "fee_structure"
+    assert reason is None
+    assert signals["prospectus_fee_table_rows"] >= 3
+    assert signals["prospectus_intake_table_rows"] == 0
+    assert confidence > 0
+
+
+def test_prospectus_with_intake_tables_resolves_seat_matrix() -> None:
+    text = (FIXTURES / "prospectus_intake.txt").read_text(encoding="utf-8")
+
+    family, _, signals, _ = detect_family(url=NEUTRAL_URL, text_sample=text)
+
+    assert family == "seat_matrix"
+    assert signals["prospectus_intake_table_rows"] >= 3
+    assert signals["prospectus_fee_table_rows"] == 0
+
+
+def test_prospectus_without_tables_resolves_curriculum() -> None:
+    text = (FIXTURES / "prospectus_general.txt").read_text(encoding="utf-8")
+
+    family, _, signals, _ = detect_family(url=NEUTRAL_URL, text_sample=text)
+
+    assert family == "curriculum"
+    assert signals["prospectus_fee_table_rows"] == 0
+    assert signals["prospectus_intake_table_rows"] == 0
+
+
+def test_prospectus_pseudo_family_never_escapes_detection() -> None:
+    text = (FIXTURES / "prospectus_fees.txt").read_text(encoding="utf-8")
+
+    for _ in range(2):
+        family, _, _, _ = detect_family(url=NEUTRAL_URL, text_sample=text)
+        assert family in FAMILIES  # the shape chain must emit a real schema family
+
+
+def test_nirf_submission_classifies_accreditation_despite_body_noise() -> None:
+    # NIRF submissions carry fee and placement tables; the cover identity wins.
+    text = (FIXTURES / "nirf_submission.txt").read_text(encoding="utf-8")
+
+    family, _, signals, _ = detect_family(url=NEUTRAL_URL, text_sample=text)
+
+    assert family == "accreditation"
+    assert signals["title_decisive"] == 1
+
+
+# --- W5 precision guards: the negative corpus must stay abstained -------------
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "staff_circular.txt",
+        "tender_notice.txt",
+        "event_news_page.txt",
+        "convocation_notice.txt",
+        "exam_schedule.txt",
+        "noise_office_order.txt",
+        "fee_admin_order.txt",
+    ],
+)
+def test_negative_documents_never_classify(fixture: str) -> None:
+    text = (FIXTURES / fixture).read_text(encoding="utf-8")
+
+    family, _, signals, reason = detect_family(url=NEUTRAL_URL, text_sample=text)
+
+    assert family is None
+    assert reason == "family_undetected"
+    assert signals.get("title_decisive") is None
+
+
+def test_exam_registration_notification_still_classifies() -> None:
+    # Acceptance 2: examination schedules abstain *unless* they are
+    # registration notifications — the registration shape keeps its family.
+    text = (FIXTURES / "exam_registration_notification.txt").read_text(encoding="utf-8")
+
+    family, _, _, _ = detect_family(url=NEUTRAL_URL, text_sample=text)
+
+    assert family == "exam_notification"
+
+
+def test_fee_veto_cancels_every_text_derived_channel() -> None:
+    # The administrative-fee cover names "Fee Details" and "Annual fee" — all
+    # text-derived fee channels must be cancelled, not just the body tokens.
+    text = (FIXTURES / "fee_structure_cover.txt").read_text(encoding="utf-8")
+
+    fee = next(
+        item
+        for item in score_families(url=NEUTRAL_URL, text_sample=text)
+        if item.family == "fee_structure"
+    )
+
+    assert fee.score == 0.0
+    assert fee.signals["text_vetoed"] >= 1
+    assert fee.signals["text"] == 0
+    assert fee.signals["heading"] == 0
+    assert fee.signals["recurring"] == 0
+    assert fee.signals["title"] == 0
+
+
+def test_ambiguous_text_above_the_floor_returns_ambiguous_family() -> None:
+    # Two families tie above the floor with no cover identity: never a guess.
+    text = "tuition fee per annum as approved\nsanctioned intake number of seats as notified"
+
+    family, _, signals, reason = detect_family(url=NEUTRAL_URL, text_sample=text)
+
+    assert family is None
+    assert reason == "ambiguous_family"
+    assert signals["runner_up_family_score"] > 0
+
+
+def test_detection_is_deterministic_across_the_whole_corpus() -> None:
+    # Every decision, including the signal dict, is byte-stable across runs.
+    fixtures = sorted(FIXTURES.glob("*.txt"))
+    assert len(fixtures) >= 20
+
+    def decide() -> dict[str, tuple]:
+        out: dict[str, tuple] = {}
+        for fixture in fixtures:
+            text = fixture.read_text(encoding="utf-8")
+            out[fixture.name] = detect_family(url=NEUTRAL_URL, text_sample=text)
+        return out
+
+    first = decide()
+    second = decide()
+    assert first == second
 
 
 def test_rules_are_injectable_data() -> None:

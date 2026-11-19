@@ -35,6 +35,7 @@ from fmd.plan.roles import (
     ROLES,
     RoleRules,
     classify_content,
+    family_hints_from_structure,
     role_for,
 )
 from fmd.plan.rules import (
@@ -73,6 +74,7 @@ __all__ = [
     "classify_content",
     "collect_mentions",
     "detect_family",
+    "family_hints_from_structure",
     "is_current_version",
     "is_replannable_reason",
     "persist_plan",
