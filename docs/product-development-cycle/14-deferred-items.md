@@ -32,12 +32,20 @@ hotfix, because it is unbounded (no page cap, no time budget) and stalled a run 
 minutes. That is a **development-mode** setting, not the product policy.
 
 **Policy to implement (D18):**
-1. **One primary OCR engine: RapidOCR (PaddleOCR models) on GPU** — purpose-built, far cheaper
-   per page than a VLM, and the operator's preference. Qwen3-VL is demoted to an *evidence-only
-   fallback* for pages where RapidOCR's Devanagari output fails a measured chrF++ gate; it is not
-   a default. PaddleOCR-VL stays as an alternate. Docling's internal RapidOCR instance is never
-   left implicitly enabled — if used, it is the same engine, bounded, with recorded metadata.
-   One engine per page, one transcript, engine+version in the claim qualifier.
+1. **Primary OCR: PaddleOCR PP-OCRv5 server det+rec models, executed through RapidOCR on
+   onnxruntime-gpu.** Rationale: purpose-built detector+recogniser, permissive licence, GPU
+   batching, and it is the same model family RapidOCR wraps — so "RapidOCR vs PaddleOCR" was a
+   false choice: RapidOCR is the *runner*, PP-OCRv5 is the *model*. Table structure is NOT its
+   job; Docling/TableFormer keeps that. **Qwen3-VL-8B stays wired as a measured fallback** for
+   pages whose Devanagari CER/chrF++ fails the gate, and PaddleOCR-VL remains an alternate
+   full-pipeline engine. One engine per page, one transcript, engine+version+model ids in the
+   claim qualifier.
+
+   **This is a provisional preference, not a measured one.** The known gap: no published Hindi
+   accuracy for PP-OCRv5 vs Qwen3-VL on Indian institutional scans. It is settled in one
+   afternoon with `scripts/ocr_validate.py --ground-truth` on 5-10 real scans: compare CER and
+   chrF++ per engine. If PP-OCRv5 loses by >5 chrF++ on Devanagari, the fallback becomes the
+   default for Devanagari pages (mixed-engine per page, still one transcript each).
 2. **Never remove visibility.** Every scanned page records `bbox_granularity: block` plus the
    OCR engine + version in the claim qualifier, so a reviewer can always see what was read and
    by what. Aborted OCR is a visible `acquisition_budget_exceeded`, never a silent zero.
