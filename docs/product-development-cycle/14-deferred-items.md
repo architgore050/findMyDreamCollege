@@ -21,6 +21,33 @@ Items here are deliberately **not** being worked on now. They are blocked by GPU
 |---|---|---|---|
 | D17 | **Exam registration windows** — per exam, per cycle, registration open/close vs sitting date, with observed_at + TTL and supersession; closed ⇒ binary exclusion | A programme can be open while its required exam is closed; the applicant is then ineligible regardless of merit. Spec: `17-exam-registration-requirements.md` | Network for live notifications; **coding can proceed now** (schema/prompts/tests offline) |
 
+## A3. OCR / vision — must ship, currently dev-disabled (operator decision 2026-11-19)
+
+**Product requirement:** the tool must NOT ship without document vision. Image-only PDFs,
+table images, charts and scanned annexures are a large share of Indian institutional
+disclosures; without vision they route to a human queue and the evidence is simply missing.
+
+**Current state (dev):** Docling's *built-in* OCR (`RapidOCR`) is disabled by default via a
+hotfix, because it is unbounded (no page cap, no time budget) and stalled a run for 25+
+minutes. That is a **development-mode** setting, not the product policy.
+
+**Policy to implement (D18):**
+1. **One primary OCR engine: T2** (Qwen3-VL-8B via vLLM, block-level bboxes, Apache-2.0).
+   T2b (PaddleOCR-VL) stays as an alternate backend, CPU-only on this host. Docling's internal
+   RapidOCR is a **bounded fallback only** (`auto`), never the default — three engines producing
+   three transcripts of one page makes provenance unreproducible.
+2. **Never remove visibility.** Every scanned page records `bbox_granularity: block` plus the
+   OCR engine + version in the claim qualifier, so a reviewer can always see what was read and
+   by what. Aborted OCR is a visible `acquisition_budget_exceeded`, never a silent zero.
+3. **Bounded batches.** OCR validation runs on small batches (≤10 documents) first, with
+   `max_pages` + `max_seconds` per document and a stage budget; measure pages/min before any
+   bulk run. Re-enable only when the measured rate is acceptable.
+4. **Quality gate before shipping:** CER/chrF++ on real Hindi-header scans, table TEDS on
+   merged-cell seat/fee tables, and offset-resolvability 100% at block granularity. Evaluation
+   set from our own corpus, not synthetic pages.
+5. **Dev/prod switch is explicit**, not ambient: `T1.do_ocr` tri-state + `FMD_T2_URL` presence,
+   reported in `fmd llm doctor` and the run summary ("vision: on/off, engine, pages OCR'd").
+
 ## B. Needs stable network
 
 | ID | Item | Why it waits | Est. |
