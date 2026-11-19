@@ -507,6 +507,24 @@ institution_sites.params` and is overridable per deployment.
    hint. A registry-declared `extraction_family` always outranks it, and a
    heuristic Phase-B text can still outrank a *heuristic* family — the hint
    precedence is unchanged from the planner contract.
+5. **Classification note (W5, 2026-11-19 — family coverage).** The planner now
+   classifies the rich documents this section targets (annual reports,
+   prospectuses, NIRF/AQAR/SSR mirrors) from their own shapes; adapters need no
+   change. Two planner-side mechanisms complement the adapter hints above:
+   (a) `fmd/plan/roles.py → family_hints_from_structure()` maps file-name
+   shapes (`Annual-Report-2024.pdf`, `Prospectus-2025.pdf`, `Fee-Circular.pdf`,
+   `Seat-Matrix.pdf`, `AQAR/SSR/NIRF/IQAC`) to family *hints* — URL-tier
+   evidence below text, administrative filename shapes (tender, convocation,
+   exam schedule, news, office order) veto them, and the adapter `family:`
+   hints above remain reference-grade and outrank them; (b) a prospectus cover
+   resolves by its own tables (fee rows → `fee_structure`, intake rows →
+   `seat_matrix`, else `curriculum`) and an annual-report cover is
+   title-decisive `accreditation` with a `placement_report` signal hint when
+   placement sections fire. Negative guards are unchanged and pinned: staff
+   circulars, tender notices, event/news pages, convocation notices, exam
+   schedules and the "Fee for recognition … Research Centre" order never
+   classify. Details and the replan command: runbook §"Family coverage from
+   document shapes".
 
 Acceptance fixtures: `tests/fixtures/adapters/institution_site_evidence_listing_snippet.html`
 (seat/fee PDFs outrank news and galleries; the administrative-order URL gets no

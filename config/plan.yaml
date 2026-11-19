@@ -3,7 +3,8 @@
 # Phase A is cheap: URL, anchor text and file extension only. It either:
 #   * resolves a family above `min_score` with a `margin` over the runner-up, or
 #   * defers for text (`defer_for_text`) when the score is plausible but not
-#     confident, or
+#     confident — including when a single filename-shape family hint exists —
+#     or
 #   * abstains without acquiring text when the score is below `acquire_floor`.
 # Every threshold is data; fmd/plan/rules.py owns the token vocabulary.
 #
@@ -12,10 +13,21 @@
 # re-classifies the family and entity. Phase B is lexical/er only: no model call.
 #
 # Precedence is fixed in code and not configurable: registry-declared family >
-# Phase B text evidence > Phase A URL evidence. Phase B never downgrades a
-# confident registry family.
+# Phase B text evidence > Phase A URL evidence > filename-shape hints
+# (fmd/plan/roles.py, structure only). A declared family is never reconsidered;
+# a hint never outranks the document's own text; two hints are a refusal, not a
+# guess. Phase B never downgrades a confident registry family.
+#
+# Signal channels scored per family (weights live in
+# fmd/plan/rules.py → SignalWeights): url, anchor, extension, first-page text,
+# heading-shaped lines, the title line (cover identity — a cover that names
+# exactly one family decides the document), recurring tokens, and the
+# prospectus shape chain (cover says prospectus → fee table rows → fee_structure,
+# else intake table rows → seat_matrix, else curriculum). Negative-context
+# phrases ("Fee for recognition … Research Centre") veto the channels they
+# appear in; every decision records the channels that fired.
 
-version: "1"
+version: "2"
 
 phase_a:
   # Minimum winning score for a family to be accepted from URL/anchor alone.
@@ -23,6 +35,8 @@ phase_a:
   # Minimum separation from the runner-up; a thinner lead defers for text.
   margin: 0.10
   # Below this score the document is obvious noise: abstain, acquire nothing.
+  # A single filename-shape family hint lifts the score to the hint's weight
+  # (rules.SignalWeights.structure), so the text is still bought.
   acquire_floor: 0.15
 
 phase_b:
@@ -32,3 +46,8 @@ phase_b:
   # Same acceptance rule as Phase A, applied to the text signals.
   min_score: 0.45
   margin: 0.10
+  # Occurrences before a recurring token counts (rules.SignalWeights).
+  recurring_min: 3
+  # Prospectus shape chain: fee/intake table rows needed to resolve the
+  # document to fee_structure / seat_matrix.
+  table_min_rows: 3

@@ -21,6 +21,15 @@ No host, institution or source id is hardcoded (invariant 7).
 An explicit family — declared by the registry or carried by discovery — always
 wins: if a document was discovered *as* a seat matrix, it is evidence whatever
 its URL looks like.
+
+W5 family coverage adds the weakest classification tier here:
+:func:`family_hints_from_structure` maps the *file name's shape*
+(``Annual-Report-2024.pdf``, ``prospectus-2025.pdf``, ``SeatMatrix.xlsx`` …) to
+a family hint. Structure only — no text is read, no institution is named — and
+administrative shapes (tender, convocation, exam schedule, news, office order)
+veto every hint. The planner records the hints on every decision and uses them
+only when registry, text and URL token evidence are all silent, so they can
+never override a declared family and never outrank the document's own text.
 """
 
 from __future__ import annotations
@@ -82,6 +91,77 @@ DEFAULT_DOCUMENT_CONTENT_TYPES: tuple[str, ...] = (
     "application/rtf",
 )
 
+#: Filename-shape → family hints (W5 family coverage). Structure only: the
+#: patterns run against the URL's file name, never against document text, so a
+#: hint is URL-tier evidence — weaker than text, never overriding a declared
+#: family. Administrative shapes veto every hint: a tender notice, a
+#: convocation circular or an exam date sheet must never gain a family from its
+#: file name.
+DEFAULT_FAMILY_HINT_PATTERNS: dict[str, tuple[str, ...]] = {
+    "accreditation": (
+        r"annual[-_ ]?report",
+        r"self[-_ ]?study",
+        r"(?<![a-z])aqar",
+        r"(?<![a-z])ssr",
+        r"(?<![a-z])nirf",
+        r"(?<![a-z])iqac",
+    ),
+    "placement_report": (r"placement",),
+    # The administrative-fee case ("Fee for recognition … Research Centre")
+    # carries "fee" but is not a fee structure; the fee family carries its own
+    # negative patterns below.
+    "fee_structure": (
+        r"fee[-_ ]?structure",
+        r"fee[-_ ]?schedule",
+        r"fee[-_ ]?circular",
+        r"fee[-_ ]?notification",
+        r"fee[-_ ]?order",
+        r"fees?[\s_-]*&[\s_-]*other",
+    ),
+    "seat_matrix": (
+        r"seat[-_ ]?matrix",
+        r"sanctioned[-_ ]?intake",
+        r"intake[-_ ]?(capacity|statement|position|details)",
+    ),
+    # A prospectus is a multi-family bundle (fees, intake, curriculum); its
+    # tables decide (fmd.plan.rules.resolve_prospectus_shape) once text is
+    # read. Until then the shape's default branch is curriculum.
+    "curriculum": (r"prospectus", r"admission[-_ ]?brochure", r"syllabus", r"curriculum"),
+    # Deliberately none for exam_notification: a schedule or an admit card is
+    # not evidence, and Phase A deferral already handles registrations.
+}
+
+#: Family-specific hint vetoes (same phrases as fmd.plan.rules).
+DEFAULT_FAMILY_HINT_NEGATIVES: dict[str, tuple[str, ...]] = {
+    "fee_structure": (
+        r"fee[-_ ]?for[-_ ]?recognition",
+        r"recognition[-_ ]?of[-_ ]?institution",
+        r"research[-_ ]?cent(re|er)",
+        r"affiliation[-_ ]?fee",
+        r"inspection[-_ ]?fee",
+    )
+}
+
+#: Administrative document shapes: no family hint may fire for these, whatever
+#: else the file name contains. Word-boundary anchored so ``newsletter`` or
+#: ``Seventh`` cannot trip them.
+GLOBAL_HINT_NEGATIVES: tuple[str, ...] = (
+    r"\btender",
+    r"\brecruitment",
+    r"\bconvocation",
+    r"admit[-_ ]?card",
+    r"hall[-_ ]?ticket",
+    r"date[-_ ]?sheet",
+    r"exam[-_ ]?schedule",
+    r"examination[-_ ]?schedule",
+    r"\btimetable",
+    r"office[-_ ]?order",
+    r"\bnews\b",
+    r"\bevents?\b",
+    r"\bgallery\b",
+    r"press[-_ ]?release",
+)
+
 
 class RoleConfigError(ValueError):
     """The registry declares a role the schema does not allow."""
@@ -112,6 +192,14 @@ class RoleRules:
     document_content_types: tuple[str, ...] = DEFAULT_DOCUMENT_CONTENT_TYPES
     structured_url_patterns: tuple[str, ...] = ()
     evidence_url_patterns: tuple[str, ...] = ()
+    #: Filename-shape family hints (W5). Document structure only — never text.
+    family_hints: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: dict(DEFAULT_FAMILY_HINT_PATTERNS)
+    )
+    family_hint_negatives: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: dict(DEFAULT_FAMILY_HINT_NEGATIVES)
+    )
+    global_hint_negatives: tuple[str, ...] = GLOBAL_HINT_NEGATIVES
 
     @classmethod
     def from_source(cls, source: object | None) -> RoleRules:
@@ -126,10 +214,16 @@ class RoleRules:
                         f"params.document_role.{key} = {value!r} is not one of {ROLES}"
                     )
                 role_map[str(key)] = role
+        family_hints = dict(DEFAULT_FAMILY_HINT_PATTERNS)
+        raw_hints = params.get("family_hints") or {}
+        if isinstance(raw_hints, Mapping):
+            for family, patterns in raw_hints.items():
+                family_hints[str(family)] = tuple(str(value) for value in patterns)
         return cls(
             role_map=role_map,
             structured_url_patterns=tuple(params.get("structured_url_patterns") or ()),
             evidence_url_patterns=tuple(params.get("evidence_url_patterns") or ()),
+            family_hints=family_hints,
         )
 
     @property
@@ -191,8 +285,76 @@ def is_extractable_role(role: str | None) -> bool:
     return role in (None, ROLE_EVIDENCE)
 
 
+def _filename_of(url: str) -> str:
+    return urlsplit(url).path.rsplit("/", 1)[-1] if url else ""
+
+
+def _any_pattern(
+    patterns: tuple[str, ...] | Mapping[str, tuple[str, ...]],
+    filename: str,
+    family: str | None = None,
+) -> bool:
+    if family is not None:
+        if not isinstance(patterns, Mapping):
+            return False
+        patterns = patterns.get(family, ())
+    for pattern in patterns:
+        try:
+            if re.search(pattern, filename, re.IGNORECASE):
+                return True
+        except re.error:
+            # A bad pattern is a registry typo: it must never classify, and it
+            # must never crash a planning run. Skip it.
+            continue
+    return False
+
+
+def family_hints_from_structure(
+    *,
+    url: str,
+    content_type: str | None = None,
+    source: object | None = None,
+    rules: RoleRules | None = None,
+) -> tuple[str, ...]:
+    """Families hinted by the document's *structure*: its file name only.
+
+    This is URL-tier evidence, deliberately weaker than any text signal:
+
+    * it never fires for a non-document (an inventory payload or a nav page is
+      not an annual report because a directory is named ``reports``);
+    * administrative shapes (tender, convocation, exam schedule, office order,
+      news/event) veto every hint;
+    * family-specific vetoes apply on top (the known administrative-fee case
+      carries ``fee`` in its file name but is not a fee structure);
+    * the result is in declaration order and duplicates are impossible.
+
+    The planner records hints on every decision and uses them only when
+    registry, text and URL token evidence are all silent.
+    """
+    rules = rules or RoleRules.from_source(source)
+    if classify_content(url=url, content_type=content_type, rules=rules) != "document":
+        return ()
+    filename = _filename_of(url)
+    if not filename:
+        return ()
+    lowered = filename.lower()
+    if _any_pattern(rules.global_hint_negatives, lowered):
+        return ()
+    hints: list[str] = []
+    for family in rules.family_hints:
+        if not _any_pattern(rules.family_hints, lowered, family):
+            continue
+        if _any_pattern(rules.family_hint_negatives, lowered, family):
+            continue
+        hints.append(family)
+    return tuple(hints)
+
+
 __all__ = [
+    "DEFAULT_FAMILY_HINT_NEGATIVES",
+    "DEFAULT_FAMILY_HINT_PATTERNS",
     "DEFAULT_ROLE_MAP",
+    "GLOBAL_HINT_NEGATIVES",
     "ROLES",
     "ROLE_EVIDENCE",
     "ROLE_INVENTORY",
@@ -202,6 +364,7 @@ __all__ = [
     "RoleConfigError",
     "RoleRules",
     "classify_content",
+    "family_hints_from_structure",
     "is_extractable_role",
     "role_for",
 ]

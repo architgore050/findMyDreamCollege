@@ -1895,6 +1895,114 @@ smoke (userspace Postgres 16.2, committed registry): a recovery-style document
 `plan_reason='plan_v1'`, `extraction_family='placement_report'`, entity linked,
 with a `plan.candidates: 1, planned: 1, linked: 1` row in `pipeline_runs`.
 
+## Family coverage from document shapes (2026-11-19, W5 family-coverage)
+
+### The problem, measured
+
+The measured crawl stood at 135 snapshots with **83 `abstained /
+family_undetected`** — predominantly annual reports, prospectuses and NIRF
+submissions, i.e. documents that *do* contain accreditation, placement and fee
+evidence. Only 47 documents were `linked` (4 more linked-but-unextracted): the
+pipeline was starved by classification, not by crawling. The planner's text
+vocabulary could not score these documents' shapes, so the richest corpus was
+discarded before extraction.
+
+### The signal channels (`fmd/plan/rules.py`)
+
+Per family, all channels contribute their weight independently and every fired
+channel is recorded in the decision's `signals` (weights in
+`SignalWeights`, thresholds in `config/plan.yaml`):
+
+| Channel | Evidence | Weight |
+|---|---|---|
+| `url` / `anchor` / `extension` | Phase A as before | 0.35 / 0.45 / 0.20 |
+| `text` | first-page token matches (T0 sample, bounded) | 0.30 |
+| `heading` | heading-shaped lines ("Annual Report 2023-24", "5. PLACEMENTS") | 0.35 |
+| `title` | the cover line that names a family (scan ≤ 5 headings) | 0.35 |
+| `recurring` | a token occurring ≥ `phase_b.recurring_min` (3) times | 0.20 |
+| `structure` | filename-shape hint (`fmd/plan/roles.py`), planner-only tier | 0.30 |
+
+**Cover identity is decisive.** The title line — the first heading-shaped cover
+line that names a family — decides the document outright
+(`signals['title_decisive']=1`): an annual report that *says* "Annual Report"
+is accreditation even when its body carries fee tables. A prospectus is the one
+cover that does not name a single family, so it resolves through its own shape
+chain instead: prospectus identity in the cover → fee-table rows
+(≥ `phase_b.table_min_rows`) → `fee_structure`, else intake-table rows →
+`seat_matrix`, else `curriculum`. The chain records
+`prospectus_fee_table_rows` / `prospectus_intake_table_rows`; the pseudo-family
+never escapes `detect_family`.
+
+### The intended classification (pinned by `tests/test_plan_family_coverage.py`)
+
+| Document type | Family |
+|---|---|
+| Annual report | `accreditation`, + `signals['secondary_hint']` (`placement_report`) when placement sections fire |
+| Prospectus / admission brochure | `fee_structure` (fee tables) → `seat_matrix` (intake tables) → `curriculum` |
+| NIRF submission / AQAR / SSR / IQAC report | `accreditation` |
+| Fee circular / fee structure | `fee_structure` |
+| Seat matrix / intake statement | `seat_matrix` |
+
+### Precision guards (each with a fixture and a test)
+
+These must never classify; they stay `family_undetected`:
+
+staff circulars, tender notices, event/news pages, convocation notices,
+examination schedules (a *registration* notification still classifies
+`exam_notification`), and the known administrative case
+"Fee for recognition … Research Centre" — whose fee veto now cancels **every**
+text-derived channel (`text`, `heading`, `recurring`, `title`), not just body
+tokens. Administrative filename shapes (tender, convocation, admit card, date
+sheet, timetable, office order, news/event, press release) veto all structure
+hints. Ambiguity is a refusal, never a coin flip: an ambiguous top-2 within
+`margin` (0.10) returns `ambiguous_family`, and a filename hinting two families
+(`prospectus-fee-structure-2025.pdf`) records
+`structure_hints_ambiguous` and abstains.
+
+### The structure-hint tier (`fmd/plan/roles.py`)
+
+`family_hints_from_structure()` maps the file name's shape
+(`Annual-Report-2024.pdf` → accreditation, `Prospectus-2025.pdf` → curriculum,
+`Fee-Circular-2025.pdf` → fee_structure, `Seat-Matrix-2025.xlsx` → none —
+structured payloads are inventory by default) to family hints. Structure only:
+no text is read, no institution is named. The planner records the hints on
+every decision (`signals['structure_hints']`) and uses them only when registry,
+text and URL token evidence are all silent: at Phase A a single hint converts a
+below-floor abstention into `defer_for_text` (one bounded T0 read is worth it);
+at Phase B a single hint is the last fallback (`signals['fallback']='structure_hint'`).
+Precedence is unchanged: **registry-declared family > Phase B text evidence >
+Phase A URL evidence > structure hints**, and a declared family is never
+reconsidered by any of the new signals.
+
+### Planner version 2 — replanning the abstained set
+
+`config/plan.yaml → version` is now `"2"`. The 83 rows were stamped
+`family_undetected|plan_v1`, so one pass re-decides them:
+
+```bash
+export DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd
+cd packages/pipeline
+uv run fmd plan --dry-run   # plan.candidates is the remaining debt
+uv run fmd plan             # abstentions/stale stamps are replanned; human decisions untouched
+uv run fmd plan --force     # if any stale crawl-era rows remain
+```
+
+`--force` replans planner-shaped reasons at older stamps only — rows stamped at
+the current version and human-review prose are skipped (`plan.skipped_current`).
+Expected shape of the run after replanning: `plan.reason.family_undetected`
+falls, `plan.family.accreditation` and the prospectus-resolved
+`fee_structure`/`seat_matrix`/`curriculum` counts rise, and the negative corpus
+(staff/tender/news/convocation/schedule) stays in `plan.reason.family_undetected`
+by design — those documents are not evidence.
+
+### Tests (all offline; DB tests need a live `DATABASE_URL`)
+
+`tests/test_plan.py` (channels, veto, determinism corpus-wide, ambiguity),
+`tests/test_plan_family_coverage.py` (the matrix above at planner level,
+precedence, hint tiers), `tests/test_plan_phases.py` (Phase A deferral →
+Phase B decision per representative shape), `tests/test_plan_roles.py`
+(filename-shape hints and their vetoes). Golden eval unchanged: provenance 1.0.
+
 ## `hard_pdf` abstention semantics (2026-11-18)
 
 The first pass recorded `unresolved_provider` ×3. That code means "the

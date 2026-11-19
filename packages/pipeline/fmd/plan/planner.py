@@ -24,7 +24,12 @@ from fmd.er.service import resolve
 from fmd.er.types import Alias, EntityCandidate, Mention, Resolution
 from fmd.extract.schemas import FAMILIES
 from fmd.plan.mentions import collect_mentions
-from fmd.plan.roles import ROLE_EVIDENCE, is_extractable_role, role_for
+from fmd.plan.roles import (
+    ROLE_EVIDENCE,
+    family_hints_from_structure,
+    is_extractable_role,
+    role_for,
+)
 from fmd.plan.rules import DEFAULT_RULES, PlanRules, detect_family, normalise, score_families
 
 PlanState = Literal[
@@ -62,6 +67,10 @@ class PhaseThresholds:
     phase_b_margin: float
     text_sample_chars: int
     max_headings: int
+    #: Recurrence count before a recurring token counts (rules.py W5).
+    recurring_min: int
+    #: Table rows needed before a prospectus resolves to fee/seat (rules.py W5).
+    table_min_rows: int
 
     @classmethod
     def from_config(cls, config: Any | None, rules: PlanRules) -> PhaseThresholds:
@@ -75,6 +84,8 @@ class PhaseThresholds:
                 phase_b_margin=weights.margin,
                 text_sample_chars=4000,
                 max_headings=8,
+                recurring_min=weights.recurring_min,
+                table_min_rows=weights.table_min_rows,
             )
         phase_a = config.phase_a
         phase_b = config.phase_b
@@ -86,6 +97,10 @@ class PhaseThresholds:
             phase_b_margin=float(phase_b.margin),
             text_sample_chars=int(phase_b.text_sample_chars),
             max_headings=int(phase_b.max_headings),
+            # New W5 keys are optional in plan.yaml (the typed config allows
+            # extras); a missing key falls back to the rule weights.
+            recurring_min=int(getattr(phase_b, "recurring_min", 0) or weights.recurring_min),
+            table_min_rows=int(getattr(phase_b, "table_min_rows", 0) or weights.table_min_rows),
         )
 
 
@@ -247,6 +262,7 @@ class DocumentPlanner:
             text_sample=sample,
             anchor_text=anchor_text,
             phase=resolved_phase,
+            content_type=getattr(document, "content_type", None),
         )
         signals["phase"] = resolved_phase
 
@@ -343,6 +359,14 @@ class DocumentPlanner:
         )
 
     # ------------------------------------------------------------------ internals
+    def _structure_hints(
+        self, *, url: str, content_type: str | None, source: Any | None
+    ) -> tuple[str, ...]:
+        """Filename-shape family hints (roles.py); document structure only."""
+        return family_hints_from_structure(
+            url=url, content_type=content_type, source=source
+        )
+
     def _family(
         self,
         *,
@@ -352,6 +376,7 @@ class DocumentPlanner:
         text_sample: str | None,
         anchor_text: str | None,
         phase: Phase,
+        content_type: str | None = None,
     ) -> tuple[str | None, FamilySource, float, dict[str, Any], str | None]:
         declared = declared_family(source)
         if declared is None and family_hint:
@@ -360,27 +385,37 @@ class DocumentPlanner:
         else:
             family_source = "registry" if declared else "none"
 
+        # Document-structure hints are the weakest tier: recorded on every
+        # decision, used only when registry, text and URL token evidence are
+        # all silent. A declared family is never reconsidered by them.
+        hints = self._structure_hints(url=url, content_type=content_type, source=source)
+        signals: dict[str, Any] = {"structure_hints": list(hints)}
+
         if declared:
             if declared not in FAMILIES:
                 # A registry/ref typo must fail loudly: extracting against an
                 # unknown schema would either crash or fabricate a family.
-                return None, family_source, 0.0, {}, f"unsupported_family:{declared}"
+                return None, family_source, 0.0, signals, f"unsupported_family:{declared}"
             # Precedence invariant: a declared family is never reconsidered,
             # downgraded or replaced by later text evidence.
-            return declared, family_source, 1.0, {"declared": declared}, None
+            signals["declared"] = declared
+            return declared, family_source, 1.0, signals, None
 
         if phase == "b":
             # Phase B reads text only. The URL was Phase A's evidence; letting it
             # vote again would let a stale URL token outrank the document text.
-            family, score, signals, reason = detect_family(
+            family, score, detected, reason = detect_family(
                 url="",
                 anchor_text=None,
                 text_sample=text_sample,
                 rules=self.rules,
                 min_score=self.thresholds.phase_b_min_score,
                 margin=self.thresholds.phase_b_margin,
+                recurring_min=self.thresholds.recurring_min,
+                table_min_rows=self.thresholds.table_min_rows,
             )
-            signals = {**signals, "phase_b_score": score}
+            signals.update(detected)
+            signals["phase_b_score"] = score
             if family is not None:
                 return family, "heuristic", score, signals, None
             # Text found nothing: Phase A URL evidence is the weaker fallback.
@@ -391,26 +426,46 @@ class DocumentPlanner:
                 min_score=self.thresholds.phase_a_min_score,
                 margin=self.thresholds.phase_a_margin,
             )
-            signals = {**signals, **{f"phase_a_{k}": v for k, v in url_signals.items()}}
+            signals.update({f"phase_a_{k}": v for k, v in url_signals.items()})
             if url_family is not None:
                 signals["fallback"] = "phase_a_url"
                 return url_family, "heuristic", url_score, signals, None
+            # URL token evidence is silent too (or below its floor): the
+            # filename shape is the last, weakest tier. One hinted family is an
+            # answer; two are a refusal, never a guess.
+            if len(hints) == 1 and (url_reason or "family_undetected") == "family_undetected":
+                signals["fallback"] = "structure_hint"
+                signals["structure_family"] = hints[0]
+                return hints[0], "heuristic", self.rules.weights.structure, signals, None
+            if len(hints) > 1:
+                signals["structure_hints_ambiguous"] = 1
             signals["best_score"] = score
             return None, "none", score, signals, reason or url_reason
 
-        family, score, signals, reason = detect_family(
+        family, score, detected, reason = detect_family(
             url=url,
             anchor_text=anchor_text,
             rules=self.rules,
             min_score=self.thresholds.phase_a_min_score,
             margin=self.thresholds.phase_a_margin,
         )
+        signals.update(detected)
         # The raw score survives even when detection abstains, because the
         # acquisition floor is a different question from acceptance.
         best = score_families(
             url=url, anchor_text=anchor_text, rules=self.rules
         )
-        signals["best_score"] = best[0].score if best else 0.0
+        best_score = best[0].score if best else 0.0
+        # A single filename hint is worth acquiring text for: it lifts the
+        # plausible-but-unconfident score above the acquire floor so Phase A
+        # defers instead of abstaining. It never declares the family itself.
+        if family is None and (reason or "family_undetected") == "family_undetected":
+            if len(hints) == 1:
+                signals["structure_hint"] = hints[0]
+                best_score = max(best_score, self.rules.weights.structure)
+            elif len(hints) > 1:
+                signals["structure_hints_ambiguous"] = 1
+        signals["best_score"] = best_score
         return family, "heuristic" if family else "none", score, signals, reason
 
     def _candidate_universe(self) -> list[EntityCandidate]:
