@@ -1,12 +1,16 @@
 # Router profile for each acquisition tier. Thresholds, backend names and the
 # anomaly policy live in config/acquire.yaml (registry-driven, brief §9).
 #
-# T0/T1 are bulk extraction; T2/T2b need the harder-PDF profile; T3 is a human
-# queue and never calls a model, so its profile is only a stable placeholder.
+# T2/T2b are OCR *acquisition* stages: they return text (RapidOCR/paddle), so
+# claim extraction is a text task on `bulk_extract` — the local text model.
+# They must never be sent to `hard_pdf`, which is the optional hosted *vision*
+# profile (unconfigured by default → `vision_unavailable`). T0/T1 are also
+# bulk extraction. T3 is a human queue and never calls a model, so its profile
+# is only a stable placeholder.
 
 profiles:
   T0: bulk_extract
   T1: bulk_extract
-  T2: hard_pdf
-  T2b: hard_pdf
+  T2: bulk_extract
+  T2b: bulk_extract
   T3: hard_pdf

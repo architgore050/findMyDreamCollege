@@ -817,6 +817,19 @@ green line: `rapidocr_missing`, `onnxruntime_missing`, `models_missing`,
 pulls the OCR stack; a package that was synced without the extra reports
 `unavailable:rapidocr_missing`.
 
+`backends.T2.models.artifacts_root` defaults to `data/rapidocr-models` (the
+prefetch target) and a relative root resolves against the repository checkout,
+not the process cwd. `FMD_RAPIDOCR_MODELS` still overrides it. This is the same
+value `fmd llm doctor` and the T2 runner read, so a green doctor line means the
+tier can resolve the same files.
+
+T2/T2b are OCR *acquisition* stages and return text; claim extraction routes
+them to `bulk_extract` (the local text model). They are never sent to
+`hard_pdf`, which is the optional hosted vision profile and degrades with
+`vision_unavailable` when unconfigured. A scan whose T1/Docling pass returns
+empty text escalates to T2, and a T2 failure on a sparse scan parks it in T3
+(`ocr_unavailable_sparse_scan`) instead of publishing page-number "text".
+
 Missing artifacts are a named failure (`models_missing: … prefetch with uv run
 python scripts/ocr_validate.py --prefetch`), never a download at serve time.
 A missing runner is `engine_not_installed: … uv pip install "rapidocr>=3.10"

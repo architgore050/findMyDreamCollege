@@ -167,6 +167,42 @@ def test_full_measurement_against_a_real_text_layer(
     assert payload["documents_with_ground_truth"] == 1
 
 
+def test_explicit_doc_runs_without_the_ground_truth_flag(
+    ov: Any, monkeypatch: pytest.MonkeyPatch, sample_pdf: bytes, capsys
+) -> None:
+    """``--engine … --doc … --pages …`` is a run, not an argparse help dump."""
+    doc = ov.GroundTruthDoc(
+        doc_id=61, name="doc 61", pages=(1,), data=sample_pdf
+    )
+    monkeypatch.setattr(ov, "load_ground_truth_docs", lambda **kwargs: [doc])
+
+    class Engine:
+        name = "rapidocr"
+
+        def run(self, data: bytes, pages: Any) -> list:
+            return [
+                ov.PageResult(
+                    page_no=p, text=ov._page_text_layer(data, p), seconds=0.01
+                )
+                for p in pages
+            ]
+
+    monkeypatch.setattr(ov, "build_engines", lambda requested: ({"rapidocr": Engine()}, {}))
+    rc = ov.main(["--engine", "rapidocr", "--doc", "61", "--pages", "1", "--json"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert '"documents_with_ground_truth": 1' in out.out
+    assert "usage:" not in out.out
+    assert "single-document run" in out.err
+
+
+def test_no_mode_still_prints_help(ov: Any, capsys) -> None:
+    rc = ov.main([])
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "usage:" in out.out
+
+
 def argparse_namespace() -> Any:
     import argparse
 

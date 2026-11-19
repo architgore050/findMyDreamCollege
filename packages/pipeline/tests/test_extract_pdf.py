@@ -238,4 +238,7 @@ def test_tier_policy_thresholds_come_from_the_registry() -> None:
     acquire = policy.acquire
     assert policy.min_chars_per_page == acquire.tiers.text_min_chars_per_page
     assert policy.adjudication_sample_rate == acquire.tiers.adjudication_sample_rate
-    assert policy.profile_for("T2") == "hard_pdf"
+    # OCR tiers return text: claim extraction is a text task on the local
+    # model, never the optional hosted vision profile (`hard_pdf`).
+    assert policy.profile_for("T2") == "bulk_extract"
+    assert policy.profile_for("T2b") == "bulk_extract"
