@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from fmd.acquire.types import PageSpan
 from fmd.config import Registry, get_registry
 from fmd.config.models import ModelsConfig, ProviderConfig
 from fmd.db.repositories import (
@@ -29,6 +30,7 @@ from fmd.extract.chunking import (
     ChunkingConfig,
     ChunkResume,
     ContextExceeded,
+    TextWindow,
     chunk_failed_code,
     claim_keys_record,
     classify_failure,
@@ -242,6 +244,8 @@ class ExtractPipeline:
             observed_at=observed_at,
             default_confidence=self.default_confidence,
             tables=doc.tables,
+            pages=doc.page_map or None,
+            sections=_doc_sections(doc),
         )
         adjudications = self._adjudicate(validation.claims, doc.text)
 
@@ -407,6 +411,7 @@ class ExtractPipeline:
                     claims_key=[],
                 )
                 continue
+            window_pages, window_sections = _window_scope_bounds(doc, window)
             validation = validate_document(
                 payload,
                 window.text,
@@ -416,6 +421,8 @@ class ExtractPipeline:
                 observed_at=observed_at,
                 default_confidence=self.default_confidence,
                 tables=doc.tables,
+                pages=window_pages,
+                sections=window_sections,
             )
             window_adjudications = self._adjudicate(validation.claims, window.text)
             adjudications.extend({**item, "window": window.index} for item in window_adjudications)
@@ -617,6 +624,57 @@ class ExtractPipeline:
             {"field": item.get("field"), "verdict": verdict.model_dump()}
             for item, verdict in decisions
         ]
+
+
+def _doc_sections(doc: ExtractedDoc) -> tuple[Any, ...] | None:
+    """The document's printed heading blocks, when acquisition derived any."""
+    if doc.canonical is None or not doc.canonical.sections:
+        return None
+    return doc.canonical.sections
+
+
+def _window_scope_bounds(
+    doc: ExtractedDoc, window: TextWindow
+) -> tuple[list[PageSpan] | None, list[Any] | None]:
+    """Window-relative page/section bounds for the chunked validation path.
+
+    Validation resolves against the window's verbatim slice, so every bound is
+    clipped to the window and shifted by its start; the claims' spans are
+    window-relative until ``to_absolute_offsets`` shifts them (the qualifier's
+    ``scope_char_start``/``scope_char_end`` shift with it). A section counts
+    only when its printed heading lies fully inside the window: a heading the
+    model never saw cannot scope a quote, so a section that started in an
+    earlier window is dropped, never clipped at the heading.
+    """
+    pages: list[PageSpan] = []
+    for span in doc.page_map:
+        start = max(span.char_start, window.char_start)
+        end = min(span.char_end, window.char_end)
+        if end > start:
+            pages.append(
+                PageSpan(
+                    page=span.page,
+                    char_start=start - window.char_start,
+                    char_end=end - window.char_start,
+                )
+            )
+    sections: list[Any] = []
+    if doc.canonical is not None:
+        for section in doc.canonical.sections:
+            if (
+                window.char_start <= section.heading_char_start
+                and section.heading_char_end <= window.char_end
+            ):
+                sections.append(
+                    replace(
+                        section,
+                        heading_char_start=section.heading_char_start - window.char_start,
+                        heading_char_end=section.heading_char_end - window.char_start,
+                        char_start=section.char_start - window.char_start,
+                        char_end=min(section.char_end, window.char_end) - window.char_start,
+                    )
+                )
+    return (pages or None), (sections or None)
 
 
 def _attach_bbox_provenance(claim: ClaimCreate, doc: ExtractedDoc) -> ClaimCreate:

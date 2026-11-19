@@ -133,13 +133,14 @@ def seed_span(view: ClaimView, *, chars: int) -> tuple[int, int]:
     """The span a claim's window is built around.
 
     Normally the claim span. When the claim carries row context, the span grows
-    to cover the context anchor and the row itself, so the verifier sees the
-    row it is asked to judge — but never past ``chars``: a block wider than the
-    configured window falls back to the quote span (the context still travels
-    in the payload text, only its position is lost).
+    to cover the context anchor and the row itself; when it was resolved by
+    page or section scope (W7 span-scope), the span grows to cover that scope
+    instance — never past ``chars``: a block wider than the configured window
+    falls back to the quote span (the scope still travels in the payload text,
+    only its position is lost).
     """
     start, end = view.char_start, view.char_end
-    for span in (view.context_span, view.row_span):
+    for span in (view.context_span, view.row_span, view.scope_span):
         if span is None:
             continue
         lo, hi = span
@@ -184,8 +185,11 @@ def field_payload(view: ClaimView) -> dict[str, Any]:
     ``expected`` is always present and may be ``null`` when the predicate
     registry does not declare a type; ``description`` (verify@v3) carries the
     registry's definition of the predicate, scope included, and is omitted
-    when the registry does not know the predicate. The claimed value is never
-    included.
+    when the registry does not know the predicate. ``resolution_scope`` and
+    ``page`` (W7 span-scope) record how the extractor disambiguated the quote
+    when no row context exists (a page- or section-scoped quote on a long
+    document is a resolved location, not a suspicious bare quote). The claimed
+    value is never included.
     """
     payload: dict[str, Any] = {
         "key": view.key,
@@ -201,6 +205,10 @@ def field_payload(view: ClaimView) -> dict[str, Any]:
         payload["row_label"] = view.row_label
     if view.column_header:
         payload["column_header"] = view.column_header
+    if view.resolution_scope:
+        payload["resolution_scope"] = view.resolution_scope
+    if view.scope_page is not None:
+        payload["page"] = view.scope_page
     return payload
 
 

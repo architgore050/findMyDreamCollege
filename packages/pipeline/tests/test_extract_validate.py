@@ -6,7 +6,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from fmd.extract.schemas import ExtractedField, FeeStructure, PlacementReport
+from fmd.acquire.canonical import TextBlock, build_canonical
+from fmd.acquire.types import PageSpan
+from fmd.extract.schemas import ExtractedField, FeeStructure, PlacementReport, SeatMatrix
 from fmd.extract.validate import (
     Bands,
     Rejection,
@@ -493,3 +495,115 @@ def test_bands_come_from_yaml_not_python() -> None:
     assert "INR" in bands.currencies
     assert "count" in bands.units
     assert bands.band("placement.rate").maximum == 1
+
+
+# ------------------------------------------------------------------ W7 resolution scope
+
+
+def test_document_scoped_claims_record_the_scope_and_the_page() -> None:
+    pages = [PageSpan(page=1, char_start=0, char_end=len(TEXT))]
+    result = validate_document(
+        placement(),
+        TEXT,
+        extraction_id=7,
+        entity_id=11,
+        observed_at=OBSERVED,
+        pages=pages,
+    )
+
+    assert result.rejections == []
+    for claim in result.claims:
+        assert claim.qualifier["resolution_scope"] == "document"
+        assert claim.qualifier["disambiguation"] == "unique"
+        assert claim.qualifier["scope_page_no"] == 1
+    outcome = outcome_for(result, "eligible_count")
+    assert outcome.scope == "document"
+    assert outcome.char_start is not None
+    assert TEXT[outcome.char_start : outcome.char_end] == outcome.quote
+
+
+def test_claims_record_the_page_their_span_sits_on() -> None:
+    text = TEXT + "Highest package: INR 600000 per annum\n"
+    pages = [
+        PageSpan(page=1, char_start=0, char_end=len(TEXT)),
+        PageSpan(page=2, char_start=len(TEXT), char_end=len(text)),
+    ]
+    result = validate_document(
+        placement(highest_package=field("Highest package: INR 600000 per annum")),
+        text,
+        extraction_id=7,
+        entity_id=11,
+        observed_at=OBSERVED,
+        pages=pages,
+    )
+
+    assert result.rejections == []
+    by_page = {
+        claim.predicate: claim.qualifier["scope_page_no"] for claim in result.claims
+    }
+    assert by_page["placement.eligible_count"] == 1
+    assert by_page["salary.highest_package"] == 2
+
+
+def test_repaired_claims_still_record_their_scope_and_page() -> None:
+    pages = [PageSpan(page=1, char_start=0, char_end=len(TEXT))]
+    result = validate_document(
+        placement(cohort_year=field("(2024-25)")),
+        TEXT,
+        extraction_id=7,
+        entity_id=11,
+        observed_at=OBSERVED,
+        pages=pages,
+    )
+
+    claim = next(claim for claim in result.claims if claim.predicate == "placement.cohort_year")
+    assert claim.qualifier["resolution_scope"] == "document"
+    assert claim.qualifier["scope_page_no"] == 1
+    assert outcome_for(result, "cohort_year").repaired is True
+
+
+def test_ambiguous_quotes_still_reject_when_no_scope_geometry_is_supplied() -> None:
+    text = "Students placed: 96\nStudents placed: 96\n"
+    result = validate(placement(placed_count=field("Students placed: 96")), text)
+
+    rejection = next(item for item in result.rejections if item.field == "placed_count")
+    assert rejection.reason == "ambiguous_span"
+    assert "no row context was supplied" in rejection.detail
+
+
+def test_section_scoped_claim_records_heading_and_section_span() -> None:
+    text = (
+        "LAB AUDIT 2025-26\n"
+        "Lab audit: 87 samples cleared.\n"
+        "STUDENT AFFAIRS\n"
+        "Lab audit: 87 samples cleared.\n"
+        "Lab audit: 87 samples cleared.\n"
+    )
+    canonical = build_canonical([TextBlock(page_no=1, text=line) for line in text.splitlines()])
+    document = SeatMatrix(
+        programme_name=ExtractedField(quote="Lab audit: 87 samples cleared.", confidence=0.9)
+    )
+
+    result = validate_document(
+        document,
+        text,
+        extraction_id=1,
+        entity_id=2,
+        observed_at=OBSERVED,
+        pages=[PageSpan(page=1, char_start=0, char_end=len(text))],
+        sections=canonical.sections,
+    )
+
+    assert len(result.claims) == 1
+    claim = result.claims[0]
+    qualifier = claim.qualifier
+    assert qualifier["resolution_scope"] == "section"
+    assert qualifier["disambiguation"] == "unique_section"
+    assert qualifier["section_heading"] == "LAB AUDIT 2025-26"
+    assert qualifier["scope_page_no"] == 1
+    section_text = text[qualifier["scope_char_start"] : qualifier["scope_char_end"]]
+    assert section_text.startswith("LAB AUDIT 2025-26")
+    assert section_text.count("Lab audit: 87 samples cleared.") == 1
+    # Provenance stays absolute: the span indexes the canonical document text.
+    assert text[claim.char_start : claim.char_end] == "Lab audit: 87 samples cleared."
+    assert outcome_for(result, "programme_name").scope == "section"
