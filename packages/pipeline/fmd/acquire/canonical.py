@@ -28,6 +28,7 @@ same string and the same anchors on every run.
 
 from __future__ import annotations
 
+import re
 from bisect import bisect_right
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -133,6 +134,37 @@ class PageGeometry:
 
 
 @dataclass(frozen=True)
+class SectionGeometry:
+    """A printed heading and the text it governs, in canonical offsets.
+
+    ``char_start`` is the heading's first character; ``char_end`` is where the
+    next heading begins (or the end of the document), so a section spans its
+    heading and everything under it, across pages when a document has no
+    further heading. Sections are derived from the canonical block runs with a
+    conservative printed-heading test (:func:`looks_like_heading`). They are a
+    uniqueness aid for span resolution — never evidence and never a value
+    source — so under-detection only costs yield, never correctness.
+    """
+
+    page_no: int
+    heading_text: str
+    heading_char_start: int
+    heading_char_end: int
+    char_start: int
+    char_end: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "page_no": self.page_no,
+            "heading_text": self.heading_text,
+            "heading_char_start": self.heading_char_start,
+            "heading_char_end": self.heading_char_end,
+            "char_start": self.char_start,
+            "char_end": self.char_end,
+        }
+
+
+@dataclass(frozen=True)
 class SpanHit:
     """A resolved canonical span projected back onto the page."""
 
@@ -167,6 +199,9 @@ class CanonicalText:
     anchors: tuple[CharAnchor | None, ...]
     block_boxes: dict[tuple[int, int], BBox]
     granularity: Granularity = "span"
+    #: Printed heading blocks and the text under each (W7 span-scope). Empty
+    #: when no block looks like a heading; see :func:`looks_like_heading`.
+    sections: tuple[SectionGeometry, ...] = ()
 
     @property
     def page_starts(self) -> list[int]:
@@ -334,12 +369,15 @@ def build_canonical(
         )
 
     granularity = _document_granularity(anchors)
+    text = "".join(parts)
+    sections = sections_from_runs(text, block_runs(text, anchors))
     return CanonicalText(
-        text="".join(parts),
+        text=text,
         pages=tuple(out_pages),
         anchors=tuple(anchors),
         block_boxes=block_boxes,
         granularity=granularity,
+        sections=sections,
     )
 
 
@@ -357,6 +395,114 @@ def _document_granularity(anchors: Iterable[CharAnchor | None]) -> Granularity:
     return "span"
 
 
+# --------------------------------------------------------------------------- sections
+
+#: A heading is short. A longer line is a sentence, not a title.
+HEADING_MAX_CHARS = 120
+HEADING_MAX_WORDS = 14
+#: One all-caps word is a cell value ("TOTAL", "INR"), not a heading.
+HEADING_MIN_WORDS = 2
+_HEADING_LEAD = re.compile(r"^(annexure|appendix|schedule)\b", re.I)
+
+
+def looks_like_heading(text: str) -> bool:
+    """Conservative test for a printed section heading on one block of text.
+
+    Three signals, each verifiable on the printed line itself:
+
+    * ALL-CAPS line of at least two words (``FEE STRUCTURE``, ``ANNEXURE - II``);
+    * a colon-terminated label with no sentence punctuation before the colon
+      (``Fee Structure:``);
+    * an annexure-family lead word, any case (``Annexure-I``, ``Schedule of Fees``).
+
+    Deliberately refused: title-case prose (institute names and row labels are
+    indistinguishable from titles), single all-caps words (table cells like
+    ``TOTAL``), numbered list items (``1. B.Sc. ...`` is a row label), and
+    anything ending in sentence punctuation. A missed heading only means the
+    section rung of the resolution ladder finds fewer candidates and the claim
+    stays UNKNOWN — the safe direction. A section is never evidence: it only
+    narrows uniqueness, and only when exactly one section holds exactly one
+    occurrence of the quote.
+    """
+    stripped = text.strip()
+    if not 3 <= len(stripped) <= HEADING_MAX_CHARS:
+        return False
+    words = stripped.split()
+    if len(words) > HEADING_MAX_WORDS:
+        return False
+    letters = [char for char in stripped if char.isalpha()]
+    if len(letters) < 3:
+        return False
+    terminal = stripped[-1]
+    if terminal == ":":
+        body = stripped[:-1]
+        body_letters = [char for char in body if char.isalpha()]
+        return bool(
+            len(body_letters) >= 3 and not any(char in body for char in ".!?")
+        )
+    if terminal in ".!?":
+        return False
+    if len(words) >= HEADING_MIN_WORDS and all(char.isupper() for char in letters):
+        return True
+    return bool(_HEADING_LEAD.match(stripped))
+
+
+def block_runs(text: str, anchors: Sequence[CharAnchor | None]) -> list[tuple[int, int, int]]:
+    """Contiguous anchored runs as ``(start, end, page_no)``.
+
+    Separators carry no anchor, so each run is exactly one acquisition block
+    (a pdftext line, a Docling item or an OCR block) in reading order.
+    """
+    runs: list[tuple[int, int, int]] = []
+    start: int | None = None
+    page_no = 0
+    for offset, anchor in enumerate(anchors):
+        if anchor is None:
+            if start is not None:
+                runs.append((start, offset, page_no))
+                start = None
+            continue
+        if start is None:
+            start = offset
+            page_no = anchor.page_no
+        elif anchor.page_no != page_no:
+            runs.append((start, offset, page_no))
+            start = offset
+            page_no = anchor.page_no
+    if start is not None:
+        runs.append((start, len(anchors), page_no))
+    return runs
+
+
+def sections_from_runs(
+    text: str, runs: Sequence[tuple[int, int, int]]
+) -> tuple[SectionGeometry, ...]:
+    """Pair each heading run with the text up to the next heading run."""
+    heading_indexes = [
+        index
+        for index, (start, end, _page) in enumerate(runs)
+        if looks_like_heading(text[start:end])
+    ]
+    sections: list[SectionGeometry] = []
+    for position, index in enumerate(heading_indexes):
+        start, end, page_no = runs[index]
+        following = heading_indexes[position + 1] if position + 1 < len(heading_indexes) else None
+        section_end = runs[following][0] if following is not None else len(text)
+        if section_end <= end:
+            continue
+        sections.append(
+            SectionGeometry(
+                page_no=page_no,
+                heading_text=text[start:end],
+                heading_char_start=start,
+                heading_char_end=end,
+                char_start=start,
+                char_end=section_end,
+            )
+        )
+    return tuple(sections)
+
+
 __all__ = [
     "BLOCK_SEPARATOR",
     "PAGE_SEPARATOR",
@@ -364,10 +510,17 @@ __all__ = [
     "CanonicalText",
     "CharAnchor",
     "Granularity",
+    "HEADING_MAX_CHARS",
+    "HEADING_MAX_WORDS",
+    "HEADING_MIN_WORDS",
     "PageGeometry",
+    "SectionGeometry",
     "SpanHit",
     "TextBlock",
+    "block_runs",
     "box_inside",
     "build_canonical",
+    "looks_like_heading",
     "merge_boxes",
+    "sections_from_runs",
 ]

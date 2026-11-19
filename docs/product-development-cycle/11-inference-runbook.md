@@ -2518,3 +2518,129 @@ codes are pinned in `test_extract_chunking.py` (21 cases) and the pipeline
 behaviour — split, absolute offsets, overlap dedupe, one-window failure,
 all-fail persistence, cap, single-pass call count 1, `context_exceeded` never
 `http_error` — in `test_extract_pipeline.py`.
+
+## 10. Span resolution scope — the W7 ladder (2026-11-19, W7 span-scope)
+
+### The problem, measured
+
+A 17-document extraction run produced 5 claims and 14 rejections, every one
+`ambiguous_span`. Each rejected quote was correct in substance; it failed
+because the resolver demanded **document-wide uniqueness**. In a 100-page
+annual report the same words recur by design — a running header on every page,
+"A" as a grade, "2024" as a year, a programme name once per section — so a
+correct value was discarded for repeating. That is a resolver design flaw, not
+a document defect.
+
+### The ladder (narrowest qualifying scope first)
+
+`resolve_quote` / `validate_document` (in `fmd/extract/validate.py`) now take
+`pages` (the document's page spans) and `sections` (printed heading blocks
+from `fmd/acquire/canonical.py`). When a quote is ambiguous document-wide and
+the model supplied **no** row context, uniqueness is re-attempted on
+progressively narrower instances, and the rung that resolves is recorded on
+the claim qualifier as `resolution_scope`:
+
+| Rung | Qualifies when | Recorded as |
+|---|---|---|
+| a | exactly one occurrence document-wide | `document` |
+| b | exactly one occurrence inside the claim's row context (table block, else the ±`CONTEXT_WINDOW_CHARS` window) | `row` |
+| c | exactly one **page** holds exactly one occurrence | `page` + `scope_page_no` |
+| d | no page qualifies, but exactly one **section** holds exactly one occurrence | `section` + `section_heading` |
+| e | nothing qualifies | `ambiguous_span` → UNKNOWN |
+
+Hard rules that make the ladder safe:
+
+* **Never first-match.** A scope instance qualifies only when it holds exactly
+  ONE occurrence of the quote. Two qualifying instances of the same width
+  cancel out — two pages or two sections with one occurrence each leave the
+  claim UNKNOWN. There are no positional tie-breaks and no "closest to top".
+* **Table rows still win.** The row rung (b) runs before page/section, so a
+  row-scoped quote resolves at `row` even when a page-level unique match
+  exists elsewhere.
+* **A failed context is never widened past.** The ladder widens only from
+  *absence* of context. When the model supplied a context and it did not
+  resolve (a table block that does not contain the quote, or a window with no
+  adjacent occurrence), the claim stays UNKNOWN — widening past a stated
+  location would attribute an occurrence the model did not point at.
+* **Provenance stays absolute.** `char_start`/`char_end` remain offsets into
+  the canonical document text whatever rung resolved the span; scope affects
+  uniqueness only.
+* **Sections are conservative.** `fmd/acquire/canonical.looks_like_heading`
+  accepts an ALL-CAPS line of ≥2 words, a colon-terminated label without
+  sentence punctuation, or an annexure-family lead word. Title-case prose,
+  single all-caps cells ("TOTAL", "INR") and numbered row labels are refused.
+  Occurrences outside every heading block are invisible to the section rung —
+  attributing them would be a guess. A missed heading costs yield, never
+  correctness; the section rung is the last rung before UNKNOWN.
+
+The page number is recorded for every resolved span when page geometry is
+supplied (`scope_page_no`), and the qualifying instance's span is recorded as
+`scope_char_start`/`scope_char_end` for page- and section-scoped claims.
+`fmd/verify` reads these keys: `ClaimView` carries `resolution_scope`,
+`scope_page` and `scope_span`; the field payload sent to the verifier includes
+`resolution_scope` and `page`, and the verifier window widens to the scope
+instance when it fits the window budget. Verdict semantics are unchanged — a
+page-scoped quote is judged as a resolved location, not a suspicious bare
+quote. The verify prompt is unchanged (verify@v3): the scope travels as data
+in the payload, so no recorded replay fixture is invalidated.
+
+### Chunked windows
+
+The single-pass path passes the document's page map and sections as-is. The
+chunked path passes **window-relative** bounds: page spans are clipped to the
+window and shifted by its start; a section is kept only when its printed
+heading lies fully inside the window (a heading the model never saw cannot
+scope a quote) and is clipped at the window end otherwise. The shifted
+`scope_char_start`/`scope_char_end` move with the claim when
+`to_absolute_offsets` re-anchors spans.
+
+### Dedupe rule (chunking + resume)
+
+The dedupe identity (`fmd/extract/chunking.claim_dedupe_keys`) is:
+
+* primary key: `(predicate, char_start, char_end)` — the same span recovered
+  from two overlapping windows;
+* location key: `(predicate, normalised value, location)` where location is
+  the table row identity (or row label, or the model's context quote) —
+  **or, new in W7**, the section identity `(section, page, heading)` when the
+  claim carries `resolution_scope: section`.
+
+So: the same predicate/value within the same **row or section** is one claim
+(an overlapping window re-quoted the same fact), while the same predicate/value
+on **different pages is not one claim** — a per-page repetition (a running
+header, a fee line printed per page) is genuine evidence, and the page number
+is part of the key for that reason.
+
+### Known limits
+
+* If the model supplies a context that fails, the ladder does not rescue the
+  claim; precision is worth more than the yield of a guess.
+* A quote whose occurrences all sit on pages holding ≥2 occurrences, with no
+  unique heading block, stays UNKNOWN. Rescuing it would need model-supplied
+  page anchors, which are unreliable and out of scope.
+* Sections come from a text heuristic on tier blocks. Scanned documents whose
+  OCR merges headings into body blocks derive fewer or no sections; the page
+  rung is unaffected (page geometry is exact).
+* Extract prompts are unchanged (v4/v5 stay current): the model supplies
+  nothing new — pages and sections are document-derived, so no
+  `prompt_version` bump, and already-extracted snapshots remain valid.
+
+### Tests (all offline unless a live DB is supplied)
+
+```bash
+cd packages/pipeline && uv run ruff check .
+uv run pytest tests/test_extract_validate.py tests/test_extract_context.py
+DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd uv run pytest -q
+uv run python -m fmd.cli eval --golden ../../data/golden   # provenance 1.0
+```
+
+`tests/fixtures/extract/annual_report_scope.txt` is a 10-page synthetic
+annual report with a running header, three repeated audit phrases, one
+ALL-CAPS heading pair and evidence on pages 2/5/6/9/10; the real-shape
+regression uses the existing 60-page
+`tests/fixtures/extract/chunk/annual_report.txt` (the running header repeats
+60×, the audit sentence 180×, "96" on pages 20 and 34). The ladder rungs, the
+failed-context hard stop, the row-beats-page precedence, absolute offsets,
+section derivation, window-relative bounds, the dedupe rule and the verifier
+plumbing are pinned in `test_extract_validate.py` and
+`test_extract_context.py`.

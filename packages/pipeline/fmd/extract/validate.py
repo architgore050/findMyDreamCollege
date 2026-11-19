@@ -7,23 +7,35 @@ turns that quote into a claim deterministically:
    sides (NFKC, unified quotes/dashes, Devanagari digits to ASCII, ``₹``/``Rs.``/
    ``Rs``/``INR`` to ``INR``, Indian digit grouping removed, whitespace
    collapsed) and retry. Only a **unique** occurrence is accepted. Several
-   matches are disambiguated deterministically by the field's optional
-   ``context`` (the row label / column header / institute name):
+   matches are disambiguated deterministically, narrowest scope first, and the
+   chosen scope is recorded on the claim (W7 span-scope):
 
-   * ``unique`` — the quote occurs exactly once;
+   * ``unique`` — the quote occurs exactly once document-wide
+     (``resolution_scope: document``);
    * ``context_row`` — the quote is ambiguous but exactly one of its
      occurrences lies inside the table block whose anchor cell is the context
      (a block is the run of rows under one institute/heading cell, built from
-     the acquisition table cells when available);
+     the acquisition table cells when available) (``resolution_scope: row``);
    * ``context_window`` — no table matched, but exactly one occurrence of the
      quote lies on the same line as, or within ``CONTEXT_WINDOW_CHARS`` of,
-     exactly one occurrence of the context;
-   * ``none`` — context was absent or did not disambiguate; the field abstains.
+     exactly one occurrence of the context (``resolution_scope: row``);
+   * ``unique_page`` — no row context was supplied, the quote is ambiguous
+     document-wide, but exactly one **page** holds exactly one occurrence
+     (``resolution_scope: page``; the page number is recorded);
+   * ``unique_section`` — no page qualifies, but exactly one **section** (a
+     printed heading block from :mod:`fmd.acquire.canonical`) holds exactly
+     one occurrence (``resolution_scope: section``; the heading is recorded);
+   * ``none`` — nothing disambiguated; the field abstains.
 
    A context that names a real table block but does not contain the quote is a
-   contradiction and is rejected, never retried against a looser window. Zero
-   matches get exactly one repair pass (strip edge punctuation / take the
-   longest line) and then abstain.
+   contradiction and is rejected, never retried against a looser window. The
+   same holds for any *failed* context: the ladder widens only from **absence**
+   of context, never over a context that did not resolve — widening past a
+   stated location would attribute an occurrence the model did not point at.
+   Two occurrences that share the narrowest qualifying scope cancel out: two
+   pages or two sections each holding one occurrence leave the claim UNKNOWN —
+   there are no positional tie-breaks. Zero matches get exactly one repair
+   pass (strip edge punctuation / take the longest line) and then abstain.
 2. **Derive the value.** The resolved span is parsed by a type-specific parser
    (count, money+period, percentage, integer, date, grade, boolean, text). No
    model-supplied number, unit or conversion is ever trusted.
@@ -37,6 +49,10 @@ turns that quote into a claim deterministically:
    ``FieldSpec.period_source`` (``fee.period``, ``placement.salary_period``) —
    never from a default. A money claim that still has no period is rejected.
 
+Provenance stays absolute: ``char_start``/``char_end`` are offsets into the
+canonical document text whatever scope resolved the span — scope affects
+uniqueness only, never the span's location.
+
 A claim is rejected, never silently fixed. Rejections and per-field outcomes
 (``resolved``, ``ambiguous``, ``unresolved``, ``rejected_guard:<name>``) are
 structured so the review console can render them verbatim.
@@ -47,7 +63,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -77,7 +93,19 @@ RejectionReason = Literal[
 ]
 
 OutcomeKind = Literal["resolved", "ambiguous", "unresolved", "rejected", "abstained"]
-Disambiguation = Literal["unique", "context_row", "context_window", "none"]
+Disambiguation = Literal[
+    "unique",
+    "context_row",
+    "context_window",
+    "unique_page",
+    "unique_section",
+    "none",
+]
+#: How much of the document the resolver had to look at to make the quote
+#: unique: the whole document, one table row, one page, or one printed
+#: heading block. Recorded on the claim qualifier; scope affects uniqueness
+#: only — the span's offsets stay absolute document offsets.
+ResolutionScope = Literal["document", "row", "page", "section"]
 
 
 # --------------------------------------------------------------------------- records
@@ -183,6 +211,7 @@ class FieldOutcome:
     char_end: int | None = None
     repaired: bool = False
     disambiguation: Disambiguation = "none"
+    scope: ResolutionScope | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -195,6 +224,7 @@ class FieldOutcome:
             "char_end": self.char_end,
             "repaired": self.repaired,
             "disambiguation": self.disambiguation,
+            "scope": self.scope,
         }
 
 
@@ -472,6 +502,14 @@ class SpanResolution:
     match: SpanMatch | None = None
     detail: str = ""
     disambiguation: Disambiguation = "none"
+    #: Which ladder rung resolved the span (``None`` while unresolved).
+    scope: ResolutionScope | None = None
+    #: 1-based page the resolved span sits on, when page geometry was supplied.
+    page_no: int | None = None
+    #: The scope instance's span (the page or the section, absolute offsets).
+    scope_span: tuple[int, int] | None = None
+    #: The printed heading text, for ``scope == "section"``.
+    scope_label: str | None = None
     context_quote: str | None = None
     context_span: tuple[int, int] | None = None
     row: RowIdentity | None = None
@@ -867,6 +905,7 @@ def _resolve_in_block(
             1.0 if mode == "exact" else _ratio(quote, matched),
         ),
         disambiguation="context_row",
+        scope="row",
         context_quote=block.context_text,
         context_span=(block.start, block.start + len(block.context_text)),
         row=identity,
@@ -928,30 +967,10 @@ def _resolve_in_window(
             1.0 if mode == "exact" else _ratio(quote, matched),
         ),
         disambiguation="context_window",
+        scope="row",
         context_quote=context,
         context_span=context_span,
     )
-
-
-def _resolve_ambiguous(
-    text: str,
-    quote: str,
-    detail: str,
-    *,
-    context: str | None,
-    tables: list[Any] | None,
-) -> SpanResolution:
-    context_text = (context or "").strip()
-    if not context_text:
-        return SpanResolution("ambiguous", detail=f"{detail}; no row context was supplied")
-    hits = _quote_occurrences(text, quote)
-    if not hits:
-        return SpanResolution("ambiguous", detail=detail)
-    if tables:
-        block = _table_block(text, context_text, tables)
-        if block is not None:
-            return _resolve_in_block(text, quote, block, tables, detail)
-    return _resolve_in_window(text, quote, hits, context_text, detail)
 
 
 def _tag(resolution: SpanResolution, rule: Disambiguation) -> SpanResolution:
@@ -960,6 +979,10 @@ def _tag(resolution: SpanResolution, rule: Disambiguation) -> SpanResolution:
         resolution.match,
         resolution.detail,
         disambiguation=rule,
+        scope=resolution.scope,
+        page_no=resolution.page_no,
+        scope_span=resolution.scope_span,
+        scope_label=resolution.scope_label,
         context_quote=resolution.context_quote,
         context_span=resolution.context_span,
         row=resolution.row,
@@ -968,58 +991,395 @@ def _tag(resolution: SpanResolution, rule: Disambiguation) -> SpanResolution:
     )
 
 
+# --------------------------------------------------------------------------- scope ladder
+# Document-wide uniqueness is a design flaw on long documents: a 100-page
+# annual report repeats "A" grade, "2024" and every programme name many times.
+# When no row context was supplied, uniqueness is re-attempted on progressively
+# wider instances of the narrowest exact boundary first (the page, which is
+# geometry, then the section, which is a printed heading). A scope instance
+# qualifies only when it holds exactly ONE occurrence of the quote; two
+# qualifying instances of the same width cancel out — no positional tie-breaks,
+# no "closest to top". Occurrences outside every candidate instance (crossing a
+# page boundary, or in no heading block) are not section/page candidates.
+
+
+@dataclass(frozen=True)
+class _PageBound:
+    page_no: int | None
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class _SectionBound:
+    page_no: int | None
+    heading_text: str
+    start: int
+    end: int
+
+
+def _page_bound(item: Any) -> _PageBound | None:
+    if isinstance(item, Mapping):
+        page = item.get("page", item.get("page_no"))
+        start, end = (
+            item.get("char_start", item.get("start")),
+            item.get("char_end", item.get("end")),
+        )
+        if not isinstance(start, int) or not isinstance(end, int):
+            return None
+        return _PageBound(
+            page_no=int(page) if isinstance(page, int) else None,
+            start=start,
+            end=end,
+        )
+    start = _attr(item, "char_start", None)
+    end = _attr(item, "char_end", None)
+    if not isinstance(start, int) or not isinstance(end, int):
+        return None
+    page = _attr(item, "page", _attr(item, "page_no", None))
+    return _PageBound(page_no=int(page) if isinstance(page, int) else None, start=start, end=end)
+
+
+def _section_bound(item: Any) -> _SectionBound | None:
+    if isinstance(item, Mapping):
+        start, end = item.get("char_start"), item.get("char_end")
+        heading = item.get("heading_text")
+        if not isinstance(start, int) or not isinstance(end, int) or not heading:
+            return None
+        page = item.get("page_no", item.get("page"))
+        return _SectionBound(
+            page_no=int(page) if isinstance(page, int) else None,
+            heading_text=str(heading),
+            start=start,
+            end=end,
+        )
+    start = _attr(item, "char_start", None)
+    end = _attr(item, "char_end", None)
+    heading = _attr(item, "heading_text", None)
+    if not isinstance(start, int) or not isinstance(end, int) or not heading:
+        return None
+    page = _attr(item, "page_no", None)
+    return _SectionBound(
+        page_no=int(page) if isinstance(page, int) else None,
+        heading_text=str(heading),
+        start=start,
+        end=end,
+    )
+
+
+def _normalise_pages(pages: Sequence[Any] | None) -> list[_PageBound]:
+    bounds = [bound for item in (pages or ()) if (bound := _page_bound(item)) is not None]
+    return sorted(bounds, key=lambda bound: bound.start)
+
+
+def _normalise_sections(sections: Sequence[Any] | None) -> list[_SectionBound]:
+    bounds = [bound for item in (sections or ()) if (bound := _section_bound(item)) is not None]
+    return sorted(bounds, key=lambda bound: bound.start)
+
+
+def _page_containing(start: int, end: int, pages: Sequence[_PageBound]) -> _PageBound | None:
+    for page in pages:
+        if page.start <= start and end <= page.end:
+            return page
+    return None
+
+
+def _section_containing(
+    start: int, end: int, sections: Sequence[_SectionBound]
+) -> _SectionBound | None:
+    for section in sections:
+        if section.start <= start and end <= section.end:
+            return section
+    return None
+
+
+def _resolve_in_page(
+    text: str, quote: str, hits: list[tuple[int, int, str]], pages: Sequence[_PageBound]
+) -> SpanResolution:
+    """Rung (c): exactly one page holds exactly one occurrence of the quote.
+
+    Pages holding two or more occurrences are not candidates; they do not
+    block, they simply cannot resolve. More than one qualifying page is the
+    two-occurrences-share-the-scope case and stays ambiguous.
+    """
+    per_page: list[tuple[_PageBound, list[tuple[int, int, str]]]] = []
+    for hit in hits:
+        page = _page_containing(hit[0], hit[1], pages)
+        if page is None:
+            continue
+        for entry in per_page:
+            if entry[0] == page:
+                entry[1].append(hit)
+                break
+        else:
+            per_page.append((page, [hit]))
+    candidates = [(page, page_hits[0]) for page, page_hits in per_page if len(page_hits) == 1]
+    if len(candidates) != 1:
+        detail = (
+            "no page holds exactly one occurrence of the quote"
+            if not candidates
+            else f"{len(candidates)} pages hold exactly one occurrence of the quote"
+        )
+        return SpanResolution("ambiguous", detail=detail)
+    page, (start, end, mode) = candidates[0]
+    matched = text[start:end]
+    return SpanResolution(
+        "resolved",
+        SpanMatch(
+            start,
+            end,
+            matched,
+            mode,  # type: ignore[arg-type]
+            1.0 if mode == "exact" else _ratio(quote, matched),
+        ),
+        disambiguation="unique_page",
+        scope="page",
+        page_no=page.page_no,
+        scope_span=(page.start, page.end),
+    )
+
+
+def _resolve_in_section(
+    text: str,
+    quote: str,
+    hits: list[tuple[int, int, str]],
+    sections: Sequence[_SectionBound],
+    pages: Sequence[_PageBound],
+) -> SpanResolution:
+    """Rung (d): exactly one printed-heading block holds exactly one occurrence.
+
+    Reached only when no page qualifies. A section candidate must hold exactly
+    one occurrence; occurrences outside every heading block are invisible to
+    this rung (they have no section identity, so attributing them would be a
+    guess). Two qualifying sections cancel out.
+    """
+    per_section: list[tuple[_SectionBound, list[tuple[int, int, str]]]] = []
+    for hit in hits:
+        section = _section_containing(hit[0], hit[1], sections)
+        if section is None:
+            continue
+        for entry in per_section:
+            if entry[0] == section:
+                entry[1].append(hit)
+                break
+        else:
+            per_section.append((section, [hit]))
+    candidates = [
+        (section, section_hits[0])
+        for section, section_hits in per_section
+        if len(section_hits) == 1
+    ]
+    if len(candidates) != 1:
+        detail = (
+            "no section holds exactly one occurrence of the quote"
+            if not candidates
+            else f"{len(candidates)} sections hold exactly one occurrence of the quote"
+        )
+        return SpanResolution("ambiguous", detail=detail)
+    section, (start, end, mode) = candidates[0]
+    matched = text[start:end]
+    page = _page_containing(start, end, pages) if pages else None
+    return SpanResolution(
+        "resolved",
+        SpanMatch(
+            start,
+            end,
+            matched,
+            mode,  # type: ignore[arg-type]
+            1.0 if mode == "exact" else _ratio(quote, matched),
+        ),
+        disambiguation="unique_section",
+        scope="section",
+        page_no=page.page_no if page is not None else section.page_no,
+        scope_span=(section.start, section.end),
+        scope_label=section.heading_text,
+    )
+
+
+def _resolve_scoped(
+    text: str,
+    quote: str,
+    detail: str,
+    *,
+    context: str | None,
+    tables: list[Any] | None,
+    pages: Sequence[Any] | None,
+    sections: Sequence[Any] | None,
+) -> SpanResolution:
+    """The narrowest-first ladder for an ambiguous quote.
+
+    Row context first (a table block, else the bounded window) — table rows
+    win over any page-level match. A context that was supplied but failed is a
+    contradiction and is never widened past. Only when **no** context was
+    supplied does the ladder continue: page scope (exact geometry), then
+    section scope (printed headings), then UNKNOWN.
+    """
+    context_text = (context or "").strip()
+    hits = _quote_occurrences(text, quote)
+    if not hits:
+        return SpanResolution("ambiguous", detail=detail)
+    if context_text:
+        if tables:
+            block = _table_block(text, context_text, tables)
+            if block is not None:
+                return _resolve_in_block(text, quote, block, tables, detail)
+        return _resolve_in_window(text, quote, hits, context_text, detail)
+    page_bounds = _normalise_pages(pages)
+    section_bounds = _normalise_sections(sections)
+    if not page_bounds and not section_bounds:
+        return SpanResolution("ambiguous", detail=f"{detail}; no row context was supplied")
+    notes: list[str] = []
+    if page_bounds:
+        page_attempt = _resolve_in_page(text, quote, hits, page_bounds)
+        if page_attempt.status == "resolved":
+            return page_attempt
+        notes.append(page_attempt.detail)
+    if section_bounds:
+        section_attempt = _resolve_in_section(text, quote, hits, section_bounds, page_bounds)
+        if section_attempt.status == "resolved":
+            return section_attempt
+        notes.append(section_attempt.detail)
+    return SpanResolution(
+        "ambiguous",
+        detail="; ".join([f"{detail}; no row context was supplied", *notes]),
+    )
+
+
+def _with_scope(
+    resolution: SpanResolution,
+    *,
+    scope: ResolutionScope,
+    disambiguation: Disambiguation | None = None,
+    page_no: int | None = None,
+    scope_span: tuple[int, int] | None = None,
+    scope_label: str | None = None,
+) -> SpanResolution:
+    return SpanResolution(
+        resolution.status,
+        resolution.match,
+        resolution.detail,
+        disambiguation=disambiguation or resolution.disambiguation,
+        scope=scope,
+        page_no=page_no if page_no is not None else resolution.page_no,
+        scope_span=scope_span if scope_span is not None else resolution.scope_span,
+        scope_label=scope_label if scope_label is not None else resolution.scope_label,
+        context_quote=resolution.context_quote,
+        context_span=resolution.context_span,
+        row=resolution.row,
+        row_span=resolution.row_span,
+        column_uncertain=resolution.column_uncertain,
+    )
+
+
+def _page_of_span(
+    start: int, end: int, pages: Sequence[_PageBound] | None
+) -> tuple[int | None, tuple[int, int]] | None:
+    """The page holding a fully-contained span, plus the page's own span."""
+    for page in pages or ():
+        if page.start <= start and end <= page.end:
+            return (page.page_no, (page.start, page.end))
+    return None
+
+
 def resolve_quote(
     text: str,
     quote: str,
     *,
     context: str | None = None,
     tables: list[Any] | None = None,
+    pages: Sequence[Any] | None = None,
+    sections: Sequence[Any] | None = None,
     repair: bool = True,
 ) -> SpanResolution:
     """Resolve a quote to a unique document span, deterministically.
 
-    Precedence: an exact unique quote; a canonical unique quote; the optional
-    ``context`` (table block first, bounded window second). Nothing here tries
-    a second candidate after the first fails: a row that cannot be located is
-    ``ambiguous_span``.
+    Precedence (the W7 scope ladder): an exact unique quote (``scope=document``);
+    a canonical unique quote; the optional ``context`` (table block first,
+    bounded window second — ``scope=row``, table rows win over any page-level
+    match); then, only when no context was supplied, page scope
+    (``unique_page``, the page number is recorded) and section scope
+    (``unique_section``, the heading is recorded). Nothing here tries a second
+    candidate after the first fails: a row that cannot be located is
+    ``ambiguous_span``, and a failed context is never widened past.
+
+    ``pages`` are the document's page spans (``PageSpan``-like: ``page``,
+    ``char_start``, ``char_end``); ``sections`` are printed heading blocks
+    (``SectionGeometry``-like: ``heading_text``, ``char_start``, ``char_end``).
+    Both affect uniqueness only: the returned offsets stay absolute document
+    offsets.
     """
     raw = (quote or "").strip()
     if not raw:
         return SpanResolution("unresolved", detail="empty quote")
+    page_bounds = _normalise_pages(pages)
     resolution = _match_exact(text, raw)
     if resolution.status == "resolved":
-        return _tag(resolution, "unique")
+        return _finish(resolution, "unique", "document", page_bounds)
     if resolution.status == "unresolved":
         canonical = _match_canonical(text, raw)
         if canonical.status == "resolved":
-            return _tag(canonical, "unique")
+            return _finish(canonical, "unique", "document", page_bounds)
         resolution = canonical
     if resolution.status == "ambiguous":
-        return _resolve_ambiguous(text, raw, resolution.detail, context=context, tables=tables)
+        return _resolve_scoped(
+            text,
+            raw,
+            resolution.detail,
+            context=context,
+            tables=tables,
+            pages=pages,
+            sections=sections,
+        )
     if not repair:
         return resolution
     for candidate in _repair_candidates(raw):
         for helper in (_match_exact, _match_canonical):
             repaired = helper(text, candidate)
             if repaired.status == "ambiguous":
-                return _resolve_ambiguous(
-                    text, raw, repaired.detail, context=context, tables=tables
+                return _resolve_scoped(
+                    text,
+                    raw,
+                    repaired.detail,
+                    context=context,
+                    tables=tables,
+                    pages=pages,
+                    sections=sections,
                 )
             if repaired.status == "resolved" and repaired.match is not None:
-                return _tag(
-                    SpanResolution(
-                        "resolved",
-                        SpanMatch(
-                            repaired.match.start,
-                            repaired.match.end,
-                            repaired.match.quote,
-                            "repaired",
-                            repaired.match.ratio,
-                        ),
+                unique = SpanResolution(
+                    "resolved",
+                    SpanMatch(
+                        repaired.match.start,
+                        repaired.match.end,
+                        repaired.match.quote,
+                        "repaired",
+                        repaired.match.ratio,
                     ),
-                    "unique",
                 )
+                return _finish(unique, "unique", "document", page_bounds)
     return resolution
+
+
+def _finish(
+    resolution: SpanResolution,
+    rule: Disambiguation,
+    scope: ResolutionScope,
+    page_bounds: Sequence[_PageBound],
+) -> SpanResolution:
+    """Tag a resolved span with its scope and, when known, its page.
+
+    ``scope_span`` is left to the rung that found the span (the page rung and
+    the section rung record their page/section instance); a document- or
+    row-scoped span's location provenance already lives in ``row_span`` /
+    ``context_span``.
+    """
+    tagged = _tag(resolution, rule)
+    tagged = _with_scope(tagged, scope=scope)
+    if tagged.match is not None:
+        located = _page_of_span(tagged.match.start, tagged.match.end, page_bounds)
+        if located is not None and located[0] is not None:
+            tagged = _with_scope(tagged, scope=scope, page_no=located[0])
+    return tagged
 
 
 # --------------------------------------------------------------------------- parsing
@@ -1381,6 +1741,8 @@ def validate_document(
     default_confidence: float = 0.5,
     repair: bool = True,
     tables: list[Any] | None = None,
+    pages: Sequence[Any] | None = None,
+    sections: Sequence[Any] | None = None,
 ) -> ValidationResult:
     """Turn quote-first guided JSON into validated ``ClaimCreate`` rows.
 
@@ -1389,12 +1751,19 @@ def validate_document(
     turn an ambiguous quote plus its row ``context`` into one location, and to
     refuse a value whose column header is uncertain.
 
+    ``pages`` are the document's page spans (``PageSpan``-like) and ``sections``
+    the printed heading blocks (``SectionGeometry``-like, from
+    ``fmd.acquire.canonical``). They power the W7 scope ladder — page and
+    section uniqueness for a quote the model supplied no row context for — and
+    the page number recorded on every resolved claim. They are never evidence.
+
     ``fuzzy_threshold`` is accepted for API stability but no longer used: the new
     contract never searches fuzzy windows, because a near-match is not a span.
     """
     del fuzzy_threshold
     bands = bands or Bands.load()
     result = ValidationResult()
+    page_bounds = _normalise_pages(pages)
 
     resolved: list[_ResolvedField] = []
     for name, spec, extracted in document.fields():
@@ -1414,6 +1783,8 @@ def validate_document(
             str(extracted.quote),
             context=extracted.context,
             tables=tables,
+            pages=pages,
+            sections=sections,
             repair=repair,
         )
         confidence = (
@@ -1427,6 +1798,21 @@ def validate_document(
             resolution=resolution,
             confidence=confidence,
         )
+        if (
+            resolution.status == "resolved"
+            and resolution.match is not None
+            and resolution.page_no is None
+        ):
+            # Row- and window-scoped spans get their page recorded here; the
+            # unique/page/section paths already carry one from resolve_quote.
+            located = _page_of_span(resolution.match.start, resolution.match.end, page_bounds)
+            if located is not None and located[0] is not None:
+                resolution = _with_scope(
+                    resolution,
+                    scope=resolution.scope or "row",
+                    page_no=located[0],
+                )
+                entry.resolution = resolution
         if resolution.status == "ambiguous":
             entry.rejection = Rejection(
                 field=name,
@@ -1598,6 +1984,7 @@ def _outcome(entry: _ResolvedField) -> FieldOutcome:
         char_end=match.end if match is not None else None,
         repaired=entry.resolution.repaired,
         disambiguation=entry.resolution.disambiguation,
+        scope=entry.resolution.scope,
     )
 
 
@@ -1805,6 +2192,14 @@ def _build_claim(  # noqa: PLR0913 - explicit gates are clearer than a bag of st
 
     qualifier: dict[str, Any] = dict(context)
     qualifier["disambiguation"] = entry.resolution.disambiguation
+    if entry.resolution.scope is not None:
+        qualifier["resolution_scope"] = entry.resolution.scope
+    if entry.resolution.page_no is not None:
+        qualifier["scope_page_no"] = entry.resolution.page_no
+    if entry.resolution.scope_span is not None:
+        qualifier["scope_char_start"], qualifier["scope_char_end"] = entry.resolution.scope_span
+    if entry.resolution.scope_label:
+        qualifier["section_heading"] = entry.resolution.scope_label
     if entry.resolution.context_quote:
         qualifier["context_quote"] = entry.resolution.context_quote
     if entry.resolution.context_span is not None:

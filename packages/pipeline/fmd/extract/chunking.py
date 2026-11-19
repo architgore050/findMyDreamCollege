@@ -419,6 +419,8 @@ _OFFSET_QUALIFIER_KEYS = (
     "context_char_end",
     "row_char_start",
     "row_char_end",
+    "scope_char_start",
+    "scope_char_end",
 )
 
 
@@ -475,12 +477,19 @@ def _normalised_value(value: Any) -> str:
 
 
 def _row_context(qualifier: Any) -> tuple[str, ...] | None:
-    """The row a claim was attributed to, strongest identity first.
+    """The location a claim was attributed to, strongest identity first.
 
     ``(table_index, row_index)`` when the resolver located the table row, the
     row label when only the label is known, else the model's ``context`` quote.
     Two claims with the same value and the same row context are the same fact;
     identical values in different rows are not.
+
+    W7 span-scope adds the section identity: a claim resolved under a printed
+    heading carries ``resolution_scope: section`` plus the heading and its
+    page, and the same value re-quoted in an overlapping window inside the
+    **same** section is the same fact. The page number is part of the key: the
+    same predicate/value on different pages is genuine per-page repetition (a
+    running header, a fee line repeated per page) and must stay two claims.
     """
     if not isinstance(qualifier, Mapping):
         return None
@@ -496,6 +505,10 @@ def _row_context(qualifier: Any) -> tuple[str, ...] | None:
     context = qualifier.get("context_quote")
     if context:
         return ("context", _normalised_value(context))
+    heading = qualifier.get("section_heading")
+    if qualifier.get("resolution_scope") == "section" and heading:
+        page = qualifier.get("scope_page_no")
+        return ("section", str(page) if isinstance(page, int) else "-", _normalised_value(heading))
     return None
 
 

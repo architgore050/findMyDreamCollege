@@ -31,6 +31,15 @@ class ClaimView:
     registry's one-sentence definition of the predicate, scope included
     (verify@v3); the verifier fills both in from ``config/predicates.yaml`` —
     the claim never supplies either, and an unknown predicate stays ``None``.
+
+    Resolution scope (W7 span-scope): a long document repeats the same words on
+    many pages, so the extractor may have resolved the quote by page or by
+    section rather than by a table row. The claim's ``qualifier`` then carries
+    ``resolution_scope`` (``document | row | page | section``), the page number
+    (``scope_page_no``) and the page/section's span. The scope travels in the
+    field payload so a page-scoped quote is judged with that fact on the table,
+    not treated as a bare suspicious quote, and the scope span widens the
+    source window like a row span does.
     """
 
     key: str
@@ -45,6 +54,9 @@ class ClaimView:
     column_header: str | None = None
     context_span: tuple[int, int] | None = None
     row_span: tuple[int, int] | None = None
+    resolution_scope: str | None = None
+    scope_page: int | None = None
+    scope_span: tuple[int, int] | None = None
     expected: str | None = None
     description: str | None = None
 
@@ -61,10 +73,11 @@ class ClaimView:
         if not isinstance(qualifier, Mapping):  # pragma: no cover - malformed claim
             qualifier = {}
         row = qualifier.get("row") or {}
-        if not isinstance(row, Mapping):  # pragma: no cover - malformed claim
+        if not isinstance(row, Mapping):  # pragma: no cover - malformed qualifier
             row = {}
         context_span = _span_of(qualifier, "context_char_start", "context_char_end")
         row_span = _span_of(qualifier, "row_char_start", "row_char_end")
+        scope_page = qualifier.get("scope_page_no")
         return cls(
             key=key or (str(claim_id) if claim_id is not None else f"{predicate}:{start}:{end}"),
             predicate=predicate,
@@ -78,6 +91,13 @@ class ClaimView:
             column_header=_text_or_none(row.get("column_header")),
             context_span=context_span,
             row_span=row_span,
+            resolution_scope=_text_or_none(qualifier.get("resolution_scope")),
+            scope_page=(
+                int(scope_page)
+                if isinstance(scope_page, int) and not isinstance(scope_page, bool)
+                else None
+            ),
+            scope_span=_span_of(qualifier, "scope_char_start", "scope_char_end"),
         )
 
 
