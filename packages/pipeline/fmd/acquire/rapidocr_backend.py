@@ -549,7 +549,7 @@ def build_rapidocr_runner(
     }
     if device.startswith("cuda:"):
         params["EngineConfig.onnxruntime.cuda_ep_cfg.device_id"] = int(device.split(":", 1)[1])
-    return RapidOCR(params=params)
+    return RapidOCR(params=_enum_params(params))
 
 
 def _onnx_providers() -> list[str]:
@@ -725,3 +725,33 @@ __all__ = [
     "normalise_devanagari_digits",
     "vram_free_gib",
 ]
+
+
+def _enum_params(params: dict) -> dict:
+    """rapidocr 3.10 requires Enum values, not strings (TypeError otherwise).
+
+    Discovered the hard way: the runner was mocked in tests, so this only surfaced
+    on the first real prefetch. Maps the string config to the package's enums when
+    they are importable, and leaves already-Enum values untouched.
+    """
+    from contextlib import suppress
+
+    try:
+        from rapidocr.utils.typings import LangRec, ModelType, OCRVersion
+    except Exception:  # older runner without these enums
+        return params
+    mapping = {
+        "Det.ocr_version": OCRVersion,
+        "Rec.ocr_version": OCRVersion,
+        "Det.model_type": ModelType,
+        "Rec.model_type": ModelType,
+        "Rec.lang_type": LangRec,
+    }
+    out = dict(params)
+    for key, enum_cls in mapping.items():
+        value = out.get(key)
+        if isinstance(value, str):
+            # leave invalid values alone; the runner reports a clear error
+            with suppress(ValueError):
+                out[key] = enum_cls(value)
+    return out
