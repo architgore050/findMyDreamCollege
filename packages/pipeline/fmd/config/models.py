@@ -7,6 +7,7 @@ Cross-file checks live in :mod:`fmd.config.loader`.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -370,6 +371,8 @@ class ProgrammeDefinition(ConfigModel):
     semantic cache key, so editing the definition invalidates cached decisions.
     """
 
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
     version: str
     target_field: str
     statement: str
@@ -385,6 +388,8 @@ class ProgrammeDefinition(ConfigModel):
 
 class ProgrammeClassifierConfig(ConfigModel):
     """Tier-2 semantic classifier settings (router purpose, batching, cache)."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     purpose: str
     prompt_version: str
@@ -414,13 +419,46 @@ class CountryTaxonomy(ConfigModel):
     stub: it declares the country and defers every name to the semantic tier.
     """
 
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
     include_patterns: list[str] = Field(default_factory=list)
     exclude_patterns: list[str] = Field(default_factory=list)
     aliases: list[dict[str, Any]] = Field(default_factory=list)
 
+    @field_validator("include_patterns", "exclude_patterns")
+    @classmethod
+    def _declared_patterns_are_safe(cls, values: list[str]) -> list[str]:
+        """Reject empty declared lists and patterns that admit everything.
+
+        An *absent* key (an empty country stub) is valid and keeps its default
+        empty list; only a key the file actually declares is checked. A pattern
+        that matches both the empty string and ``MBBS`` is a typo in the
+        taxonomy (``.*``, ``^.*$``) and would silently admit every programme,
+        so it is a config error rather than a rule.
+        """
+        if not values:
+            raise ValueError(
+                "must not be empty when declared; omit the key for an empty country "
+                "stub (e.g. `AU: {}`)"
+            )
+        for pattern in values:
+            try:
+                compiled = re.compile(pattern, re.IGNORECASE)
+            except re.error:
+                # The loader reports invalid regexes with the country key.
+                continue
+            if compiled.search("") and compiled.search("MBBS"):
+                raise ValueError(
+                    f"catch-all pattern {pattern!r} matches every name (including an "
+                    "empty string and 'MBBS'); write an explicit rule instead"
+                )
+        return values
+
 
 class ProgrammesConfig(ConfigModel):
     """Typed view of the tenth registry file, ``config/programmes.yaml``."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     version: str
     definition: ProgrammeDefinition

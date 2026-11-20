@@ -3178,3 +3178,14 @@ into row 1, MBBS and Agriculture flip to `in_scope=false` with
 before the merge) while the ranked set holds only laboratory-technology rows.
 Names no rule decides and no evidence backs stay `uncertain` →
 `needs_review` — that is the designed conservative outcome, not a failure.
+
+`--dry-run` is offline by contract: it never constructs the model router, so
+it succeeds with `FMD_LOCAL_LLM_URL` pointing at a dead port. Rules and manual
+decisions still decide as usual; names that would reach Tier 2 are reported as
+`would_classify` (and counted in `would_defer`, since no decision is written)
+alongside `would_admit`, `would_reject` and `would_defer`. Every real semantic
+decision persists its provenance — the configured profile's model id
+(`scope_model`, the reproducible string; the provider-resolved id is not
+exposed by the router yet — known gap) alongside the prompt
+version (`v1`) and definition version in the cache key, and `scope_cached`
+(false for a fresh call, true for a cache hit or manual replay).

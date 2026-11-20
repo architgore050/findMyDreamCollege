@@ -454,6 +454,10 @@ class RequalifyResult:
     dry_run: bool
     entries: tuple[RequalifyEntry, ...] = ()
     notes: tuple[str, ...] = ()
+    would_admit: int = 0
+    would_reject: int = 0
+    would_defer: int = 0
+    would_classify: int = 0
 
     @property
     def ok(self) -> bool:
@@ -469,6 +473,10 @@ class RequalifyResult:
             "dry_run": self.dry_run,
             "entries": [entry.as_dict() for entry in self.entries],
             "notes": list(self.notes),
+            "would_admit": self.would_admit,
+            "would_reject": self.would_reject,
+            "would_defer": self.would_defer,
+            "would_classify": self.would_classify,
         }
 
 
@@ -697,6 +705,7 @@ def requalify_programmes(
         notes.append(
             f"{len(merges)} duplicate row(s) folded (row-numbering normalisation)"
         )
+    tally = _tally_decisions(decisions)
     return RequalifyResult(
         rows=len(rows),
         rescoped=rescoped,
@@ -706,7 +715,36 @@ def requalify_programmes(
         dry_run=dry_run,
         entries=tuple(entries),
         notes=tuple(notes),
+        **tally,
     )
+
+
+def _tally_decisions(
+    decisions: Sequence[tuple[ScopeInput, ScopeDecision]],
+) -> dict[str, int]:
+    """Count scope outcomes for the dry-run report.
+
+    A semantic decision whose reason is ``semantic_unavailable_uncertain`` is
+    a name the classifier would have been asked about: it is both
+    ``would_classify`` and ``would_defer`` (nothing is admitted without a
+    decision). Rules and manual verdicts count as admit/reject, and any other
+    uncertain outcome counts as deferred.
+    """
+    tally = {"would_admit": 0, "would_reject": 0, "would_defer": 0, "would_classify": 0}
+    for _inp, decision in decisions:
+        if (
+            decision.tier == "semantic"
+            and decision.reason == "semantic_unavailable_uncertain"
+        ):
+            tally["would_classify"] += 1
+            tally["would_defer"] += 1
+        elif decision.in_scope:
+            tally["would_admit"] += 1
+        elif decision.needs_review:
+            tally["would_defer"] += 1
+        else:
+            tally["would_reject"] += 1
+    return tally
 
 
 def _all_rows(programmes: Any) -> list[Any]:

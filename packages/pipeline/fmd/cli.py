@@ -1054,6 +1054,28 @@ def _programme_router(registry: Any, database: Any) -> Any | None:
         return None
 
 
+def _scope_tally(drafts: Any) -> dict[str, int]:
+    """Dry-run scope counts: what the rules could decide and what waits.
+
+    ``would_classify`` is the number of names no rule or manual decision
+    settled; with the classifier skipped in a dry run they are also
+    ``would_defer`` (uncertain → needs_review), never silently admitted.
+    """
+    tally = {"would_admit": 0, "would_reject": 0, "would_defer": 0, "would_classify": 0}
+    for draft in drafts or ():
+        reason = getattr(draft, "scope_reason", None) or ""
+        if reason == "semantic_unavailable_uncertain":
+            tally["would_classify"] += 1
+            tally["would_defer"] += 1
+        elif getattr(draft, "in_scope", False):
+            tally["would_admit"] += 1
+        elif getattr(draft, "needs_review", False):
+            tally["would_defer"] += 1
+        else:
+            tally["would_reject"] += 1
+    return tally
+
+
 def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
     from fmd.db.repositories import EntitiesRepo, ProgrammesRepo
     from fmd.ingest.materialise import materialise_from_database
@@ -1061,7 +1083,11 @@ def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
     registry = load_registry(args.config_dir)
     database = _database(args)
     try:
-        router = None if args.no_classifier else _programme_router(registry, database)
+        # Lazily build the router: a dry run never needs a model server, so it
+        # skips Tier 2 entirely and reports how many names *would* be
+        # classified instead of failing on an unreachable endpoint.
+        skip_classifier = args.no_classifier or args.dry_run
+        router = None if skip_classifier else _programme_router(registry, database)
         result = materialise_from_database(
             database,
             registry,
@@ -1088,6 +1114,8 @@ def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
         payload["institution_names"] = {str(key): value for key, value in institution_names.items()}
         payload["table"] = counts
         payload["scope"] = scope_counts
+        if args.dry_run:
+            payload["would_scope"] = _scope_tally(result.drafts)
         print(json.dumps(payload, indent=2, default=str))
         return 0
 
@@ -1096,8 +1124,14 @@ def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
         f"fmd programmes materialise: claims={result.claims} rows={len(result.entries)} "
         f"{verb}={result.written} (create={result.created} update={result.updated} "
         f"unchanged={result.unchanged}) refused_aggregates={len(result.aggregates_refused)} "
-        f"classifier={'off' if args.no_classifier else 'on'}"
+        f"classifier={'off' if skip_classifier else 'on'}"
     )
+    if args.dry_run:
+        tally = _scope_tally(result.drafts)
+        print(
+            "dry-run scope: would_admit={would_admit} would_reject={would_reject} "
+            "would_defer={would_defer} would_classify={would_classify}".format(**tally)
+        )
     print(
         "scope: in={in_scope} out={out_of_scope} (rule={tier_rule} semantic={tier_semantic} "
         "manual={tier_manual}) review_queue={review_queue}".format(**scope_counts)
@@ -1361,7 +1395,10 @@ def _cmd_programmes_requalify(args: argparse.Namespace) -> int:
         programmes = ProgrammesRepo(database)
         entities = EntitiesRepo(database)
         mapping = _programme_mapping(registry, database)
-        router = None if args.no_classifier else _programme_router(registry, database)
+        # A dry run never needs the model: skip Tier 2 and report the names
+        # that would be classified instead of dialling a dead endpoint.
+        skip_classifier = args.no_classifier or args.dry_run
+        router = None if skip_classifier else _programme_router(registry, database)
         scoper = scoper_for_database(database, registry, mapping, router=router)
         result = requalify_programmes(
             programmes,
@@ -1385,8 +1422,14 @@ def _cmd_programmes_requalify(args: argparse.Namespace) -> int:
     print(
         f"fmd programmes requalify: rows={result.rows} {verb}={result.rescoped} "
         f"merged={result.merged} unchanged={result.unchanged} "
-        f"uncertain={result.uncertain} classifier={'off' if args.no_classifier else 'on'}"
+        f"uncertain={result.uncertain} classifier={'off' if skip_classifier else 'on'}"
     )
+    if args.dry_run:
+        print(
+            f"dry-run scope: would_admit={result.would_admit} "
+            f"would_reject={result.would_reject} would_defer={result.would_defer} "
+            f"would_classify={result.would_classify}"
+        )
     for note in result.notes:
         print(f"  note: {note}")
     for entry in result.entries:

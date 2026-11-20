@@ -149,6 +149,93 @@ def test_missing_config_file_is_actionable(config_dir: Path) -> None:
     assert "models.yaml: file not found" in str(excinfo.value)
 
 
+# ------------------------------------------------- programmes.yaml strictness
+#
+# The tenth registry file decides whether a programme is admitted to the pool.
+# A typo here must fail the load rather than silently admit everything.
+
+
+def _programmes_payload(config_dir: Path) -> dict:
+    return _read(config_dir / "programmes.yaml")
+
+
+def test_programmes_empty_include_patterns_is_rejected(config_dir: Path) -> None:
+    path = config_dir / "programmes.yaml"
+    payload = _programmes_payload(config_dir)
+    payload["countries"]["IN"]["include_patterns"] = []
+    _write(path, payload)
+    with pytest.raises(ConfigError) as excinfo:
+        load_registry(config_dir, env={})
+    message = str(excinfo.value)
+    assert "programmes.yaml" in message
+    assert "countries.IN.include_patterns" in message
+    assert "must not be empty when declared" in message
+
+
+def test_programmes_empty_exclude_patterns_is_rejected(config_dir: Path) -> None:
+    path = config_dir / "programmes.yaml"
+    payload = _programmes_payload(config_dir)
+    payload["countries"]["IN"]["exclude_patterns"] = []
+    _write(path, payload)
+    with pytest.raises(ConfigError) as excinfo:
+        load_registry(config_dir, env={})
+    message = str(excinfo.value)
+    assert "programmes.yaml" in message
+    assert "countries.IN.exclude_patterns" in message
+    assert "must not be empty when declared" in message
+
+
+@pytest.mark.parametrize("pattern", [".*", "^.*$", "(?s).*"])
+def test_programmes_catch_all_pattern_is_rejected(config_dir: Path, pattern: str) -> None:
+    path = config_dir / "programmes.yaml"
+    payload = _programmes_payload(config_dir)
+    payload["countries"]["IN"]["include_patterns"].append(pattern)
+    _write(path, payload)
+    with pytest.raises(ConfigError) as excinfo:
+        load_registry(config_dir, env={})
+    message = str(excinfo.value)
+    assert "programmes.yaml" in message
+    assert "countries.IN.include_patterns" in message
+    assert "catch-all pattern" in message
+    assert "MBBS" in message
+
+
+def test_programmes_unknown_top_level_key_is_rejected(config_dir: Path) -> None:
+    path = config_dir / "programmes.yaml"
+    payload = _programmes_payload(config_dir)
+    payload["countriez"] = {}
+    _write(path, payload)
+    with pytest.raises(ConfigError) as excinfo:
+        load_registry(config_dir, env={})
+    message = str(excinfo.value)
+    assert "programmes.yaml" in message
+    assert "countriez" in message
+
+
+def test_programmes_unknown_taxonomy_key_is_rejected(config_dir: Path) -> None:
+    path = config_dir / "programmes.yaml"
+    payload = _programmes_payload(config_dir)
+    payload["countries"]["IN"]["include_patternz"] = [r"\bmlt\b"]
+    _write(path, payload)
+    with pytest.raises(ConfigError) as excinfo:
+        load_registry(config_dir, env={})
+    message = str(excinfo.value)
+    assert "programmes.yaml" in message
+    assert "include_patternz" in message
+
+
+def test_programmes_missing_definition_is_rejected(config_dir: Path) -> None:
+    path = config_dir / "programmes.yaml"
+    payload = _programmes_payload(config_dir)
+    payload.pop("definition")
+    _write(path, payload)
+    with pytest.raises(ConfigError) as excinfo:
+        load_registry(config_dir, env={})
+    message = str(excinfo.value)
+    assert "programmes.yaml" in message
+    assert "definition" in message
+
+
 def test_env_interpolation_defaults_and_unresolved(monkeypatch) -> None:
     env = {"SET_VAR": "value"}
     assert interpolate_env("${SET_VAR}", env) == "value"

@@ -273,6 +273,7 @@ def classify(
 
     bundles = 0
     size = max(1, classifier.bundle_size)
+    model_id = _configured_model(router, classifier.purpose)
     # One call per NEW NAME, not per row: candidates that share a cache key
     # (the same normalised name at any institution of the same type) collapse
     # to one prompt line and one decision.
@@ -318,7 +319,9 @@ def classify(
                 verdict = _validated(candidate, raw)
                 if verdict is not raw:
                     notes.append(f"{candidate.key}: yes without evidence downgraded to uncertain")
-            decision = _to_scope_decision(verdict, classifier.prompt_version, model=None)
+            decision = _to_scope_decision(
+                verdict, classifier.prompt_version, model=model_id
+            )
             decisions[candidate.key] = decision
             if store is not None and classifier.cache:
                 store.put(
@@ -417,6 +420,36 @@ def _call_router(
     # A raw provider result (test doubles that bypass the router's validation):
     # its content is the parsed JSON object the router would have validated.
     return EquivalenceResponse.model_validate(result.content)
+
+
+def _configured_model(router: Any, purpose: str) -> str | None:
+    """The profile's configured model id for ``purpose`` (audit provenance).
+
+    The router resolves the *served* model at call time (a provider may answer
+    with a different id), but it does not expose that id to the caller. Record
+    the configured profile string — the value the operator can reproduce — and
+    keep the resolved-id limitation in the known gaps. A test double without a
+    ``models`` block yields ``None`` rather than a guessed id.
+    """
+    models = getattr(router, "models", None)
+    profiles = getattr(models, "profiles", None)
+    if not isinstance(profiles, dict):
+        return None
+    profile = profiles.get(purpose)
+    if profile is None:
+        for rule in getattr(models, "routing_rules", []) or []:
+            condition = rule.get("if") if isinstance(rule, dict) else None
+            target = rule.get("use") if isinstance(rule, dict) else None
+            if (
+                isinstance(condition, dict)
+                and condition.get("purpose") == purpose
+                and all(key == "purpose" for key in condition)
+                and target in profiles
+            ):
+                profile = profiles[target]
+                break
+    model = getattr(profile, "model", None)
+    return str(model) if model else None
 
 
 def _to_scope_decision(
