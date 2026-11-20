@@ -35,10 +35,14 @@ from fmd.er.normalise import normalise_name
 #: always reads ``params.programme_mapping`` from the institution-site source.
 #: ``seats.intake`` (and its declared ``seats.sanctioned`` alias) is the
 #: wave-2 seat-matrix predicate for the sanctioned-seats field: a per-programme
-#: row value. ``seats.total`` is the aggregate vocabulary and is deliberately
-#: NOT consumed here — an aggregate across programmes/institutions must never
-#: be written into one programme's ``seats`` column. ``seats.admitted`` is a
-#: filled-count demand signal and is never treated as intake. Both
+#: row value. ``seats.total`` is the aggregate vocabulary (a printed Total row
+#: or institution-wide figure) and is deliberately NOT consumed as an intake:
+#: an aggregate across programmes/institutions must never be written into one
+#: programme's ``seats`` column. It is *reported* — every aggregate claim is
+#: refused with reason ``seats_total_aggregate_not_programme_intake`` so an
+#: auditor can see the value was read and deliberately discarded (the claim
+#: itself stays in ``claims``; the evidence is not lost). ``seats.admitted``
+#: is a filled-count demand signal and is never treated as intake. Both
 #: ``seats.intake``/``seats.sanctioned`` and ``seats.duration_months`` are
 #: consumed when present and never invented. Semesters are still not converted
 #: to months.
@@ -54,6 +58,8 @@ DEFAULT_PROGRAMME_MAPPING: dict[str, Any] = {
     ],
     "internship_month_predicates": ["curriculum.internship_months"],
     "seats_predicates": ["seats.intake", "seats.sanctioned"],
+    # Aggregate vocabulary: reported as refused, never written into a row.
+    "aggregate_seats_predicates": ["seats.total"],
     "medium_predicates": ["curriculum.medium", "programme.medium"],
     "affiliated_university_predicates": [
         "curriculum.affiliated_university",
@@ -133,6 +139,25 @@ DEFAULT_PROGRAMME_MAPPING: dict[str, Any] = {
 }
 
 
+#: Reason recorded for every aggregate ``seats.total`` claim: the value was
+#: read and deliberately discarded, never written into a per-programme row.
+#: The claim itself stays in ``claims`` (append-only evidence is never lost);
+#: this entry makes the discard auditable.
+AGGREGATE_SEATS_REFUSED = "seats_total_aggregate_not_programme_intake"
+
+#: Materialised attribute fields, in the order a reviewer reads them. The
+#: aggregate is listed because *evidence* for it may exist — it is reported,
+#: never stored on the row.
+ATTRIBUTE_FIELDS: tuple[str, ...] = (
+    "name",
+    "credential_level",
+    "seats",
+    "seats_total_aggregate",
+    "duration_months",
+    "internship_months",
+)
+
+
 def _text(value: Any) -> str:
     return " ".join(str(value or "").split())
 
@@ -164,6 +189,7 @@ class ProgrammeMapping:
     duration_month_predicates: tuple[str, ...]
     internship_month_predicates: tuple[str, ...]
     seats_predicates: tuple[str, ...]
+    aggregate_seats_predicates: tuple[str, ...]
     medium_predicates: tuple[str, ...]
     affiliated_university_predicates: tuple[str, ...]
     recognition_predicates: tuple[str, ...]
@@ -214,6 +240,7 @@ class ProgrammeMapping:
             duration_month_predicates=_tuple(raw.get("duration_month_predicates")),
             internship_month_predicates=_tuple(raw.get("internship_month_predicates")),
             seats_predicates=_tuple(raw.get("seats_predicates")),
+            aggregate_seats_predicates=_tuple(raw.get("aggregate_seats_predicates")),
             medium_predicates=_tuple(raw.get("medium_predicates")),
             affiliated_university_predicates=_tuple(raw.get("affiliated_university_predicates")),
             recognition_predicates=_tuple(raw.get("recognition_predicates")),
@@ -419,6 +446,34 @@ def _normalise_recognition(value: Any, mapping: ProgrammeMapping) -> str:
     return "unknown"
 
 
+def field_for_predicate_map(mapping: ProgrammeMapping) -> dict[str, str]:
+    """Published attribute field -> the predicate kinds that may prove it.
+
+    The inverse of the mapping's predicate lists: ``field_sources`` is keyed by
+    predicate, reviewers read by field, and the CLI/list/inspect views need the
+    bridge. ``credential_level`` is derived from the *name* claim, so a name
+    predicate proves it too (recorded with the same claim id).
+    """
+    bridge: dict[str, str] = {}
+    for predicate in mapping.name_predicates:
+        bridge[predicate] = "name"
+    for predicate in mapping.duration_month_predicates:
+        bridge[predicate] = "duration_months"
+    for predicate in mapping.internship_month_predicates:
+        bridge[predicate] = "internship_months"
+    for predicate in mapping.seats_predicates:
+        bridge[predicate] = "seats"
+    for predicate in mapping.medium_predicates:
+        bridge[predicate] = "medium"
+    for predicate in mapping.affiliated_university_predicates:
+        bridge[predicate] = "affiliated_university"
+    for predicate in mapping.recognition_predicates:
+        bridge[predicate] = "recognition_status"
+    for predicate in mapping.aggregate_seats_predicates:
+        bridge[predicate] = "seats_total_aggregate"
+    return bridge
+
+
 def programme_drafts(
     claims: Iterable[Any],
     mapping: ProgrammeMapping,
@@ -434,6 +489,21 @@ def programme_drafts(
     eligible = [claim for claim in claims if _eligible(claim)]
     grouped: dict[int, list[Any]] = {}
     rejected: list[dict[str, Any]] = []
+    # The aggregate-vs-row guard runs before grouping: an aggregate seats claim
+    # is refused for what it *is* (an institution/document-level total), not
+    # because of what the institution happens to name.
+    for claim in sorted(
+        (c for c in eligible if _get(c, "predicate") in mapping.aggregate_seats_predicates),
+        key=lambda c: int(_get(c, "id", 0) or 0),
+    ):
+        rejected.append(
+            {
+                "claim_id": _get(claim, "id"),
+                "institution_id": _get(claim, "entity_id"),
+                "value": _get(claim, "value"),
+                "reason": AGGREGATE_SEATS_REFUSED,
+            }
+        )
     for claim in eligible:
         entity_id = _get(claim, "entity_id")
         if entity_id is None:
@@ -626,6 +696,8 @@ def _flag_similar_names(drafts: list[ProgrammeDraft]) -> list[ProgrammeDraft]:
 
 
 __all__ = [
+    "AGGREGATE_SEATS_REFUSED",
+    "ATTRIBUTE_FIELDS",
     "DEFAULT_PROGRAMME_MAPPING",
     "NameMatch",
     "ProgrammeDraft",
@@ -634,6 +706,7 @@ __all__ = [
     "as_int",
     "credential_level_for",
     "credential_was_defaulted",
+    "field_for_predicate_map",
     "names_are_similar",
     "normalise_programme_name",
     "programme_drafts",
