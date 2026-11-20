@@ -1098,6 +1098,31 @@ is now `acquisition_failed:docling_cuda_oom`: the document is marked
 `needs_review`, the run summary is `ok:false`, and the CLI exits non-zero. It
 never reports a clean run with zero claims.
 
+**Measured 2026-11-20 (RTX 5080 Laptop 16303 MiB, 30 GB RAM; four documents,
+7–434 pages).** The "cannot fit" claim above is now quantified:
+
+| LLM config | VRAM used/free | decode tok/s (short / after 8.8k) | Docling CPU s/page | Docling CUDA s/page |
+|---|---|---|---|---|
+| 64k q8_0 KV on GPU (production) | 15052 / 1251 MiB | 130.8 / 106.8 | 1.0–3.8 | **OOM** (needs ~1.0–1.3 GiB; 589 MiB free after context) |
+| 64k `--no-kv-offload` (KV in RAM) | 14130 / 2173 MiB | 66.2 / **18.0** | unchanged | 0.16–0.87 |
+| 32k q8_0 KV on GPU | 14584 / 1719 MiB | 125.7 / 105.0 | unchanged | not safe (~1.06 GiB headroom) |
+| 64k q4_0 KV on GPU | 14582 / 1721 MiB | 126.1 / 109.7 | unchanged | not safe; 4-bit KV quality unvalidated |
+
+- `--no-kv-offload` frees only **~0.9 GiB** (the KV itself), which is exactly
+  Docling's requirement; the pair fits with 23 MiB to spare. The price is
+  **−49% decode short, −83% after an 8.8k prompt** (18 tok/s), and −91% when
+  Docling is concurrently on CUDA. Not a default.
+- **CPU Docling is nearly free from the LLM's point of view**: 64k KV on GPU +
+  Docling on CPU ran concurrently at 47.3 pages/min with LLM decode −6%. Host
+  RSS is **2.2 GiB (small docs) / 4.1 GiB (161 p) / 5.2 GiB (434 p)**.
+- Docling on CUDA is **2–6× faster per page** (0.16 vs 1.31 s/page on a 161-page
+  report). The only way to have it is to **stop `llama-server` for the
+  acquisition batch**, then restart for extraction — or accept the KV-offload
+  decode penalty. There is no dynamic "load KV when needed" in llama.cpp; KV is
+  resident for the server's lifetime.
+- 32k or q4_0 KV do not free enough for CUDA Docling either (~1.0–1.1 GiB), so
+  shortening the context buys nothing for coexistence.
+
 ```bash
 # 0) once per boot: host text model (weights already on host; no download)
 scripts/serve_local.sh start
