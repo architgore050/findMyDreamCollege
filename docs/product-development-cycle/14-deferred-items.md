@@ -77,6 +77,41 @@ D18 quality gates — the engine preference is provisional until that run (runbo
 | D6 | **Crawl scale-up** — 50 domains → 300–500, deeper per domain | Sustained bandwidth over hours | 1–3 days |
 | D7 | **Deployment** — VM, object storage for snapshots, read-only public DB/API, methodology page | Not a v1 blocker; needs hosted infra | 2–3 days |
 
+## B2. Post-v1: cross-country credential equivalence (not in v1)
+
+The v1 programme taxonomy is **India-first and rule-based**. Outside India, the same degree is named
+differently — and universities sometimes invent a one-off name that appears in no alias list:
+
+- US/Canada: Medical Laboratory Science / Clinical Laboratory Science
+- UK/Ireland: Biomedical Science (with IBMS accreditation), Healthcare Science
+- Australia/NZ: Laboratory Medicine, Medical Laboratory Science, Biomedical Science
+- Philippines: BS Medical Technology / Medical Technology
+- Gulf: Medical Laboratory Sciences, Clinical Laboratory Technology
+- Germany/Nordics: often language-gated (MTLA, bioanalytiker), not English-taught
+
+**Exact alias matching is insufficient by design.** A future agent must implement a three-tier
+equivalence decision, not a longer list:
+
+1. **Rules** — curated include/exclude per country in `config/programmes.yaml` (v1 already stubs the
+   `IN` block; other countries land as empty stubs, never as invented patterns).
+2. **Semantic equivalence classifier** — for names that match no rule: given the programme name, the
+   institution, department, and any curriculum/regulator claims, decide
+   `equivalent: yes | no | uncertain` with a **citation** (which claims/evidence) and a rationale.
+   Reference definition is conceptual ("diagnostic laboratory science: clinical biochemistry,
+   haematology, microbiology, histopathology, blood bank"), **not** a name list. Must be conservative:
+   `uncertain` → `needs_review`, excluded from ranking; never auto-admitted.
+3. **Learning loop** — a human `needs_review` decision becomes a `manual` alias that the rule tier
+   consumes next run, so the classifier is asked less over time and the system accumulates knowledge
+   instead of re-deciding.
+
+Guardrails for whoever builds this: no invented equivalences, every admission cites evidence, the
+classifier's model/prompt version is recorded per programme, and a false positive (admitting MBBS or
+Nursing as MLT) is worse than leaving it `uncertain`.
+
+**Sources to consult before expanding:** country regulators and accreditation bodies (NAACLS/ASCP US,
+CSMLS Canada, IBMS/HCPC UK, AIMS Australia, PCQ NZ, PRC Philippines, DHA/SCFHS Gulf), plus national
+qualification frameworks. Do not infer equivalence from a name alone.
+
 ## C. Needs a human decision (not engineering)
 
 | ID | Item | Why it waits |
