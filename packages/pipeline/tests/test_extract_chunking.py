@@ -391,3 +391,63 @@ def test_to_absolute_offsets_shifts_spans_and_qualifier_spans() -> None:
 def test_to_absolute_offsets_is_identity_at_window_one() -> None:
     claim = _claim(char_start=10, char_end=20)
     assert to_absolute_offsets(claim, 0) is claim
+
+
+# ----------------------------------------------------------------- W8 headings
+
+
+def test_plan_windows_prefers_cutting_at_a_heading_boundary() -> None:
+    # The heading sits inside the cut's look-back zone (target 400, zone 60),
+    # so the window ends exactly where the section begins and the section
+    # opens the next window: its breadcrumb governs that whole window.
+    text = (
+        "Chapter intro lines that fill space before the first heading.\n"
+        + ("Body line with numbers 12345.\n" * 10)
+        + "4. Fees\n"
+        + ("Fee table line with numbers 67890.\n" * 30)
+    )
+    heading_start = text.index("4. Fees")
+    assert 340 <= heading_start <= 400  # inside the first cut's look-back zone
+    plan = plan_windows(
+        text,
+        window_chars=400,
+        overlap_chars=60,
+        max_windows=8,
+        min_window_chars=50,
+        section_starts=(heading_start,),
+    )
+
+    assert plan.window_count >= 2
+    first = plan.windows[0]
+    assert first.char_end == heading_start
+    # Window 2 starts back inside the overlap zone (straddle safety) but its
+    # owned core begins exactly at the heading.
+    second = plan.windows[1]
+    assert second.core_start == heading_start
+    assert text[second.core_start :][: len("4. Fees")] == "4. Fees"
+
+
+def test_plan_windows_without_headings_is_unchanged() -> None:
+    text = _report(pages=6)
+    baseline = plan_windows(text, **PLAN_PARAMS)
+    with_starts = plan_windows(text, section_starts=(), **PLAN_PARAMS)
+    assert [w.char_start for w in baseline.windows] == [w.char_start for w in with_starts.windows]
+    assert [w.char_end for w in baseline.windows] == [w.char_end for w in with_starts.windows]
+
+
+def test_plan_windows_split_inside_an_oversized_section() -> None:
+    # One section far larger than the budget: no heading falls inside the
+    # look-back zone, so the plan falls back to page/line cuts inside it.
+    text = "4. Fees\n" + ("Fee table row with numbers 12345.\n\n" * 120)
+    plan = plan_windows(
+        text,
+        window_chars=500,
+        overlap_chars=80,
+        max_windows=24,
+        min_window_chars=100,
+        section_starts=(0,),
+    )
+    assert plan.window_count >= 2
+    assert plan.windows[0].text.startswith("4. Fees")
+    # Every window covering the section body is inside the same section.
+    assert all(window.char_end <= len(text) for window in plan.windows)

@@ -70,18 +70,37 @@ def system_prompt(name: str, version: str | None = None) -> str:
     return load_prompt(name, version).text
 
 
-def user_message(text: str, *, max_chars: int | None = None) -> str:
+def user_message(
+    text: str,
+    *,
+    max_chars: int | None = None,
+    document_sections: str | None = None,
+) -> str:
     """The user turn: verbatim text, delimited so the quote is unambiguous.
 
     The model returns quotes, not offsets: offsets are computed against the
     un-delimited extraction text by :mod:`fmd.extract.validate`, so the
     delimiter is never part of a span.
+
+    ``document_sections`` is the W8 outline breadcrumb block. It is appended
+    **after** the delimited document text and labelled as metadata: it is
+    orientation for the model ("where am I in the outline"), never quotable
+    document text — validation resolves quotes against the extraction text
+    only, so a heading string that exists only in this metadata cannot resolve
+    as a claim quote.
     """
     body = text if max_chars is None else text[:max_chars]
-    return (
+    message = (
         "DOCUMENT TEXT (verbatim; quote from this block exactly, without the "
         "delimiters):\n"
         "<<<\n"
         f"{body}\n"
         ">>>"
     )
+    if document_sections:
+        message += (
+            "\n\n---\n"
+            "DOCUMENT SECTIONS (metadata only — NOT document text; never quote it):\n"
+            f"{document_sections}"
+        )
+    return message

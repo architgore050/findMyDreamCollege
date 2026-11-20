@@ -19,7 +19,7 @@ from typing import Any, Literal
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from fmd.db.connection import Database
+from fmd.db.connection import Database, DatabaseError
 
 
 class RowModel(BaseModel):
@@ -297,6 +297,43 @@ class ExtractionCreate(RowModel):
 class ExtractionRecord(ExtractionCreate):
     id: int
     created_at: datetime | None = None
+
+
+class SectionNodeCreate(RowModel):
+    """One heading of a document's section tree (W8 section-structure).
+
+    ``node_key`` is the 1-based ordinal in document order (stable across
+    re-derivations of the same text); ``parent_key`` refers to the parent's
+    ``node_key`` and is resolved to a database id on insert.
+    """
+
+    node_key: int
+    level: int
+    title: str
+    char_start: int
+    char_end: int
+    heading_char_start: int
+    heading_char_end: int
+    page_no: int | None = None
+    bbox: list[float] | None = None
+    parent_key: int | None = None
+
+
+class SectionTreeWrite(RowModel):
+    """A whole-tree write: sections are derived structure, replaced wholesale."""
+
+    document_id: int
+    extractor: str
+    extractor_version: str | None = None
+    nodes: list[SectionNodeCreate]
+
+
+class SectionNodeRecord(SectionNodeCreate):
+    """A persisted heading; ``id``/``parent_id`` are database identities."""
+
+    id: int
+    document_id: int
+    parent_id: int | None = None
 
 
 Method = Literal["extracted", "derived", "modelled", "user_provided"]
@@ -2216,6 +2253,112 @@ class ExtractionsRepo:
         return [_extraction(row) for row in rows]
 
 
+class SectionsRepo:
+    """The document section tree (W8 section-structure, migration 0009).
+
+    Sections are derived structure, never evidence: a write replaces the
+    document's whole tree in one transaction (delete + insert keyed by the
+    stable ``node_key``), so a re-extraction can never leave a stale tree or a
+    half-updated one. Lookups use the (document_id, char_start, level DESC)
+    index plus a parent_id walk — never a linear scan per claim.
+    """
+
+    def __init__(self, database: Database) -> None:
+        self.db = database
+
+    def replace_for_document(self, tree: SectionTreeWrite) -> int:
+        """Write the document's tree wholesale; returns the node count."""
+        with self.db.connection() as conn:
+            conn.execute(
+                "DELETE FROM document_sections WHERE document_id = %s",
+                (tree.document_id,),
+            )
+            id_by_key: dict[int, int] = {}
+            for node in tree.nodes:
+                parent_id = id_by_key.get(node.parent_key) if node.parent_key else None
+                if node.parent_key is not None and parent_id is None:
+                    raise DatabaseError(
+                        f"section node {node.node_key} references parent_key "
+                        f"{node.parent_key} which is not already written"
+                    )
+                row = conn.execute(
+                    """
+                    INSERT INTO document_sections
+                        (document_id, parent_id, node_key, level, title,
+                         char_start, char_end, heading_char_start, heading_char_end,
+                         page_no, bbox_json, extractor, extractor_version)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        tree.document_id,
+                        parent_id,
+                        node.node_key,
+                        node.level,
+                        node.title,
+                        node.char_start,
+                        node.char_end,
+                        node.heading_char_start,
+                        node.heading_char_end,
+                        node.page_no,
+                        _json(list(node.bbox) if node.bbox is not None else None),
+                        tree.extractor,
+                        tree.extractor_version,
+                    ),
+                ).fetchone()
+                assert row is not None
+                id_by_key[node.node_key] = int(row["id"])
+        return len(tree.nodes)
+
+    def delete_for_document(self, document_id: int) -> int:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "DELETE FROM document_sections WHERE document_id = %s RETURNING id",
+                (document_id,),
+            ).fetchall()
+        return len(rows)
+
+    def list_for_document(self, document_id: int) -> list[SectionNodeRecord]:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM document_sections WHERE document_id = %s ORDER BY node_key",
+                (document_id,),
+            ).fetchall()
+        return [_section_node(row) for row in rows]
+
+    def breadcrumb(
+        self, document_id: int, char_start: int, char_end: int
+    ) -> dict[str, Any] | None:
+        """Deepest section containing ``[char_start, char_end)`` + its chain.
+
+        One indexed query: the anchor picks the narrowest containing node
+        (deepest level first), the recursive part walks ``parent_id`` to the
+        root. Returns ``{"node": SectionNodeRecord, "breadcrumb": [titles]}``
+        or ``None`` when no section contains the span.
+        """
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                WITH RECURSIVE chain AS (
+                    (SELECT * FROM document_sections
+                      WHERE document_id = %s
+                        AND char_start <= %s AND char_end >= %s
+                      ORDER BY level DESC, char_start DESC
+                      LIMIT 1)
+                  UNION ALL
+                    SELECT s.* FROM document_sections s
+                    JOIN chain c ON s.id = c.parent_id
+                )
+                SELECT * FROM chain ORDER BY level ASC
+                """,
+                (document_id, char_start, char_end),
+            ).fetchall()
+        if not rows:
+            return None
+        nodes = [_section_node(row) for row in rows]
+        return {"node": nodes[-1], "breadcrumb": [node.title for node in nodes]}
+
+
 class ClaimsRepo:
     def __init__(self, database: Database) -> None:
         self.db = database
@@ -3556,6 +3699,25 @@ def _extraction(row: dict[str, Any]) -> ExtractionRecord:
         structure=row["structure_json"],
         id=row["id"],
         created_at=row["created_at"],
+    )
+
+
+def _section_node(row: dict[str, Any]) -> SectionNodeRecord:
+    bbox = row.get("bbox_json")
+    bbox = list(bbox) if bbox is not None else None
+    return SectionNodeRecord(
+        id=row["id"],
+        document_id=row["document_id"],
+        parent_id=row["parent_id"],
+        node_key=row["node_key"],
+        level=row["level"],
+        title=row["title"],
+        char_start=row["char_start"],
+        char_end=row["char_end"],
+        heading_char_start=row["heading_char_start"],
+        heading_char_end=row["heading_char_end"],
+        page_no=row["page_no"],
+        bbox=bbox,
     )
 
 

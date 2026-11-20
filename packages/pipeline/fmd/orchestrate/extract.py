@@ -26,7 +26,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from fmd.acquire.errors import ACQUISITION_FAILED_PREFIX
-from fmd.db.repositories import ClaimsRepo, ExtractionsRepo, SnapshotsRepo
+from fmd.db.repositories import ClaimsRepo, ExtractionsRepo, SectionsRepo, SnapshotsRepo
 from fmd.extract.chunking import CHUNK_BUDGET_EXHAUSTED, CHUNK_FAILED_PREFIX
 from fmd.extract.pipeline import (
     ExtractPipeline,
@@ -70,6 +70,7 @@ class Extractor:
         verifier_factory: Any = None,
         verify: bool = True,
         predicates: Any | None = None,
+        sections: SectionsRepo | Any | None = None,
     ) -> None:
         self.snapshots = snapshots
         self.documents = documents
@@ -84,6 +85,8 @@ class Extractor:
         self.verifier_factory = verifier_factory
         self.verify = verify
         self.predicates = predicates
+        #: Section-tree repo (W8); ``None`` keeps the outline audit-only.
+        self.sections = sections
         self._verifier_ready = False
         self._verifier_cost = 0.0
         self._verifier_exhausted = False
@@ -100,6 +103,7 @@ class Extractor:
             claims=self.claims,
             store=self.store,
             tool_version=self.tool_version,
+            sections=self.sections,
         )
 
     def run(

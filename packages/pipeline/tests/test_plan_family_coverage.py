@@ -350,3 +350,46 @@ def test_runner_up_is_recorded_for_auditability() -> None:
     _family, _, signals, _ = detect_family(url=NEUTRAL_URL, text_sample=text)
 
     assert signals["runner_up_family_score"] >= 0  # the audit trail keeps the runner-up
+
+
+# ------------------------------------------------------- W8 outline headings
+
+
+def test_outline_headings_feed_the_heading_and_title_channels() -> None:
+    """W8: the persisted tree's titles are classification signals."""
+    # A sample whose bounded T0 window missed the cover line: the tree still
+    # carries "Annual Report 2023-24" as its first heading.
+    sample = "Audit observations follow the report body.\n" + ("Numbers 12345 appear.\n" * 10)
+    without_tree = detect_family(url=NEUTRAL_URL, text_sample=sample)
+    with_tree = detect_family(
+        url=NEUTRAL_URL,
+        text_sample=sample,
+        outline_headings=("Annual Report 2023-24", "5. PLACEMENTS"),
+    )
+
+    assert without_tree[0] is None  # the sample alone cannot classify
+    assert with_tree[0] == "accreditation"
+    assert with_tree[2]["title_decisive"] == 1  # the tree's cover line decides
+
+
+def test_outline_headings_absent_keeps_behaviour_byte_identical() -> None:
+    """Precedence is unchanged: no tree, no difference."""
+    text = _text("annual_report.txt")
+    baseline = score_families(url=NEUTRAL_URL, text_sample=text)
+    explicit_none = score_families(url=NEUTRAL_URL, text_sample=text, outline_headings=None)
+    assert [(item.family, item.score, item.signals) for item in baseline] == [
+        (item.family, item.score, item.signals) for item in explicit_none
+    ]
+
+
+def test_tree_cover_that_names_no_family_leaves_the_sample_in_charge() -> None:
+    """A tree cover that names no family leaves the sample cover rules as-is."""
+    text = _text("annual_report.txt")
+    family, confidence, signals, reason = detect_family(
+        url=NEUTRAL_URL,
+        text_sample=text,
+        outline_headings=("Appendix of Tables",),
+    )
+    baseline = detect_family(url=NEUTRAL_URL, text_sample=text)
+    assert (family, confidence, reason) == (baseline[0], baseline[1], baseline[3])
+    assert signals["title"] >= 1  # the sample-derived title decided

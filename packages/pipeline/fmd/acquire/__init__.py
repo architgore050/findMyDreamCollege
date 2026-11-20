@@ -37,6 +37,14 @@ from fmd.acquire.guards import (
     guard_trip_summary,
     repeated_substring_ratio,
 )
+from fmd.acquire.outline import (
+    OutlineNode,
+    OutlinePolicy,
+    SectionIndex,
+    breadcrumb_of,
+    build_outline,
+    outline_summary,
+)
 from fmd.acquire.tables import CellHeaderLink, TableCellAssociation, associate_headers
 from fmd.acquire.tiers import (
     AcquirePolicy,
@@ -76,15 +84,21 @@ __all__ = [
     "TextBlock",
     "TierDecision",
     "TierUnavailable",
+    "OutlineNode",
+    "OutlinePolicy",
+    "SectionIndex",
     "apply_anomaly_guard",
     "associate_headers",
     "born_digital_length_warnings",
+    "breadcrumb_of",
     "build_canonical",
+    "build_outline",
     "detect_anomalies",
     "docling_artifacts_path",
     "guard_trip_summary",
     "indic_self_check",
     "offline_enabled",
+    "outline_summary",
     "plan_tiers",
     "probe",
     "repeated_substring_ratio",
@@ -95,3 +109,4 @@ __all__ = [
     "t2_extract",
     "t2b_extract",
 ]
+

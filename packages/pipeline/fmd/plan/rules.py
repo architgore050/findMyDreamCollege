@@ -52,6 +52,7 @@ than one that repeats a single token, because each token contributes once.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -474,6 +475,32 @@ def title_line(sample: str | None, rules: PlanRules | None = None) -> str:
     return candidates[0]
 
 
+def cover_title(
+    sample: str | None,
+    rules: PlanRules | None = None,
+    outline_headings: Sequence[str] | None = None,
+) -> str:
+    """The document's cover title, tree-aware (W8).
+
+    A tree cover that names a family decides: the section tree's first heading
+    is the document's own cover line (a Docling ``title`` item, or the first
+    detected heading), and it is at least as reliable as a heading-shaped line
+    re-detected from a bounded sample. A tree that names no family (or no tree
+    at all) leaves :func:`title_line`'s sample rules unchanged.
+    """
+    if outline_headings and rules is not None:
+        for line in (str(title).strip() for title in outline_headings):
+            if not line:
+                continue
+            key = normalise(line)
+            if any(
+                rule.heading_tokens and _matches(rule.heading_tokens, key)
+                for rule in rules.families
+            ):
+                return line
+    return title_line(sample, rules)
+
+
 # ------------------------------------------------------------- prospectus shape
 #: Identity vocabulary: a prospectus announces itself on its cover. Bare
 #: "brochure" is too generic (a placement brochure is a placement_report), so
@@ -606,16 +633,29 @@ def score_families(
     text_sample: str | None = None,
     rules: PlanRules = DEFAULT_RULES,
     recurring_min: int | None = None,
+    outline_headings: Sequence[str] | None = None,
 ) -> list[FamilyScore]:
-    """Rank every configured family against one document. Deterministic order."""
+    """Rank every configured family against one document. Deterministic order.
+
+    ``outline_headings`` (W8) are the document's heading titles from the
+    persisted section tree. They join the sample's heading-shaped lines in the
+    ``heading`` channel and are tried first as cover ``title`` candidates: a
+    document whose tree says "Annual Report 2023-24" names itself even when the
+    bounded T0 sample missed the cover line. When ``None`` (or empty) the
+    scoring is byte-identical to the pre-W8 behaviour — precedence is
+    unchanged (registry-declared family > text evidence > filename hints).
+    """
     weights = rules.weights
     url_key = normalise(f"{urlsplit(url).path} {urlsplit(url).query}")
     anchor_key = normalise(anchor_text)
     text_key = normalise(text_sample)
     extension = extension_of(url)
     sample = text_sample or ""
-    title_key = normalise(title_line(sample, rules)) if sample.strip() else ""
-    heading_key = normalise(" ".join(heading_lines(sample)))
+    headings = heading_lines(sample)
+    if outline_headings:
+        headings = [str(title) for title in outline_headings if str(title).strip()] + headings
+    title_key = normalise(cover_title(sample, rules, outline_headings)) if sample.strip() else ""
+    heading_key = normalise(" ".join(headings))
     recurring_floor = weights.recurring_min if recurring_min is None else recurring_min
     haystacks = {"url": url_key, "anchor": anchor_key, "text": text_key}
 
@@ -684,6 +724,7 @@ def detect_family(
     margin: float | None = None,
     recurring_min: int | None = None,
     table_min_rows: int | None = None,
+    outline_headings: Sequence[str] | None = None,
 ) -> tuple[str | None, float, dict[str, int], str | None]:
     """Return ``(family, confidence, signals, abstain_reason)``.
 
@@ -697,7 +738,9 @@ def detect_family(
     ``min_score`` / ``margin`` / ``recurring_min`` / ``table_min_rows`` let
     :mod:`fmd.plan.planner` apply the registry's per-phase thresholds without
     forking the rule set. They default to the rule weights so standalone callers
-    (tests, fixtures) stay deterministic.
+    (tests, fixtures) stay deterministic. ``outline_headings`` (W8) feed the
+    persisted section tree's heading titles into the heading/title channels;
+    ``None`` keeps the pre-W8 behaviour byte-identical.
     """
     weights = rules.weights
     floor = weights.min_score if min_score is None else min_score
@@ -710,6 +753,7 @@ def detect_family(
             text_sample=text_sample,
             rules=rules,
             recurring_min=recurring_min,
+            outline_headings=outline_headings,
         )
         if item.score > 0
     ]
