@@ -14,6 +14,7 @@ from fmd.ingest.dedupe_audit import (
     is_same_document,
 )
 from fmd.ingest.programmes import (
+    AGGREGATE_SEATS_REFUSED,
     ProgrammeMapping,
     names_are_similar,
     normalise_programme_name,
@@ -314,3 +315,60 @@ def test_semesters_are_still_never_converted_to_months() -> None:
 
     assert drafts[0].duration_months is None
     assert "curriculum.semesters" not in drafts[0].field_sources
+
+
+# ------------------------------------------------------------------ wave-8 aggregate guard
+
+
+def _fixture_claims() -> list[dict]:
+    """The committed W8 fixture: seats.intake=20 (row) + seats.total=195 (Total)."""
+    import json
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / "programmes"
+        / "seat_matrix_row_plus_total.json"
+    )
+    return json.loads(path.read_text())["claims"]
+
+
+def test_row_intake_lands_and_printed_aggregate_is_refused() -> None:
+    """One document, two seat numbers: only the row value is a per-programme intake.
+
+    ``seats.total`` is an institution/document-level aggregate (the printed
+    Total row). It is discarded with an explicit reason so an auditor can see
+    the value was read and deliberately not used; the claim itself stays in
+    ``claims`` — append-only evidence is never lost.
+    """
+    drafts, rejected = programme_drafts(_fixture_claims(), mapping())
+
+    assert len(drafts) == 1
+    draft = drafts[0]
+    assert draft.normalised_name == "bsc mlt"
+    assert draft.seats == 20
+    assert draft.field_sources == {"seats.programme_name": "1", "seats.intake": "2"}
+    assert "seats.total" not in draft.field_sources
+    refusals = [item for item in rejected if item.get("reason") == AGGREGATE_SEATS_REFUSED]
+    assert refusals == [
+        {
+            "claim_id": 3,
+            "institution_id": 1,
+            "value": 195,
+            "reason": AGGREGATE_SEATS_REFUSED,
+        }
+    ]
+
+
+def test_aggregate_only_document_still_materialises_with_null_seats() -> None:
+    """UNKNOWN is a value: no aggregate ⇒ NULL seats, never a guessed number."""
+    claims = [
+        claim(1, 3, "seats.programme_name", "B.Sc. MLT"),
+        claim(2, 3, "seats.total", 195, unit="count"),
+    ]
+    drafts, rejected = programme_drafts(claims, mapping())
+
+    assert drafts[0].seats is None
+    assert rejected[0]["reason"] == AGGREGATE_SEATS_REFUSED
+    assert rejected[0]["value"] == 195

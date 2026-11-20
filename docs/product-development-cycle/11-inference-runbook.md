@@ -1506,22 +1506,19 @@ Scoring selects from `programmes`. Before this stage that table had 0 rows, so a
 * Re-running is idempotent: `ON CONFLICT (institution_id, normalised_name)` and
   the row is replaced with the current draft (including NULLs).
 
-Invocation (host venv; the run ledger row is written by the caller when needed):
+Invocation (W8 onwards, no script needed; the crawl path runs the same code
+via `ProgrammeStage`):
 
 ```bash
 export DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd
 cd packages/pipeline
-uv run python - <<'PY'
-from fmd.config import load_registry
-from fmd.db import Database
-from fmd.orchestrate.ingest import ProgrammeStage
-from fmd.orchestrate.ledger import RunSummary, utcnow
-db = Database(); stage = ProgrammeStage.from_database(db, load_registry(None))
-s = RunSummary(run_id="programme-materialisation", stage="ingest", started_at=utcnow())
-stage.run(summary=s); s.finish(); print(s.as_json()); db.close()
-PY
+uv run python -m fmd.cli programmes materialise
 uv run python -m fmd.cli score
 ```
+
+(2026-11-20, W8: materialisation is also available outside the crawl path as
+`fmd programmes materialise|list|inspect` — see §12 below. The write loop
+lives in `fmd/ingest/materialise.py`; `ProgrammeStage.run` delegates to it.)
 
 ### Measured on the 12-claim DB
 
@@ -2934,3 +2931,162 @@ containment); `test_extract_sections_metadata.py` pins the metadata block and
 the unquotable-heading rule; `test_extract_chunking.py` pins heading-aligned
 cuts; `test_plan_family_coverage.py` pins the planner seam; `test_db.py` pins
 the 0009 round trip, breadcrumb SQL and wholesale replacement.
+
+## 12. On-demand programme materialisation — `fmd programmes` (2026-11-20, W8)
+
+### The problem, measured
+
+Materialisation used to run only inside the crawl/ingest path
+(`ProgrammeStage`), so claims verified *after* a crawl — or re-extracted after
+a prompt/scope fix — never became programme rows. The corpus held 61 verified
+claims (28 accreditation, 14 seats, 7 fee, 7 curriculum, 5 placement) while
+`programmes` had 2 rows, both `partial` at best: the tool could not rank
+anything despite holding seat data.
+
+### What changed
+
+`fmd/orchestrate/ingest.py::ProgrammeStage.run` no longer owns the write loop;
+it delegates to `materialise_stage_run()` in the new
+`fmd/ingest/materialise.py`. The same module exposes the on-demand entry
+points, so the crawl path and the CLI share one implementation and cannot
+drift:
+
+* `materialise_programmes(programmes, entities, mapping, *, dry_run, force)` —
+  the reusable core; works against any repo exposing
+  `materialisation_claims()` / `upsert()` (real repo or test fake);
+* `materialise_from_database(database, registry, *, dry_run, force)` — one
+  call against a live database, no crawl, no model;
+* `evidence_completeness(claims, mapping, predicates)` — the list view's
+  completeness metric.
+
+New CLI (no crawl, no extraction, no model):
+
+```bash
+export DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd
+cd packages/pipeline
+uv run python -m fmd.cli programmes materialise            # write changed rows only
+uv run python -m fmd.cli programmes materialise --dry-run  # print the plan, write nothing
+uv run python -m fmd.cli programmes materialise --force    # rewrite even unchanged rows
+uv run python -m fmd.cli programmes list                   # seats + claim id, completeness, review reasons
+uv run python -m fmd.cli programmes inspect <id>           # every field, its claim id, quote, page
+```
+
+### Semantics (unchanged contract, now explicit)
+
+* Input is still only `claims` with `verification_status='supported'`,
+  `superseded_by IS NULL`, `method <> 'modelled'` from a
+  `documents.role='evidence'` document whose entity is an institution
+  (`materialisation_claims()` filters in SQL; the pure mapper re-checks).
+* One row per `(institution, ER-normalised programme name)`; every set
+  attribute records its claim id in `field_sources` (keyed by predicate);
+  missing attributes stay `NULL`; nothing is invented and nothing is derived
+  (semesters are still never converted to months).
+* **Idempotent and resumable**: a row whose draft matches the stored row
+  (values *and* per-field claim ids) is not rewritten at all — the rerun
+  reports `unchanged` and issues no `UPDATE`. A row whose proving claim
+  changed is rewritten and the plan reports the change per field
+  (`seats (claim 2 -> 9)`). `--force` rewrites unchanged rows too (the
+  crawl-path stage keeps its historical always-rewrite semantics via
+  `materialise_stage_run`, so a vanished claim cannot linger there).
+* `--dry-run` builds the full plan — creates, per-field changes, refused
+  aggregates, rejections — and writes nothing.
+
+### The aggregate-vs-row rule (`seats.total` guard)
+
+`config/predicates.yaml` splits the seat vocabulary: `seats.intake` is the
+per-programme row value; `seats.total` is an aggregate the document itself
+states (a printed Total row or institution-wide figure). Materialisation now
+reports the refusal explicitly instead of skipping silently: every eligible
+`seats.total` claim is refused with reason
+`seats_total_aggregate_not_programme_intake` (claim id, institution, value in
+the plan/JSON and on the stage summary's `programme_aggregates_refused`), and
+the pure layer returns the same refusal in its rejection list. The claim
+itself stays in `claims` — append-only evidence is never lost — and the
+scorer may still read the aggregate at institution scope. A document that
+states only an aggregate leaves `seats` NULL (`UNKNOWN` is a value).
+
+### Evidence completeness (the `list` view)
+
+`fmd programmes list` prints two completeness numbers per row, both computed,
+never hardcoded:
+
+* `fields k/6` — how many of the six materialisation fields (programme name,
+  credential level, sanctioned intake, aggregate, duration months, internship
+  months) have at least one eligible claim behind them. `credential_level` is
+  classified from the name claim, so it is backed exactly when the name is;
+  the aggregate counts as *evidence present* even though it is never stored
+  on a row.
+* `components k/N` — how many scoring components (the sub-scores of
+  `config/weights.yaml`, mapped through `config/predicates.yaml`, N=7 today)
+  are fed by at least one eligible claim of the programme's institution.
+
+Note: the W8 brief says "6 scoring components"; the registry actually defines
+seven (`outcomes`, `affordability_roi`, `clinical_training`,
+`academic_quality`, `student_life_safety`, `admission_realism`,
+`financing_feasibility`). The view reports backed/total from the registry, so
+the denominator follows the config rather than a hardcoded 6.
+
+### Inspect (the reviewer's audit path)
+
+`fmd programmes inspect <id>` prints every row field with the claim id that
+proved it (`credential_level` cites the name claim with a *derived from* note;
+`seats_total_aggregate` prints the never-stored rule), then each
+`field_sources` entry joined to claim + provenance: quote, extraction
+`page_range`, URL, fetch timestamp, sha256 and char span
+(`ProgrammesRepo.evidence_for_programme`, one query). Chain:
+`programme row → field → claim → extraction → snapshot → document URL`.
+
+### Schema
+
+No migration was needed. `normalised_name`, `field_sources`, `needs_review`,
+`review_reasons` and `source_family` (migration 0006) already carry
+everything; refused aggregates stay in `claims` and the run output, not in a
+new column. (The W8 brief allowed "migration 0009" — 0009 was already taken
+by `0009_document_sections.sql` (W8 section-structure), and no column proved
+necessary.)
+
+### Measured on the local scratch DB (12-claim seed, 2 institutions)
+
+* `materialise`: 2 created; `seats.total=195` refused with reason;
+  `B.Sc. MLT` programme carries `seats=20` (claim id cited).
+* Rerun: `wrote=0 (create=0 update=0 unchanged=2)`, no duplicate rows.
+* `--dry-run --force`: plan reports 2 would-be rewrites, writes nothing.
+* `list`: `fields 4/6 | components 1/7 (admission_realism)` for the
+  seat-matrix-only institution; `fields 3/6 | components 3/7
+  (academic_quality, clinical_training, outcomes)` for the
+  curriculum+accreditation+fee+placement institution.
+* `inspect 1`: every field with claim id, quote `B.Sc. MLT | 20`, `page=1-2`,
+  URL + sha256.
+
+### Known limits
+
+* Aggregate seat totals are refused, not stored: an institution-level total
+  column can be added later (a new migration) if a use case demands it; the
+  evidence remains queryable in `claims` meanwhile.
+* Completeness reads only claims already filtered by
+  `materialisation_claims()`; a claim attached to a programme-named
+  *sub-entity* (no such rows exist yet) would not count.
+* `inspect` shows the extraction's `page_range` (window precision); claim
+  level → printed page mapping stays coarse until per-span page attribution
+  lands (same limitation as the review console).
+
+### Tests (all offline unless a live DB is supplied)
+
+```bash
+cd packages/pipeline && uv run ruff check .
+uv run pytest tests/test_programmes_materialise.py tests/test_ingest_programmes.py
+DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd uv run pytest -q
+uv run python -m fmd.cli eval --golden ../../data/golden   # provenance 1.0
+```
+
+`tests/test_programmes_materialise.py` pins the reusable function offline
+(fake repos): creation with field sources, skip-unchanged idempotency, forced
+rewrites, per-field change reports (old claim id → new), NULL-when-no-claim,
+dry-run plans, the aggregate guard (fixture
+`tests/fixtures/programmes/seat_matrix_row_plus_total.json`:
+`seats.intake=20` row lands, `seats.total=195` refused), alias-confirmed
+grouping (B.Sc. MLT ≡ BMLT → one row) vs unconfirmed MLT/MLS (two rows,
+flagged), and the completeness metric;
+`tests/test_programmes_db.py` pins the same against Postgres (rerun, dry run,
+superseded-claim update, `get_by_key`, `evidence_for_programme`);
+`tests/test_programmes_cli.py` pins the CLI surfaces end to end.

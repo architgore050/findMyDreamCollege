@@ -13,7 +13,6 @@ snapshot store, so a re-run over the same evidence produces the same rows.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -22,9 +21,8 @@ from fmd.db.repositories import (
     AliasCreate,
     EntityCreate,
     InstitutionDomainSeed,
-    ProgrammeCreate,
 )
-from fmd.er.normalise import blocking_key, normalise_name
+from fmd.er.normalise import blocking_key
 from fmd.ingest.inventory import (
     InventoryFieldMap,
     InventoryPayloadError,
@@ -32,11 +30,7 @@ from fmd.ingest.inventory import (
     records_from_payload,
     seed_url,
 )
-from fmd.ingest.programmes import (
-    ProgrammeDraft,
-    ProgrammeMapping,
-    programme_drafts,
-)
+from fmd.ingest.programmes import ProgrammeMapping
 from fmd.ingest.targeting import TargetWeights, priority_for, select_targets
 from fmd.orchestrate.ledger import RunSummary
 
@@ -458,77 +452,18 @@ class ProgrammeStage:
             None,
         )
 
-    def _resolve_institution(self, entity_id: int) -> Any | None:
-        getter = getattr(self.entities, "get", None)
-        entity = getter(entity_id) if getter is not None else None
-        if entity is None or getattr(entity, "kind", None) != "institution":
-            return None
-        return entity
-
-    def _resolve_university(self, name: str | None) -> int | None:
-        if not name:
-            return None
-        finder = getattr(self.entities, "find", None)
-        entity = finder("institution", name) if finder is not None else None
-        if entity is None:
-            normalised_finder = getattr(self.entities, "find_normalised", None)
-            if normalised_finder is not None:
-                entity = normalised_finder("institution", normalise_name(name).text)
-        return getattr(entity, "id", None) if entity is not None else None
-
     def run(self, *, summary: RunSummary) -> list[Any]:
-        inputs = self.programmes.materialisation_claims()
-        summary.bump("programme_claims", len(inputs))
-        mapping = self.mapping()
-        drafts, rejected = programme_drafts(
-            inputs, mapping, resolve_institution=self._resolve_institution
-        )
-        summary.bump("programmes_rejected", len(rejected))
-        if rejected:
-            summary.metadata["programme_rejections"] = rejected[:50]
+        """Materialise through the shared implementation (``fmd.ingest.materialise``).
 
-        written: list[Any] = []
-        for draft in drafts:
-            resolved = self._with_affiliation(draft)
-            record, created = self.programmes.upsert(_programme_create(resolved))
-            written.append(record)
-            summary.bump("programmes_created" if created else "programmes_updated")
-            if resolved.needs_review:
-                summary.bump("programmes_needs_review")
-        summary.bump("programmes", len(written))
-        counter = getattr(self.programmes, "counts", None)
-        if counter is not None:
-            with contextlib.suppress(Exception):  # observability only
-                summary.metadata["programmes"] = dict(counter())
-        return written
+        The on-demand ``fmd programmes materialise`` command runs the very same
+        code against the same claim set, so claims discovered outside the crawl
+        path become programme rows too. ``force=True`` keeps this stage's
+        historical semantics: every draft is rewritten on every run, so an
+        attribute whose claim disappeared cannot linger.
+        """
+        from fmd.ingest.materialise import materialise_stage_run
 
-    def _with_affiliation(self, draft: ProgrammeDraft) -> ProgrammeDraft:
-        university_id = self._resolve_university(draft.affiliated_university_name)
-        return draft.with_affiliation(
-            university_id,
-            review="affiliated_university_unresolved"
-            if draft.affiliated_university_name and university_id is None
-            else None,
-        )
-
-
-def _programme_create(draft: ProgrammeDraft) -> ProgrammeCreate:
-    return ProgrammeCreate(
-        institution_id=draft.institution_id,
-        name=draft.name,
-        credential_level=draft.credential_level,
-        duration_months=draft.duration_months,
-        internship_months=draft.internship_months,
-        affiliated_university_id=draft.affiliated_university_id,
-        recognition_status=draft.recognition_status,
-        seats=draft.seats,
-        medium=draft.medium,
-        normalised_name=draft.normalised_name,
-        field_sources=dict(draft.field_sources),
-        needs_review=draft.needs_review,
-        review_reasons=list(draft.review_reasons),
-        source_family=draft.source_family,
-    )
+        return materialise_stage_run(self, summary=summary)
 
 
 def _safe_counts(repo: Any) -> dict[str, int]:

@@ -474,6 +474,31 @@ class ProgrammeFilter(RowModel):
     offset: int = 0
 
 
+class ProgrammeFieldEvidence(RowModel):
+    """One ``field_sources`` entry joined to the claim that proves it.
+
+    ``predicate`` is the ``field_sources`` key (the predicate that produced the
+    attribute); the remaining columns come from the claim and its provenance
+    chain, so ``fmd programmes inspect`` can show field, claim id, quote and
+    page without a second query. A claim that no longer resolves (append-only
+    claims should never vanish) yields NULLs rather than an error.
+    """
+
+    predicate: str
+    claim_id: int
+    value: Any = None
+    unit: str | None = None
+    quote: str | None = None
+    char_start: int | None = None
+    char_end: int | None = None
+    confidence: float | None = None
+    verification_status: str | None = None
+    page_range: str | None = None
+    url: str | None = None
+    fetched_at: datetime | None = None
+    sha256: str | None = None
+
+
 class ScoreCreate(RowModel):
     entity_id: int
     scorer_version: str
@@ -2868,6 +2893,44 @@ class ProgrammesRepo:
         with self.db.connection() as conn:
             row = conn.execute("SELECT * FROM programmes WHERE id = %s", (programme_id,)).fetchone()
         return _programme(row) if row else None
+
+    def get_by_key(self, institution_id: int, normalised_name: str) -> ProgrammeRecord | None:
+        """The stored row for one (institution, ER-normalised name) key."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM programmes WHERE institution_id = %s AND normalised_name = %s",
+                (institution_id, normalised_name),
+            ).fetchone()
+        return _programme(row) if row else None
+
+    def evidence_for_programme(self, programme_id: int) -> list[ProgrammeFieldEvidence]:
+        """Every ``field_sources`` entry joined to its claim, quote and page.
+
+        One row per proving predicate, ordered by predicate key so the output
+        is stable. This is the reviewer's audit path for
+        ``fmd programmes inspect``: attribute -> claim id -> quote -> URL.
+        """
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT fs.key AS predicate,
+                       fs.value::bigint AS claim_id,
+                       c.value_json AS value, c.unit, c.quote,
+                       c.char_start, c.char_end, c.confidence,
+                       c.verification_status,
+                       x.page_range, d.url, s.fetched_at, s.sha256
+                FROM programmes p
+                CROSS JOIN LATERAL jsonb_each_text(p.field_sources) AS fs(key, value)
+                LEFT JOIN claims c ON c.id = fs.value::bigint
+                LEFT JOIN extractions x ON x.id = c.extraction_id
+                LEFT JOIN snapshots s ON s.id = x.snapshot_id
+                LEFT JOIN documents d ON d.id = s.document_id
+                WHERE p.id = %s
+                ORDER BY fs.key
+                """,
+                (programme_id,),
+            ).fetchall()
+        return [ProgrammeFieldEvidence(**dict(row)) for row in rows]
 
     def list_for_institution(self, institution_id: int) -> list[ProgrammeRecord]:
         with self.db.connection() as conn:

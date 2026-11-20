@@ -334,6 +334,55 @@ def _build_parser() -> argparse.ArgumentParser:
     ping.add_argument(
         "--json", action="store_true", help="machine-readable output (default: table)"
     )
+
+    programmes_parser = subparsers.add_parser(
+        "programmes",
+        help="materialise / list / inspect programme rows from existing verified claims",
+        description=(
+            "Programme materialisation without a crawl: builds/refreshes"
+            " `programmes` rows from claims already in the database"
+            " (verified, unsuperseded, non-modelled, role=evidence)."
+        ),
+    )
+    programmes_sub = programmes_parser.add_subparsers(dest="programmes_command", required=True)
+
+    materialise = programmes_sub.add_parser(
+        "materialise",
+        help="build/refresh programme rows from existing verified claims (no crawl, no model)",
+    )
+    materialise.add_argument(
+        "--force",
+        action="store_true",
+        help="rewrite rows even when nothing changed (default: only changed rows are written)",
+    )
+    materialise.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the plan (creates, updates, refused aggregates); write nothing",
+    )
+    materialise.add_argument(
+        "--json", action="store_true", help="machine-readable output (default: table)"
+    )
+
+    programmes_list = programmes_sub.add_parser(
+        "list", help="programmes with seats + source claim, evidence completeness, review reasons"
+    )
+    programmes_list.add_argument("--limit", type=int, default=100, help="maximum rows to print")
+    programmes_list.add_argument(
+        "--institution-id", type=int, default=None, help="only this institution's programmes"
+    )
+    programmes_list.add_argument("--state", default=None, help="only this state")
+    programmes_list.add_argument(
+        "--json", action="store_true", help="machine-readable output (default: table)"
+    )
+
+    inspect = programmes_sub.add_parser(
+        "inspect", help="every field of one programme with its claim id, quote and page"
+    )
+    inspect.add_argument("id", type=int, help="programme row id")
+    inspect.add_argument(
+        "--json", action="store_true", help="machine-readable output (default: table)"
+    )
     return parser
 
 
@@ -906,6 +955,289 @@ def _cmd_golden(args: argparse.Namespace) -> int:
     return 2
 
 
+# --------------------------------------------------------------- programmes (W8)
+
+
+def _programme_mapping(registry: Any, database: Any):
+    """The registry's programme mapping (institution-site params or defaults)."""
+    from fmd.orchestrate.ingest import ProgrammeStage
+
+    stage = ProgrammeStage.from_database(database, registry)
+    return stage.mapping()
+
+
+def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
+    from fmd.db.repositories import EntitiesRepo, ProgrammesRepo
+    from fmd.ingest.materialise import materialise_from_database
+
+    registry = load_registry(args.config_dir)
+    database = _database(args)
+    try:
+        result = materialise_from_database(
+            database,
+            registry,
+            dry_run=args.dry_run,
+            force=args.force,
+        )
+        institution_names = {}
+        entities = EntitiesRepo(database)
+        for entry in result.entries:
+            if entry.institution_id not in institution_names:
+                row = entities.get(entry.institution_id)
+                institution_names[entry.institution_id] = (
+                    getattr(row, "canonical_name", None) or f"#{entry.institution_id}"
+                )
+        programmes = ProgrammesRepo(database)
+        counts = dict(programmes.counts())
+    finally:
+        database.close()
+
+    if args.json:
+        payload = result.as_dict()
+        payload["institution_names"] = {str(key): value for key, value in institution_names.items()}
+        payload["table"] = counts
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+
+    verb = "would_write" if args.dry_run else "wrote"
+    print(
+        f"fmd programmes materialise: claims={result.claims} rows={len(result.entries)} "
+        f"{verb}={result.written} (create={result.created} update={result.updated} "
+        f"unchanged={result.unchanged}) refused_aggregates={len(result.aggregates_refused)}"
+    )
+    for entry in result.entries:
+        name = institution_names.get(entry.institution_id, f"#{entry.institution_id}")
+        prefix = "[dry-run] " if args.dry_run else ""
+        marker = f"{prefix}[{entry.action}]"
+        changed = ""
+        if entry.changed_fields:
+            parts = []
+            for change in entry.changed_fields:
+                parts.append(
+                    f"{change.field} (claim {change.old_claim_id or '—'} -> "
+                    f"{change.new_claim_id or '—'})"
+                )
+            changed = " changed: " + ", ".join(parts)
+        forced = " [forced]" if entry.forced else ""
+        seats = f" seats={entry.seats}" if entry.seats is not None else " seats=NULL"
+        review = " review:" + ",".join(entry.review_reasons) if entry.review_reasons else ""
+        print(
+            f"  {marker} {name} ({entry.institution_id}) {entry.name!r}{seats}"
+            f"{changed}{forced}{review}"
+        )
+    for refusal in result.aggregates_refused:
+        print(
+            f"  [refused] seats.total claim {refusal.claim_id} value={refusal.value} "
+            f"institution={refusal.institution_id}: {refusal.reason}"
+        )
+    for rejection in result.rejected:
+        if rejection.get("reason") == "seats_total_aggregate_not_programme_intake":
+            continue  # already reported as [refused]
+        print("  [rejected] " + json.dumps(rejection, default=str))
+    if args.dry_run:
+        print("dry run: nothing written")
+    return 0
+
+
+def _cmd_programmes_list(args: argparse.Namespace) -> int:
+    from fmd.db.repositories import EntitiesRepo, ProgrammeFilter, ProgrammesRepo
+    from fmd.ingest.materialise import evidence_completeness
+
+    registry = load_registry(args.config_dir)
+    database = _database(args)
+    try:
+        mapping = _programme_mapping(registry, database)
+        programmes = ProgrammesRepo(database)
+        rows = programmes.list(
+            ProgrammeFilter(
+                limit=args.limit,
+                institution_id=args.institution_id,
+                state=args.state,
+            )
+        )
+        # Eligible claims per institution: the same filtered set materialisation
+        # and scoring consume (supported, unsuperseded, non-modelled, evidence).
+        claims_by_entity: dict[int, list[dict[str, Any]]] = {}
+        for claim in ProgrammesRepo(database).materialisation_claims():
+            claims_by_entity.setdefault(int(claim["entity_id"]), []).append(claim)
+        names: dict[int, str] = {}
+        entities = EntitiesRepo(database)
+        for row in rows:
+            if row.institution_id not in names:
+                entity = entities.get(row.institution_id)
+                names[row.institution_id] = (
+                    getattr(entity, "canonical_name", None) or f"#{row.institution_id}"
+                )
+    finally:
+        database.close()
+
+    if args.json:
+        payload = []
+        for row in rows:
+            completeness = evidence_completeness(
+                claims_by_entity.get(row.institution_id, []), mapping, registry.predicates
+            )
+            payload.append(
+                {
+                    "id": row.id,
+                    "institution_id": row.institution_id,
+                    "institution": names.get(row.institution_id),
+                    "name": row.name,
+                    "seats": row.seats,
+                    "seats_source_claim_id": _seats_source_claim_id(row),
+                    "completeness": completeness.as_dict(),
+                    "needs_review": row.needs_review,
+                    "review_reasons": list(row.review_reasons),
+                }
+            )
+        print(json.dumps({"programmes": payload}, indent=2, default=str))
+        return 0
+
+    print(f"programmes: {len(rows)} row(s)")
+    for row in rows:
+        completeness = evidence_completeness(
+            claims_by_entity.get(row.institution_id, []), mapping, registry.predicates
+        )
+        components = (
+            f"components {len(completeness.components_backed)}/{completeness.components_total}"
+        )
+        if completeness.components_backed:
+            components += f" ({', '.join(completeness.components_backed)})"
+        seats_claim = _seats_source_claim_id(row)
+        seats = (
+            f"seats {row.seats} (claim {seats_claim})"
+            if row.seats is not None and seats_claim
+            else f"seats {row.seats if row.seats is not None else '—'} (no claim)"
+        )
+        review = "review: " + ",".join(row.review_reasons) if row.review_reasons else "review: —"
+        print(
+            f"  {row.id} | {names.get(row.institution_id)} ({row.institution_id}) | "
+            f"{row.name} | {seats} | "
+            f"fields {completeness.fields_backed}/{completeness.fields_total} | "
+            f"{components} | needs_review={str(row.needs_review).lower()} | {review}"
+        )
+    return 0
+
+
+def _seats_source_claim_id(row: Any) -> str | None:
+    """The claim id behind the seats field, from ``field_sources``."""
+    sources = getattr(row, "field_sources", None) or {}
+    for predicate in sorted(sources):
+        if predicate in {"seats.intake", "seats.sanctioned"}:
+            return str(sources[predicate])
+    return None
+
+
+def _cmd_programmes_inspect(args: argparse.Namespace) -> int:
+    from fmd.db.repositories import EntitiesRepo, ProgrammesRepo
+    from fmd.ingest.programmes import field_for_predicate_map
+
+    registry = load_registry(args.config_dir)
+    database = _database(args)
+    try:
+        programmes = ProgrammesRepo(database)
+        record = programmes.get(args.id)
+        if record is None:
+            print(f"fmd programmes inspect: no programme with id {args.id}", file=sys.stderr)
+            return 1
+        mapping = _programme_mapping(registry, database)
+        evidence = programmes.evidence_for_programme(args.id)
+        entity = EntitiesRepo(database).get(record.institution_id)
+    finally:
+        database.close()
+
+    bridge = field_for_predicate_map(mapping)
+    claim_by_field: dict[str, tuple[str, str]] = {}
+    for predicate, claim_id in (record.field_sources or {}).items():
+        attribute = bridge.get(predicate, predicate)
+        claim_by_field.setdefault(attribute, (predicate, str(claim_id)))
+    # credential_level is classified from the name claim, never claimed on its
+    # own: cite the name claim so the audit chain stays complete.
+    if "credential_level" not in claim_by_field and "name" in claim_by_field:
+        claim_by_field["credential_level"] = claim_by_field["name"]
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "programme": record.model_dump(mode="json"),
+                    "institution": getattr(entity, "canonical_name", None),
+                    "fields": {
+                        attribute: {"predicate": predicate, "claim_id": claim_id}
+                        for attribute, (predicate, claim_id) in claim_by_field.items()
+                    },
+                    "claims": [row.model_dump(mode="json") for row in evidence],
+                },
+                indent=2,
+                default=str,
+            )
+        )
+        return 0
+
+    print(f"programme {record.id} — {record.name}")
+    if entity is not None:
+        print(f"institution: {record.institution_id} {getattr(entity, 'canonical_name', '')}")
+    print(f"normalised_name: {record.normalised_name}  source_family: {record.source_family}")
+    print(
+        f"needs_review: {str(record.needs_review).lower()}"
+        + (f"  reasons: {', '.join(record.review_reasons)}" if record.review_reasons else "")
+    )
+    print("fields (value <- proving claim):")
+    attribute_values = [
+        ("name", record.name),
+        ("credential_level", record.credential_level),
+        ("seats", record.seats),
+        ("seats_total_aggregate", None),
+        ("duration_months", record.duration_months),
+        ("internship_months", record.internship_months),
+        ("medium", record.medium),
+        ("affiliated_university", record.affiliated_university_id),
+        ("recognition_status", record.recognition_status),
+    ]
+    for attribute, value in attribute_values:
+        source = claim_by_field.get(attribute)
+        if attribute == "seats_total_aggregate":
+            note = (
+                "not stored — an aggregate (seats.total) is never a per-programme intake"
+                " (a refused claim is reported by `fmd programmes materialise`)"
+            )
+            print(f"  {attribute:22} = {note}")
+            continue
+        rendered = "NULL" if value is None else str(value)
+        if source is None:
+            print(f"  {attribute:22} = {rendered}   [no claim]")
+        else:
+            predicate, claim_id = source
+            suffix = " (derived from the name claim)" if attribute == "credential_level" else ""
+            print(f"  {attribute:22} = {rendered}   [claim {claim_id} · {predicate}]{suffix}")
+    print("claims (field_sources, quote and page):")
+    if not evidence:
+        print("  (none)")
+    for row in evidence:
+        print(
+            f"  #{row.claim_id} {row.predicate} value={row.value} unit={row.unit or '—'} "
+            f"confidence={row.confidence} verification={row.verification_status or '—'}"
+        )
+        print(f"    page={row.page_range or '—'}")
+        print(f"    quote: {row.quote or '—'}")
+        print(
+            f"    source: {row.url or '—'} (fetched {row.fetched_at or '—'}; "
+            f"sha256 {row.sha256 or '—'}; chars {row.char_start}–{row.char_end})"
+        )
+    return 0
+
+
+def _cmd_programmes(args: argparse.Namespace) -> int:
+    command = getattr(args, "programmes_command", None)
+    if command == "materialise":
+        return _cmd_programmes_materialise(args)
+    if command == "list":
+        return _cmd_programmes_list(args)
+    if command == "inspect":
+        return _cmd_programmes_inspect(args)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -954,6 +1286,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("llm: choose `doctor` or `ping`")
         if args.command == "golden":
             return _cmd_golden(args)
+        if args.command == "programmes":
+            return _cmd_programmes(args)
         if args.command == "llm-ping":
             return _cmd_llm_ping(args)
     except (ConfigError, DatabaseError, MigrationError, SeedError) as exc:

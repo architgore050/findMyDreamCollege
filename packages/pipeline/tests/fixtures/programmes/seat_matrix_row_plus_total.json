@@ -1,0 +1,63 @@
+{
+  "description": "One seat-matrix document that prints a per-programme intake row AND an aggregate Total row. This is the seats.total trap: only the row value may land on a programme; the aggregate is institution/document scope and is refused with a reason (config/predicates.yaml, seats.intake vs seats.total).",
+  "document": {
+    "url": "https://stanley.ac.in/seat-matrix-2024.pdf",
+    "role": "evidence",
+    "printed_rows": [
+      "Programme | Intake | Total",
+      "B.Sc. MLT | 20 |",
+      "Total (all programmes) | | 195"
+    ]
+  },
+  "institution": {
+    "kind": "institution",
+    "canonical_name": "Stanley College of Engineering and Technology"
+  },
+  "claims": [
+    {
+      "id": 1,
+      "entity_id": 1,
+      "predicate": "seats.programme_name",
+      "value": "B.Sc. MLT",
+      "unit": null,
+      "confidence": 0.9,
+      "method": "extracted",
+      "verification_status": "supported",
+      "document_role": "evidence",
+      "superseded_by": null
+    },
+    {
+      "id": 2,
+      "entity_id": 1,
+      "predicate": "seats.intake",
+      "value": 20,
+      "unit": "count",
+      "confidence": 0.9,
+      "method": "extracted",
+      "verification_status": "supported",
+      "document_role": "evidence",
+      "superseded_by": null
+    },
+    {
+      "id": 3,
+      "entity_id": 1,
+      "predicate": "seats.total",
+      "value": 195,
+      "unit": "count",
+      "confidence": 0.9,
+      "method": "extracted",
+      "verification_status": "supported",
+      "document_role": "evidence",
+      "superseded_by": null
+    }
+  ],
+  "expect": {
+    "programme_normalised_name": "bsc mlt",
+    "programme_seats": 20,
+    "aggregate_refused": {
+      "claim_id": 3,
+      "value": 195,
+      "reason": "seats_total_aggregate_not_programme_intake"
+    }
+  }
+}
