@@ -19,7 +19,7 @@ from fmd.db.repositories import (
     ScoresRepo,
 )
 from fmd.filters import evaluate_all
-from fmd.score import score_programme
+from fmd.score import OutOfScopeProgramme, score_programme
 from fmd.score.config import ScoringConfig
 from fmd.score.persist import persist_score
 
@@ -34,6 +34,10 @@ class ScoreOutcome:
     skipped: int = 0
     unknown: int = 0
     programmes: int = 0
+    #: Programmes the W9 scoping tiers excluded (``in_scope=false``): kept in
+    #: the database for audit, never scored, never ranked. Reported so an
+    #: MBBS silently vanishing from a ranked set is explainable.
+    out_of_scope: int = 0
     failures: list[dict[str, Any]] = field(default_factory=list)
     lines: list[str] = field(default_factory=list)
 
@@ -43,6 +47,7 @@ class ScoreOutcome:
             "skipped": self.skipped,
             "unknown": self.unknown,
             "programmes": self.programmes,
+            "out_of_scope": self.out_of_scope,
             "failures": self.failures,
         }
 
@@ -72,6 +77,14 @@ def score_programmes(
     profile = profile or {}
     outcome = ScoreOutcome()
     rows = programmes.list(ProgrammeFilter(limit=max(1, limit), offset=0))
+    # W9 scoping gate: out-of-scope programmes (rule-excluded MBBS/Agriculture,
+    # semantic `no`, and `uncertain` rows awaiting review) are skipped before
+    # any scoring work and counted, so an out-of-scope row can never enter a
+    # ranked set. The scorer itself re-checks (fmd/score/aggregate.py) as a
+    # second, independent guard.
+    scoped_rows = [row for row in rows if getattr(row, "in_scope", True)]
+    outcome.out_of_scope = len(rows) - len(scoped_rows)
+    rows = scoped_rows
     for programme in rows:
         try:
             entity_claims = claims.list_for_entity(programme.institution_id)
@@ -87,6 +100,13 @@ def score_programmes(
                 cost_rules=registry.cost_rules,
                 filter_decisions=list(summary.decisions.values()),
             )
+        except OutOfScopeProgramme as exc:
+            # The scorer's independent guard: never count this as a failure.
+            outcome.out_of_scope += 1
+            outcome.lines.append(
+                f"[out-of-scope] programme={programme.id} not scored: {exc}"
+            )
+            continue
         except Exception as exc:  # one bad programme must not abort the run
             outcome.failures.append(
                 {

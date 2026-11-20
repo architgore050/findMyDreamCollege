@@ -27,7 +27,8 @@ def test_valid_registry_loads(registry) -> None:
     assert registry.weights.filters
     assert registry.models.profiles["bulk_extract"].provider == "local"
     # The live profile set. OCR is an acquisition stage, never a router profile;
-    # `hard_pdf` is the hosted fallback and reads the shared FMD_API_MODEL.
+    # `hard_pdf` is the hosted fallback and reads the shared FMD_API_MODEL;
+    # `programme_equivalence` is the W9 Tier-2 classifier (config/programmes.yaml).
     assert set(registry.models.profiles) == {
         "bulk_extract",
         "hard_pdf",
@@ -35,6 +36,7 @@ def test_valid_registry_loads(registry) -> None:
         "entity_adjudication",
         "nlp_rubric",
         "verify",
+        "programme_equivalence",
         "embed",
     }
     assert registry.models.profiles["hard_pdf"].provider == "api"

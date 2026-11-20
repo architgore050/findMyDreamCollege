@@ -279,6 +279,7 @@ def test_every_profile_provider_and_model_are_env_switchable() -> None:
         "entity_adjudication",
         "nlp_rubric",
         "verify",
+        "programme_equivalence",
         "embed",
     }
     assert "ocr_vlm" not in models.profiles

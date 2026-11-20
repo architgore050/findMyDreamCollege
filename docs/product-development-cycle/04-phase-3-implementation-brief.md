@@ -156,6 +156,8 @@ financing_options(id, scope, lender, scheme, rate_min, rate_max, collateral_rule
                   source_claim_id, observed_at)
 ```
 
+**Programme scoping (W9, 2026-11-20):** the `programmes` table is scoped before it is ranked. `config/programmes.yaml` — the tenth registry file — is a country-keyed taxonomy (`countries.IN` rules; other countries are declared empty stubs; `default` + `country_taxonomy_missing` for the rest) plus the versioned conceptual definition of the target field. Materialisation normalises names (leading row numbering is furniture and is stripped) and scopes every row in three tiers with precedence manual > exclude > include > semantic > uncertain: Tier 1 deterministic include/exclude regexes, Tier 2 a semantic equivalence classifier (router purpose `programme_equivalence`) that must cite evidence and answers yes/no/uncertain, cached by (normalised name, institution type, definition version) in `programme_scope_decisions`, Tier 3 human `fmd programmes decide` verdicts that become manual decisions Tier 1 consumes on the next run. `uncertain` never enters the ranking: it is `in_scope=false` + `needs_review`. Out-of-scope rows are kept with their `scope_reason`/`scope_tier`/`scope_evidence` for audit and are skipped (and counted) by scoring. Details and limits: runbook §13.
+
 **Hard rules**
 - `claims` is append-only. Corrections insert a new row and set `superseded_by`.
 - `claims.quote` is stored verbatim. `char_start/char_end` index into `extractions.text`.

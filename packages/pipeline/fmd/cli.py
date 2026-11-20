@@ -337,18 +337,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
     programmes_parser = subparsers.add_parser(
         "programmes",
-        help="materialise / list / inspect programme rows from existing verified claims",
+        help="materialise / list / inspect / requalify / decide scoped programme rows",
         description=(
             "Programme materialisation without a crawl: builds/refreshes"
             " `programmes` rows from claims already in the database"
-            " (verified, unsuperseded, non-modelled, role=evidence)."
+            " (verified, unsuperseded, non-modelled, role=evidence), scoped"
+            " in three tiers (config/programmes.yaml rules, semantic"
+            " equivalence, manual decisions) so out-of-scope rows are kept"
+            " for audit but never scored."
         ),
     )
     programmes_sub = programmes_parser.add_subparsers(dest="programmes_command", required=True)
 
     materialise = programmes_sub.add_parser(
         "materialise",
-        help="build/refresh programme rows from existing verified claims (no crawl, no model)",
+        help="build/refresh scoped programme rows from existing verified claims (no crawl)",
     )
     materialise.add_argument(
         "--force",
@@ -359,6 +362,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="print the plan (creates, updates, refused aggregates); write nothing",
+    )
+    materialise.add_argument(
+        "--no-classifier",
+        action="store_true",
+        help=(
+            "skip the Tier-2 semantic classifier (rules + manual decisions only;"
+            " undecided names become needs_review). Default: classifier on, degrading"
+            " to uncertain when the model profile is unavailable."
+        ),
     )
     materialise.add_argument(
         "--json", action="store_true", help="machine-readable output (default: table)"
@@ -373,6 +385,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     programmes_list.add_argument("--state", default=None, help="only this state")
     programmes_list.add_argument(
+        "--all",
+        action="store_true",
+        help="include out-of-scope rows (default: in-scope only)",
+    )
+    programmes_list.add_argument(
+        "--in-scope",
+        dest="in_scope",
+        action="store_true",
+        default=True,
+        help="only in-scope rows (the default)",
+    )
+    programmes_list.add_argument(
         "--json", action="store_true", help="machine-readable output (default: table)"
     )
 
@@ -381,6 +405,53 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     inspect.add_argument("id", type=int, help="programme row id")
     inspect.add_argument(
+        "--json", action="store_true", help="machine-readable output (default: table)"
+    )
+
+    requalify = programmes_sub.add_parser(
+        "requalify",
+        help=(
+            "re-scope every existing row under the current taxonomy + decisions:"
+            " fold row-numbering duplicates, mark MBBS/Agriculture out, apply"
+            " manual verdicts"
+        ),
+    )
+    requalify.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the plan (rescopes, merges, unchanged); write nothing",
+    )
+    requalify.add_argument(
+        "--no-classifier",
+        action="store_true",
+        help="skip the Tier-2 semantic classifier (rules + manual decisions only)",
+    )
+    requalify.add_argument(
+        "--json", action="store_true", help="machine-readable output (default: table)"
+    )
+
+    decide = programmes_sub.add_parser(
+        "decide",
+        help="record a human equivalence decision for one programme (the Tier-3 learning loop)",
+    )
+    decide.add_argument("id", type=int, help="programme row id")
+    group = decide.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--equivalent",
+        action="store_true",
+        help="the programme IS Medical Laboratory Technology/Science (enters the pool)",
+    )
+    group.add_argument(
+        "--not-equivalent",
+        action="store_true",
+        help="the programme is NOT the target field (stays out of every ranked set)",
+    )
+    decide.add_argument(
+        "--note",
+        default="",
+        help="why (stored verbatim as the decision's evidence and shown on inspect)",
+    )
+    decide.add_argument(
         "--json", action="store_true", help="machine-readable output (default: table)"
     )
     return parser
@@ -966,6 +1037,23 @@ def _programme_mapping(registry: Any, database: Any):
     return stage.mapping()
 
 
+def _programme_router(registry: Any, database: Any) -> Any | None:
+    """The provider-agnostic router for the Tier-2 classifier (or None).
+
+    Every call is audited through ``llm_calls``; the profile is optional, so
+    an unconfigured model degrades to ``uncertain`` → ``needs_review`` and
+    the run never guesses.
+    """
+    try:
+        from fmd.db.repositories import LLMCallsRepo
+        from fmd.llm.router import ModelRouter
+
+        return ModelRouter(registry=registry, sink=LLMCallsRepo(database))
+    except Exception as exc:  # pragma: no cover - misconfiguration surfaces in doctor
+        print(f"programmes: classifier unavailable ({exc}); names stay uncertain", file=sys.stderr)
+        return None
+
+
 def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
     from fmd.db.repositories import EntitiesRepo, ProgrammesRepo
     from fmd.ingest.materialise import materialise_from_database
@@ -973,9 +1061,11 @@ def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
     registry = load_registry(args.config_dir)
     database = _database(args)
     try:
+        router = None if args.no_classifier else _programme_router(registry, database)
         result = materialise_from_database(
             database,
             registry,
+            router=router,
             dry_run=args.dry_run,
             force=args.force,
         )
@@ -989,6 +1079,7 @@ def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
                 )
         programmes = ProgrammesRepo(database)
         counts = dict(programmes.counts())
+        scope_counts = programmes.scope_counts()
     finally:
         database.close()
 
@@ -996,6 +1087,7 @@ def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
         payload = result.as_dict()
         payload["institution_names"] = {str(key): value for key, value in institution_names.items()}
         payload["table"] = counts
+        payload["scope"] = scope_counts
         print(json.dumps(payload, indent=2, default=str))
         return 0
 
@@ -1003,7 +1095,12 @@ def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
     print(
         f"fmd programmes materialise: claims={result.claims} rows={len(result.entries)} "
         f"{verb}={result.written} (create={result.created} update={result.updated} "
-        f"unchanged={result.unchanged}) refused_aggregates={len(result.aggregates_refused)}"
+        f"unchanged={result.unchanged}) refused_aggregates={len(result.aggregates_refused)} "
+        f"classifier={'off' if args.no_classifier else 'on'}"
+    )
+    print(
+        "scope: in={in_scope} out={out_of_scope} (rule={tier_rule} semantic={tier_semantic} "
+        "manual={tier_manual}) review_queue={review_queue}".format(**scope_counts)
     )
     for entry in result.entries:
         name = institution_names.get(entry.institution_id, f"#{entry.institution_id}")
@@ -1053,8 +1150,10 @@ def _cmd_programmes_list(args: argparse.Namespace) -> int:
                 limit=args.limit,
                 institution_id=args.institution_id,
                 state=args.state,
+                in_scope=None if args.all else True,
             )
         )
+        out_of_scope_total = programmes.count(ProgrammeFilter(in_scope=False, limit=1))
         # Eligible claims per institution: the same filtered set materialisation
         # and scoring consume (supported, unsuperseded, non-modelled, evidence).
         claims_by_entity: dict[int, list[dict[str, Any]]] = {}
@@ -1088,12 +1187,17 @@ def _cmd_programmes_list(args: argparse.Namespace) -> int:
                     "completeness": completeness.as_dict(),
                     "needs_review": row.needs_review,
                     "review_reasons": list(row.review_reasons),
+                    "in_scope": row.in_scope,
+                    "scope_tier": row.scope_tier,
+                    "scope_reason": row.scope_reason,
+                    "scope_evidence": list(row.scope_evidence or []),
                 }
             )
         print(json.dumps({"programmes": payload}, indent=2, default=str))
         return 0
 
-    print(f"programmes: {len(rows)} row(s)")
+    hidden = "" if args.all else f" ({out_of_scope_total} out-of-scope hidden)"
+    print(f"programmes: {len(rows)} row(s){hidden}")
     for row in rows:
         completeness = evidence_completeness(
             claims_by_entity.get(row.institution_id, []), mapping, registry.predicates
@@ -1110,11 +1214,15 @@ def _cmd_programmes_list(args: argparse.Namespace) -> int:
             else f"seats {row.seats if row.seats is not None else '—'} (no claim)"
         )
         review = "review: " + ",".join(row.review_reasons) if row.review_reasons else "review: —"
+        scope = (
+            f"scope={row.scope_tier or '—'}:{row.scope_reason or '—'}"
+            + ("" if row.in_scope else " [OUT]")
+        )
         print(
             f"  {row.id} | {names.get(row.institution_id)} ({row.institution_id}) | "
             f"{row.name} | {seats} | "
             f"fields {completeness.fields_backed}/{completeness.fields_total} | "
-            f"{components} | needs_review={str(row.needs_review).lower()} | {review}"
+            f"{components} | {scope} | needs_review={str(row.needs_review).lower()} | {review}"
         )
     return 0
 
@@ -1173,11 +1281,25 @@ def _cmd_programmes_inspect(args: argparse.Namespace) -> int:
             )
         )
         return 0
-
     print(f"programme {record.id} — {record.name}")
     if entity is not None:
         print(f"institution: {record.institution_id} {getattr(entity, 'canonical_name', '')}")
     print(f"normalised_name: {record.normalised_name}  source_family: {record.source_family}")
+    scope_tier = record.scope_tier or "—"
+    scope_state = "IN" if record.in_scope else "OUT"
+    print(
+        f"scope: {scope_state}  tier: {scope_tier}"
+        + (f"  reason: {record.scope_reason}" if record.scope_reason else "")
+        + ("  [cached]" if record.scope_cached else "")
+    )
+    if record.scope_evidence:
+        for entry in record.scope_evidence:
+            print(f"  scope evidence: {entry}")
+    if record.scope_model or record.scope_prompt_version:
+        print(
+            f"  decided by {record.scope_model or '—'}"
+            f" (prompt {record.scope_prompt_version or '—'})"
+        )
     print(
         f"needs_review: {str(record.needs_review).lower()}"
         + (f"  reasons: {', '.join(record.review_reasons)}" if record.review_reasons else "")
@@ -1227,6 +1349,120 @@ def _cmd_programmes_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_programmes_requalify(args: argparse.Namespace) -> int:
+    from fmd.db.repositories import EntitiesRepo, ProgrammesRepo
+    from fmd.ingest.programmes import ProgrammeMapping  # noqa: F401 - re-export clarity
+    from fmd.programmes.service import requalify_programmes, scoper_for_database
+
+    registry = load_registry(args.config_dir)
+    database = _database(args)
+    result = None
+    try:
+        programmes = ProgrammesRepo(database)
+        entities = EntitiesRepo(database)
+        mapping = _programme_mapping(registry, database)
+        router = None if args.no_classifier else _programme_router(registry, database)
+        scoper = scoper_for_database(database, registry, mapping, router=router)
+        result = requalify_programmes(
+            programmes,
+            entities,
+            mapping,
+            scoper,
+            dry_run=args.dry_run,
+        )
+        scope_counts = programmes.scope_counts()
+    finally:
+        database.close()
+    assert result is not None
+
+    if args.json:
+        payload = result.as_dict()
+        payload["scope"] = scope_counts
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+
+    verb = "would_rescope" if args.dry_run else "rescoped"
+    print(
+        f"fmd programmes requalify: rows={result.rows} {verb}={result.rescoped} "
+        f"merged={result.merged} unchanged={result.unchanged} "
+        f"uncertain={result.uncertain} classifier={'off' if args.no_classifier else 'on'}"
+    )
+    for note in result.notes:
+        print(f"  note: {note}")
+    for entry in result.entries:
+        prefix = "[dry-run] " if args.dry_run else ""
+        if entry.action == "merge":
+            print(
+                f"  {prefix}[merge] #{entry.programme_id} {entry.name!r} -> "
+                f"#{entry.merged_into}"
+                + (f" {entry.merged_rows}" if entry.merged_rows else "")
+            )
+            continue
+        if entry.action == "unchanged":
+            print(f"  {prefix}[unchanged] #{entry.programme_id} {entry.name!r}")
+            continue
+        flags = f" flags={','.join(entry.flags)}" if entry.flags else ""
+        review = " review" if entry.needs_review else ""
+        print(
+            f"  {prefix}[rescope] #{entry.programme_id} {entry.name!r} -> "
+            f"{'IN' if entry.in_scope else 'OUT'} tier={entry.scope_tier} "
+            f"reason={entry.scope_reason}{review}{flags}"
+        )
+    if args.dry_run:
+        print("dry run: nothing written")
+    return 0
+
+
+def _cmd_programmes_decide(args: argparse.Namespace) -> int:
+    from fmd.db.repositories import EntitiesRepo, ProgrammesRepo
+    from fmd.programmes.service import record_manual_decision, scoper_for_database
+
+    registry = load_registry(args.config_dir)
+    database = _database(args)
+    outcome = None
+    try:
+        programmes = ProgrammesRepo(database)
+        entities = EntitiesRepo(database)
+        mapping = _programme_mapping(registry, database)
+        taxonomy = scoper_for_database(database, registry, mapping, router=None).taxonomy
+        outcome = record_manual_decision(
+            programmes,
+            entities,
+            taxonomy,
+            registry.programmes,
+            args.id,
+            equivalent=bool(args.equivalent),
+            note=args.note,
+        )
+        scope_counts = programmes.scope_counts()
+    finally:
+        database.close()
+
+    if args.json:
+        print(json.dumps({**outcome.as_dict(), "scope": scope_counts}, indent=2, default=str))
+        return 0
+
+    verdict = "IN scope (equivalent)" if outcome.equivalent else "OUT of scope (not equivalent)"
+    print(
+        f"fmd programmes decide: programme {outcome.programme_id} {outcome.name!r} -> {verdict}"
+    )
+    if outcome.previous:
+        previous = outcome.previous
+        print(
+            f"  replaced: {previous.get('tier')}/{previous.get('decision')} "
+            f"by {previous.get('decided_by')}"
+            + (f" — {previous.get('rationale')}" if previous.get("rationale") else "")
+        )
+    print(f"  decision key: {outcome.cache_key}")
+    if outcome.note:
+        print(f"  note: {outcome.note}")
+    print(
+        "  this manual decision wins over rules and the classifier from the next "
+        "materialise/requalify run (and was applied to the row now)."
+    )
+    return 0
+
+
 def _cmd_programmes(args: argparse.Namespace) -> int:
     command = getattr(args, "programmes_command", None)
     if command == "materialise":
@@ -1235,6 +1471,10 @@ def _cmd_programmes(args: argparse.Namespace) -> int:
         return _cmd_programmes_list(args)
     if command == "inspect":
         return _cmd_programmes_inspect(args)
+    if command == "requalify":
+        return _cmd_programmes_requalify(args)
+    if command == "decide":
+        return _cmd_programmes_decide(args)
     return 2
 
 

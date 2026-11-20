@@ -457,6 +457,17 @@ class ProgrammeCreate(RowModel):
     review_reasons: list[str] = []
     #: Predicate family that supplied the programme name (curriculum/seats/…).
     source_family: str | None = None
+    #: Three-tier scoping outcome (migration 0010). Out-of-scope rows are kept
+    #: for audit but excluded from scoring/ranking/shortlist; `uncertain` rows
+    #: are out of scope AND needs_review until a human decides.
+    in_scope: bool = True
+    scope_reason: str | None = None
+    scope_tier: Literal["rule", "semantic", "manual"] | None = None
+    scope_evidence: list[str] = []
+    scope_model: str | None = None
+    scope_prompt_version: str | None = None
+    scope_cached: bool = False
+    scope_decided_at: datetime | None = None
 
 
 class ProgrammeRecord(ProgrammeCreate):
@@ -470,6 +481,9 @@ class ProgrammeFilter(RowModel):
     institution_id: int | None = None
     state: str | None = None
     query: str | None = None
+    #: None = no scoping filter (all rows); True = in-scope only; False = the
+    #: out-of-scope audit set (excluded rows, including `uncertain`).
+    in_scope: bool | None = None
     limit: int = 50
     offset: int = 0
 
@@ -497,6 +511,40 @@ class ProgrammeFieldEvidence(RowModel):
     url: str | None = None
     fetched_at: datetime | None = None
     sha256: str | None = None
+
+
+class ProgrammeScopeDecisionCreate(RowModel):
+    """One durable scoping decision (classifier cache + manual learning loop).
+
+    ``cache_key`` is the sha256 over (normalised name, institution type,
+    definition version): one model call per new *name*, not per row. Human
+    decisions use the same key space with ``decided_by='human'`` and
+    ``tier='manual'`` so Tier 1 consumes them before any classifier call.
+    """
+
+    cache_key: str
+    normalised_name: str
+    raw_name: str | None = None
+    institution_type: str | None = None
+    country: str | None = None
+    decision: Literal["in_scope", "out_of_scope", "uncertain"]
+    tier: Literal["rule", "semantic", "manual"]
+    confidence: float | None = None
+    rationale: str | None = None
+    evidence: list[str] = []
+    model: str | None = None
+    prompt_version: str | None = None
+    cached: bool = False
+    needs_review: bool = False
+    flags: list[str] = []
+    definition_version: str
+    decided_by: Literal["classifier", "human"] = "classifier"
+    note: str | None = None
+
+
+class ProgrammeScopeDecision(ProgrammeScopeDecisionCreate):
+    id: int
+    created_at: datetime | None = None
 
 
 class ScoreCreate(RowModel):
@@ -2766,8 +2814,10 @@ class ProgrammesRepo:
                     (institution_id, name, credential_level, duration_months,
                      internship_months, affiliated_university_id, recognition_status, seats,
                      medium, normalised_name, field_sources, needs_review, review_reasons,
-                     source_family)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     source_family, in_scope, scope_reason, scope_tier, scope_evidence,
+                     scope_model, scope_prompt_version, scope_cached, scope_decided_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING *
                 """,
                 (
@@ -2785,6 +2835,14 @@ class ProgrammesRepo:
                     programme.needs_review,
                     _json(programme.review_reasons),
                     programme.source_family,
+                    programme.in_scope,
+                    programme.scope_reason,
+                    programme.scope_tier,
+                    _json(programme.scope_evidence),
+                    programme.scope_model,
+                    programme.scope_prompt_version,
+                    programme.scope_cached,
+                    programme.scope_decided_at,
                 ),
             ).fetchone()
         assert row is not None
@@ -2806,8 +2864,10 @@ class ProgrammesRepo:
                     (institution_id, name, credential_level, duration_months,
                      internship_months, affiliated_university_id, recognition_status, seats,
                      medium, normalised_name, field_sources, needs_review, review_reasons,
-                     source_family)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     source_family, in_scope, scope_reason, scope_tier, scope_evidence,
+                     scope_model, scope_prompt_version, scope_cached, scope_decided_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (institution_id, normalised_name) DO UPDATE SET
                     name = EXCLUDED.name,
                     credential_level = EXCLUDED.credential_level,
@@ -2820,7 +2880,15 @@ class ProgrammesRepo:
                     field_sources = EXCLUDED.field_sources,
                     needs_review = EXCLUDED.needs_review,
                     review_reasons = EXCLUDED.review_reasons,
-                    source_family = EXCLUDED.source_family
+                    source_family = EXCLUDED.source_family,
+                    in_scope = EXCLUDED.in_scope,
+                    scope_reason = EXCLUDED.scope_reason,
+                    scope_tier = EXCLUDED.scope_tier,
+                    scope_evidence = EXCLUDED.scope_evidence,
+                    scope_model = EXCLUDED.scope_model,
+                    scope_prompt_version = EXCLUDED.scope_prompt_version,
+                    scope_cached = EXCLUDED.scope_cached,
+                    scope_decided_at = EXCLUDED.scope_decided_at
                 RETURNING *, (xmax = 0) AS inserted
                 """,
                 (
@@ -2838,6 +2906,14 @@ class ProgrammesRepo:
                     programme.needs_review,
                     _json(programme.review_reasons),
                     programme.source_family,
+                    programme.in_scope,
+                    programme.scope_reason,
+                    programme.scope_tier,
+                    _json(programme.scope_evidence),
+                    programme.scope_model,
+                    programme.scope_prompt_version,
+                    programme.scope_cached,
+                    programme.scope_decided_at,
                 ),
             ).fetchone()
         assert row is not None
@@ -2856,7 +2932,7 @@ class ProgrammesRepo:
                 """
                 SELECT c.id, c.entity_id, c.predicate, c.value_json AS value, c.unit,
                        c.qualifier_json AS qualifier, c.confidence, c.observed_at,
-                       c.method, c.extraction_id, c.superseded_by,
+                       c.method, c.extraction_id, c.superseded_by, c.quote,
                        c.verification_status, d.role AS document_role
                 FROM claims c
                 JOIN extractions x ON x.id = c.extraction_id
@@ -2940,6 +3016,75 @@ class ProgrammesRepo:
             ).fetchall()
         return [_programme(row) for row in rows]
 
+    def list_all(self) -> list[ProgrammeRecord]:
+        """Every programme row, id order (requalification reads them all)."""
+        with self.db.connection() as conn:
+            rows = conn.execute("SELECT * FROM programmes ORDER BY id").fetchall()
+        return [_programme(row) for row in rows]
+
+    def update_scope(
+        self,
+        programme_id: int,
+        *,
+        in_scope: bool,
+        scope_reason: str | None,
+        scope_tier: str | None,
+        scope_evidence: list[str],
+        scope_model: str | None,
+        scope_prompt_version: str | None,
+        scope_cached: bool,
+        needs_review: bool,
+        review_reasons: list[str],
+        scope_decided_at: datetime | None = None,
+        normalised_name: str | None = None,
+        name: str | None = None,
+    ) -> ProgrammeRecord | None:
+        """Persist one row's scoping outcome (materialise writes via upsert).
+
+        Only scope, review and (when requalifying pre-W9 rows) grouping-key
+        columns change here: materialised attributes and their
+        ``field_sources`` are owned by the materialisation write path.
+        ``normalised_name``/``name`` are the requalify rekey: a row grouped
+        before the numbering-strip fix moves to its recomputed key (the merge
+        step has already removed any row that holds the target key).
+        """
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                UPDATE programmes SET
+                    in_scope = %s,
+                    scope_reason = %s,
+                    scope_tier = %s,
+                    scope_evidence = %s,
+                    scope_model = %s,
+                    scope_prompt_version = %s,
+                    scope_cached = %s,
+                    scope_decided_at = COALESCE(%s, now()),
+                    needs_review = %s,
+                    review_reasons = %s,
+                    normalised_name = COALESCE(%s, normalised_name),
+                    name = COALESCE(%s, name)
+                WHERE id = %s
+                RETURNING *
+                """,
+                (
+                    in_scope,
+                    scope_reason,
+                    scope_tier,
+                    _json(scope_evidence),
+                    scope_model,
+                    scope_prompt_version,
+                    scope_cached,
+                    scope_decided_at,
+                    needs_review,
+                    _json(review_reasons),
+                    normalised_name,
+                    name,
+                    programme_id,
+                ),
+            ).fetchone()
+        return _programme(row) if row else None
+
     def list(self, filters: ProgrammeFilter) -> list[ProgrammeRecord]:
         where, params = _programme_where(filters)
         params.extend([filters.limit, filters.offset])
@@ -2991,6 +3136,129 @@ class ProgrammesRepo:
                 }
         return facets
 
+    # ------------------------------------------------------------- scope (0010)
+
+    def scope_decision_get(self, cache_key: str) -> ProgrammeScopeDecision | None:
+        """The stored decision for one cache key (classifier cache or manual)."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM programme_scope_decisions WHERE cache_key = %s",
+                (cache_key,),
+            ).fetchone()
+        return _scope_decision(row) if row else None
+
+    def scope_decision_put(
+        self, decision: ProgrammeScopeDecisionCreate
+    ) -> tuple[ProgrammeScopeDecision, bool]:
+        """Insert (or refresh) the decision for a cache key. Never deletes.
+
+        A human decision overwrites the classifier's for the same key — manual
+        always wins — but the previous row's *content* is preserved in the
+        caller's audit trail (the CLI prints it); the table keeps one row per
+        key so lookups stay exact. Returns ``(record, created)``.
+        """
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO programme_scope_decisions
+                    (cache_key, normalised_name, raw_name, institution_type, country,
+                     decision, tier, confidence, rationale, evidence, model, prompt_version,
+                     cached, needs_review, flags, definition_version, decided_by, note)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (cache_key) DO UPDATE SET
+                    normalised_name = EXCLUDED.normalised_name,
+                    raw_name = EXCLUDED.raw_name,
+                    institution_type = EXCLUDED.institution_type,
+                    country = EXCLUDED.country,
+                    decision = EXCLUDED.decision,
+                    tier = EXCLUDED.tier,
+                    confidence = EXCLUDED.confidence,
+                    rationale = EXCLUDED.rationale,
+                    evidence = EXCLUDED.evidence,
+                    model = EXCLUDED.model,
+                    prompt_version = EXCLUDED.prompt_version,
+                    cached = EXCLUDED.cached,
+                    needs_review = EXCLUDED.needs_review,
+                    flags = EXCLUDED.flags,
+                    definition_version = EXCLUDED.definition_version,
+                    decided_by = EXCLUDED.decided_by,
+                    note = EXCLUDED.note
+                RETURNING *, (xmax = 0) AS inserted
+                """,
+                (
+                    decision.cache_key,
+                    decision.normalised_name,
+                    decision.raw_name,
+                    decision.institution_type,
+                    decision.country,
+                    decision.decision,
+                    decision.tier,
+                    decision.confidence,
+                    decision.rationale,
+                    _json(decision.evidence),
+                    decision.model,
+                    decision.prompt_version,
+                    decision.cached,
+                    decision.needs_review,
+                    _json(decision.flags),
+                    decision.definition_version,
+                    decision.decided_by,
+                    decision.note,
+                ),
+            ).fetchone()
+        assert row is not None
+        created = bool(row.pop("inserted", False))
+        return _scope_decision(row), created
+
+    def scope_decisions_needing_review(self, limit: int = 100) -> list[ProgrammeScopeDecision]:
+        """The `uncertain` decisions a human must settle (the review queue)."""
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM programme_scope_decisions
+                WHERE needs_review
+                ORDER BY id
+                LIMIT %s
+                """,
+                (limit,),
+            ).fetchall()
+        return [_scope_decision(row) for row in rows]
+
+    def scope_counts(self) -> dict[str, int]:
+        """Scoping totals for summaries: in/out of scope, tiers, queue size."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT count(*) FILTER (WHERE in_scope) AS in_scope,
+                       count(*) FILTER (WHERE NOT in_scope) AS out_of_scope,
+                       count(*) FILTER (WHERE scope_tier = 'rule') AS tier_rule,
+                       count(*) FILTER (WHERE scope_tier = 'semantic') AS tier_semantic,
+                       count(*) FILTER (WHERE scope_tier = 'manual') AS tier_manual,
+                       (SELECT count(*) FROM programme_scope_decisions WHERE needs_review)
+                           AS review_queue
+                FROM programmes
+                """
+            ).fetchone()
+        return {key: int(value or 0) for key, value in dict(row).items()}
+
+    def merge_into(self, source_id: int, target_id: int) -> dict[str, int]:
+        """Fold duplicate ``source`` row into ``target`` and delete it.
+
+        Programmes rows are materialised views of claims, so the duplicate row
+        itself is deleted — but nothing it references is lost: ``cost_items``
+        are re-pointed at the surviving row first and the counts are returned
+        for the audit trail. Claims are untouched (append-only evidence).
+        """
+        with self.db.connection() as conn:
+            cost_moved = conn.execute(
+                "UPDATE cost_items SET programme_id = %s WHERE programme_id = %s",
+                (target_id, source_id),
+            ).rowcount
+            deleted = conn.execute(
+                "DELETE FROM programmes WHERE id = %s", (source_id,)
+            ).rowcount
+        return {"cost_items_moved": int(cost_moved or 0), "rows_deleted": int(deleted or 0)}
+
 
 def _fallback_normalised_name(name: str) -> str:
     """Stable grouping key for callers that predate migration 0006.
@@ -3020,7 +3288,14 @@ def _programme_where(filters: ProgrammeFilter) -> tuple[str, list[Any]]:
     if filters.query:
         conditions.append("p.name ILIKE %s")
         params.append(f"%{filters.query}%")
+    if filters.in_scope is not None:
+        conditions.append("p.in_scope = %s")
+        params.append(filters.in_scope)
     return (" WHERE " + " AND ".join(conditions) if conditions else ""), params
+
+
+def _scope_decision(row: dict[str, Any]) -> ProgrammeScopeDecision:
+    return ProgrammeScopeDecision.model_validate(row)
 
 
 class ScoresRepo:
