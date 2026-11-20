@@ -221,6 +221,21 @@ Tiered, cheapest-first, with a mandatory VLM audit pass:
 
 **Long documents (W4, 2026-11-18):** documents longer than the served context are no longer aborted as `http_error`. `fmd/extract/chunking.py` splits the canonical text into overlapping, page-boundary-aligned windows sized from `config/models.yaml:chunking` (context minus output minus prompt headroom), validates quotes against the window and re-anchors every span to absolute offsets so provenance and bbox/page projection are unchanged; overlapping windows are deduped by `(predicate, span)` or `(predicate, value + row context)`; one window failing does not stop the others (`chunk_failed:<n>` per window, resume retries only failed windows), a per-document cap reports `chunk_budget_exhausted` with pages covered vs total, and an over-context request is recorded as `context_exceeded` — never a network-shaped code. Details and limits: runbook §9.
 
+**Section tree (W8, 2026-11-19):** acquisition now extracts the document's
+heading outline — Docling item labels (`section_header`, `title`) first, with
+guarded text heuristics (numbered headings, ALL-CAPS lines, Devanagari
+headings) for T0/T2 — normalises levels to 1..N with no gaps, and persists it
+in `document_sections` (migration 0009, wholesale replace, keyed by
+`document_id` with parent links and stable node keys). The span resolver's
+`section` rung uses the tree's real boundaries (each occurrence attributed to
+its narrowest containing node, breadcrumb recorded as `section_path`, source
+recorded as `section_source: outline|heuristic`), each chunk window carries
+its breadcrumb as prompt metadata that is never quotable text, chunk cuts
+prefer section boundaries, and the planner consumes tree titles as
+classification signals. A no-headings document degrades to the W7 heuristic
+and reports it; nothing fails because headings were absent. Details and
+limits: runbook §11.
+
 ## 10. Entity resolution
 
 `normalise` (NFKC, strip "University of", expand IIT/NIT/IIIT/BITS-style lexicons, transliterate Devanagari) → `block` (splink with DuckDB backend; rules on `(state, first_token)` and `(pincode, soundex)`) → `compare` (bge-m3 embeddings + pgvector ANN for alias candidates) → `score` (Fellegi–Sunter `m`/`u` priors) → `adjudicate` with LLM **only** in the 0.40–0.85 band, batched, cached by pair hash.

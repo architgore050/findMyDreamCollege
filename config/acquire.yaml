@@ -44,6 +44,33 @@ tiers:
   # Deterministic 1% field audit (sha256-keyed, never random).
   adjudication_sample_rate: 0.01
 
+# Document section outline (W8 section-structure). The heading tree is built
+# Docling-first (item labels carry page + bbox) with a text-heuristic fallback
+# for T0/T2 documents; every threshold lives here, none in Python.
+outline:
+  # A heading line is short; a longer line is a sentence or a wrapped row.
+  heading_max_chars: 120
+  heading_max_words: 14
+  # One all-caps word is a cell value ("TOTAL", "INR"), not a heading.
+  all_caps_min_words: 2
+  # The text after an enumeration marker ("4.2 Fees") must be a short label:
+  # more words than this is a sentence ("1. The institute was established …").
+  numbered_max_words: 10
+  # Numbered chapters come in sequences: fewer numbered lines than this is a
+  # list item or a row label, and the numbered heuristic does not fire.
+  numbered_min_sequence: 2
+  # Devanagari headings: minimum share of Devanagari letters on the line and
+  # minimum word count (a single word is a cell, not a title; a colon label
+  # may carry one).
+  devanagari_min_ratio: 0.5
+  devanagari_min_words: 2
+  # Docling labels consumed as headings. page_header/footer/footnote are page
+  # furniture and never enter the tree (they repeat on every page).
+  docling_labels: [title, section_header]
+  furniture_labels: [page_header, page_footer, footer, header, footnote, picture, formula]
+  # Safety cap on tree size for pathological documents.
+  max_nodes: 1000
+
 # Repetition / entropy guard. Scoped to OCR output (T2, T2b) only: a decoder
 # loop is a model failure. T0 (pdftext) and T1 (Docling) read a real text layer,
 # so a long block there is evidence, not an anomaly — those tiers are never

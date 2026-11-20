@@ -34,6 +34,15 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from fmd.acquire.outline import (
+    DIAGNOSTIC_NO_HEADINGS,
+    EXTRACTOR_DOCLING,
+    OutlineNode,
+    OutlinePolicy,
+    breadcrumb_of,
+    build_outline,
+)
+
 BBox = tuple[float, float, float, float]
 Granularity = Literal["glyph", "span", "block"]
 
@@ -85,6 +94,10 @@ class TextBlock:
     char_indexes: tuple[int, ...] | None = None
     block_id: int | None = None
     line: int | None = None
+    #: Docling item label when the tier supplied one (``section_header``,
+    #: ``title``, ``page_header``). The outline builder consumes it as a
+    #: heading candidate; page-furniture labels are excluded there.
+    outline_label: str | None = None
 
     def __post_init__(self) -> None:
         if self.char_boxes is not None and len(self.char_boxes) != len(self.text):
@@ -152,6 +165,10 @@ class SectionGeometry:
     heading_char_end: int
     char_start: int
     char_end: int
+    #: Outline level of the heading (W8; 0 for the flat W7 heuristic sections).
+    level: int = 0
+    #: Root→leaf breadcrumb of heading titles (W8 outline sections only).
+    path: tuple[str, ...] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -161,6 +178,8 @@ class SectionGeometry:
             "heading_char_end": self.heading_char_end,
             "char_start": self.char_start,
             "char_end": self.char_end,
+            "level": self.level,
+            "path": list(self.path) if self.path is not None else None,
         }
 
 
@@ -202,6 +221,15 @@ class CanonicalText:
     #: Printed heading blocks and the text under each (W7 span-scope). Empty
     #: when no block looks like a heading; see :func:`looks_like_heading`.
     sections: tuple[SectionGeometry, ...] = ()
+    #: The document's heading tree (W8 section-structure): Docling labels when
+    #: the tier supplied them, text heuristics otherwise; empty when no
+    #: heading was found (a no-headings document degrades, never fails).
+    outline: tuple[OutlineNode, ...] = ()
+    #: Which extractor produced the outline (``docling`` | ``heuristic``);
+    #: empty when there is no outline.
+    outline_extractor: str = ""
+    #: Stable diagnostic when the outline degraded (``no_headings_detected``).
+    outline_diagnostic: str = ""
 
     @property
     def page_starts(self) -> list[int]:
@@ -298,8 +326,14 @@ def build_canonical(
     *,
     block_separator: str = BLOCK_SEPARATOR,
     page_separator: str = PAGE_SEPARATOR,
+    outline_policy: OutlinePolicy | None = None,
 ) -> CanonicalText:
-    """Concatenate blocks into canonical text with a per-character anchor map."""
+    """Concatenate blocks into canonical text with a per-character anchor map.
+
+    ``outline_policy`` carries the heading-detection thresholds
+    (``config/acquire.yaml:outline``); ``None`` uses the shipped defaults,
+    which mirror the registry exactly.
+    """
     ordered = sorted(blocks, key=lambda block: (block.page_no, block.block_id or 0))
     by_page: dict[int, list[TextBlock]] = {}
     for block in ordered:
@@ -314,6 +348,8 @@ def build_canonical(
     anchors: list[CharAnchor | None] = []
     block_boxes: dict[tuple[int, int], BBox] = {}
     out_pages: list[PageGeometry] = []
+    outline_runs: list[tuple[int, int, int]] = []
+    outline_hints: list[tuple[int, int, int, BBox | None, str]] = []
     cursor = 0
     next_block_id = 0
 
@@ -339,6 +375,7 @@ def build_canonical(
                 next_block_id = max(next_block_id, block_id + 1)
             if block.bbox is not None:
                 block_boxes[(page_no, block_id)] = block.bbox
+            block_start = cursor
             per_char = block.char_boxes is not None and len(block.char_boxes) == len(block.text)
             for index, char in enumerate(block.text):
                 parts.append(char)
@@ -355,6 +392,11 @@ def build_canonical(
                     )
                 )
                 cursor += 1
+            outline_runs.append((block_start, cursor, page_no))
+            if block.outline_label:
+                outline_hints.append(
+                    (block_start, cursor, page_no, block.bbox, block.outline_label)
+                )
         page_end = cursor
         source = given.get(page_no)
         out_pages.append(
@@ -371,6 +413,17 @@ def build_canonical(
     granularity = _document_granularity(anchors)
     text = "".join(parts)
     sections = sections_from_runs(text, block_runs(text, anchors))
+    policy = outline_policy or OutlinePolicy()
+    outline = build_outline(text, outline_runs, hints=outline_hints, policy=policy)
+    if outline:
+        extractor = (
+            EXTRACTOR_DOCLING
+            if any(node.source.startswith("docling:") for node in outline)
+            else "heuristic"
+        )
+        outline_extractor, outline_diagnostic = extractor, ""
+    else:
+        outline_extractor, outline_diagnostic = "", DIAGNOSTIC_NO_HEADINGS
     return CanonicalText(
         text=text,
         pages=tuple(out_pages),
@@ -378,6 +431,9 @@ def build_canonical(
         block_boxes=block_boxes,
         granularity=granularity,
         sections=sections,
+        outline=outline,
+        outline_extractor=outline_extractor,
+        outline_diagnostic=outline_diagnostic,
     )
 
 
@@ -503,6 +559,33 @@ def sections_from_runs(
     return tuple(sections)
 
 
+def outline_to_sections(
+    outline: Sequence[OutlineNode],
+) -> tuple[SectionGeometry, ...]:
+    """The outline tree as resolver bounds (W8 section scope).
+
+    Every node becomes a bound carrying its level and root→leaf breadcrumb;
+    the span resolver picks the **narrowest** containing bound (level-aware),
+    so nested nodes never double-attribute an occurrence and W7's flat
+    heuristic sections behave exactly as before.
+    """
+    sections: list[SectionGeometry] = []
+    for node in outline:
+        sections.append(
+            SectionGeometry(
+                page_no=node.page_no,
+                heading_text=node.title,
+                heading_char_start=node.heading_char_start,
+                heading_char_end=node.heading_char_end,
+                char_start=node.char_start,
+                char_end=node.char_end,
+                level=node.level,
+                path=breadcrumb_of(outline, node),
+            )
+        )
+    return tuple(sections)
+
+
 __all__ = [
     "BLOCK_SEPARATOR",
     "PAGE_SEPARATOR",
@@ -513,6 +596,8 @@ __all__ = [
     "HEADING_MAX_CHARS",
     "HEADING_MAX_WORDS",
     "HEADING_MIN_WORDS",
+    "OutlineNode",
+    "OutlinePolicy",
     "PageGeometry",
     "SectionGeometry",
     "SpanHit",
@@ -522,5 +607,6 @@ __all__ = [
     "build_canonical",
     "looks_like_heading",
     "merge_boxes",
+    "outline_to_sections",
     "sections_from_runs",
 ]

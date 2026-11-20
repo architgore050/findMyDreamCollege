@@ -52,6 +52,7 @@ from fmd.acquire.guards import (
     born_digital_length_warnings,
     detect_anomalies,
 )
+from fmd.acquire.outline import OutlinePolicy
 from fmd.acquire.rapidocr_backend import (
     RapidOCRBackend,
     RapidOCRSettings,
@@ -406,7 +407,7 @@ def t0_extract(data: bytes, *, policy: AcquirePolicy | None = None) -> Extracted
             raise TierUnavailable(f"pdftext could not read the PDF: {exc}") from exc
     finally:
         path.unlink(missing_ok=True)
-    return _pdftext_doc(pages)
+    return _pdftext_doc(pages, policy=policy)
 
 
 def _import_pdftext() -> Any:
@@ -419,7 +420,9 @@ def _import_pdftext() -> Any:
         ) from exc
 
 
-def _pdftext_doc(pages: list[dict[str, Any]]) -> ExtractedDoc:
+def _pdftext_doc(
+    pages: list[dict[str, Any]], *, policy: AcquirePolicy | None = None
+) -> ExtractedDoc:
     blocks: list[TextBlock] = []
     geoms: list[PageGeometry] = []
     two_column = False
@@ -475,7 +478,11 @@ def _pdftext_doc(pages: list[dict[str, Any]]) -> ExtractedDoc:
                     )
                 )
 
-    canonical = build_canonical(blocks, geoms)
+    canonical = build_canonical(
+        blocks,
+        geoms,
+        outline_policy=_outline_policy(policy),
+    )
     return ExtractedDoc(
         text=canonical.text,
         page_map=[
@@ -589,7 +596,15 @@ def _docling_doc(document: Any, policy: AcquirePolicy) -> ExtractedDoc:
         page_no, bbox = _docling_prov(item, heights)
         text = getattr(item, "text", None)
         if isinstance(text, str) and text.strip() and bbox is not None:
-            blocks.append(TextBlock(page_no=page_no, text=text, bbox=bbox, granularity="span"))
+            blocks.append(
+                TextBlock(
+                    page_no=page_no,
+                    text=text,
+                    bbox=bbox,
+                    granularity="span",
+                    outline_label=_docling_label(item),
+                )
+            )
         data = _field(item, "data")
         cells = _field(data, "table_cells")
         if cells:
@@ -642,7 +657,7 @@ def _docling_doc(document: Any, policy: AcquirePolicy) -> ExtractedDoc:
             )
             for p in pages
         ]
-    canonical = build_canonical(blocks, geoms)
+    canonical = build_canonical(blocks, geoms, outline_policy=_outline_policy(policy))
     confidences = [table.confidence for table in tables if table.confidence is not None]
     return ExtractedDoc(
         text=canonical.text,
@@ -660,6 +675,26 @@ def _docling_doc(document: Any, policy: AcquirePolicy) -> ExtractedDoc:
         bbox_granularity=canonical.granularity,
         table_confidence=min(confidences) if confidences else None,
     )
+
+
+def _docling_label(item: Any) -> str | None:
+    """The Docling item label (``section_header``, ``title``, ...), normalised.
+
+    Docling enums stringify as ``DocItemLabel.SECTION_HEADER`` on some
+    versions, so ``.value`` is preferred; the outline builder decides which
+    labels are headings and which are page furniture.
+    """
+    raw = getattr(item, "label", None)
+    if raw is None:
+        return None
+    value = getattr(raw, "value", raw)
+    text = str(value or "").strip().lower()
+    return text or None
+
+
+def _outline_policy(policy: AcquirePolicy | None) -> OutlinePolicy:
+    """Heading thresholds from ``config/acquire.yaml:outline`` (or defaults)."""
+    return OutlinePolicy.from_acquire(policy.acquire if policy is not None else None)
 
 
 def _docling_prov(
@@ -878,7 +913,7 @@ def _ocr_doc(
             )
         blocks.sort(key=lambda block: (block.page_no, block.block_id or 0))
         geoms = _ocr_pages(payload, blocks)
-        canonical = build_canonical(blocks, geoms)
+        canonical = build_canonical(blocks, geoms, outline_policy=_outline_policy(policy))
         text = canonical.text
     else:
         text = str(payload.get("text") or "")
@@ -912,6 +947,7 @@ def _ocr_doc(
                     char_end=0,
                 )
             ],
+            outline_policy=_outline_policy(policy),
         )
 
     tables = _ocr_tables(payload.get("tables") or [])

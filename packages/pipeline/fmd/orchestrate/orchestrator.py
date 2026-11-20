@@ -27,6 +27,7 @@ from fmd.db.repositories import (
     InstitutionDomainsRepo,
     ProgrammesRepo,
     ScoresRepo,
+    SectionsRepo,
     SnapshotsRepo,
 )
 from fmd.fetch.ladder import FetchLadder
@@ -76,6 +77,7 @@ class Orchestrator:
         tool_version: str = DEFAULT_TOOL_VERSION,
         score_persist: Callable[[Any, Any], Any] | None = None,
         planner: Any | None = None,
+        sections: Any | None = None,
     ) -> None:
         self.registry = registry
         self.database = database
@@ -96,6 +98,7 @@ class Orchestrator:
             extractions if extractions is not None else self._require_database(ExtractionsRepo)
         )
         self.claims = claims if claims is not None else self._require_database(ClaimsRepo)
+        self.sections = sections if sections is not None else self._optional(SectionsRepo)
         self.programmes = (
             programmes if programmes is not None else self._require_database(ProgrammesRepo)
         )
@@ -350,6 +353,7 @@ class Orchestrator:
             router=self.router,
             tool_version=self.tool_version,
             predicates=self.registry.predicates,
+            sections=self.sections,
         )
         extractor.run(summary=summary, limit=limit, force=force)
         summary.metadata["tool_version"] = self.tool_version

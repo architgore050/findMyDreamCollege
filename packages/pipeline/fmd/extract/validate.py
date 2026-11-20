@@ -22,9 +22,11 @@ turns that quote into a claim deterministically:
    * ``unique_page`` — no row context was supplied, the quote is ambiguous
      document-wide, but exactly one **page** holds exactly one occurrence
      (``resolution_scope: page``; the page number is recorded);
-   * ``unique_section`` — no page qualifies, but exactly one **section** (a
-     printed heading block from :mod:`fmd.acquire.canonical`) holds exactly
-     one occurrence (``resolution_scope: section``; the heading is recorded);
+   * ``unique_section`` — no page qualifies, but exactly one **section**
+     holds exactly one occurrence (``resolution_scope: section``; the heading
+     is recorded, plus the W8 breadcrumb ``section_path`` — the root→leaf
+     chain of heading titles from the document's outline tree, or the flat
+     heuristic blocks when the document has no tree).
    * ``none`` — nothing disambiguated; the field abstains.
 
    A context that names a real table block but does not contain the quote is a
@@ -63,7 +65,8 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from collections.abc import Mapping, Sequence
+from bisect import bisect_right
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -510,6 +513,9 @@ class SpanResolution:
     scope_span: tuple[int, int] | None = None
     #: The printed heading text, for ``scope == "section"``.
     scope_label: str | None = None
+    #: Root→leaf breadcrumb of heading titles for ``scope == "section"`` (W8
+    #: outline bounds only; ``None`` for the flat W7 heuristic bounds).
+    scope_path: tuple[str, ...] | None = None
     context_quote: str | None = None
     context_span: tuple[int, int] | None = None
     row: RowIdentity | None = None
@@ -1016,6 +1022,10 @@ class _SectionBound:
     heading_text: str
     start: int
     end: int
+    #: Outline level (W8 tree bounds); 0 for the flat W7 heuristic sections.
+    level: int = 0
+    #: Root→leaf breadcrumb of heading titles (W8 outline bounds only).
+    path: tuple[str, ...] | None = None
 
 
 def _page_bound(item: Any) -> _PageBound | None:
@@ -1047,11 +1057,17 @@ def _section_bound(item: Any) -> _SectionBound | None:
         if not isinstance(start, int) or not isinstance(end, int) or not heading:
             return None
         page = item.get("page_no", item.get("page"))
+        level = item.get("level")
+        path = item.get("path")
         return _SectionBound(
             page_no=int(page) if isinstance(page, int) else None,
             heading_text=str(heading),
             start=start,
             end=end,
+            level=int(level) if isinstance(level, int) and not isinstance(level, bool) else 0,
+            path=tuple(str(title) for title in path)
+            if isinstance(path, (list, tuple))
+            else None,
         )
     start = _attr(item, "char_start", None)
     end = _attr(item, "char_end", None)
@@ -1059,11 +1075,17 @@ def _section_bound(item: Any) -> _SectionBound | None:
     if not isinstance(start, int) or not isinstance(end, int) or not heading:
         return None
     page = _attr(item, "page_no", None)
+    level = _attr(item, "level", 0)
+    path = _attr(item, "path", None)
     return _SectionBound(
         page_no=int(page) if isinstance(page, int) else None,
         heading_text=str(heading),
         start=start,
         end=end,
+        level=int(level) if isinstance(level, int) and not isinstance(level, bool) else 0,
+        path=tuple(str(title) for title in path)
+        if isinstance(path, (list, tuple))
+        else None,
     )
 
 
@@ -1072,9 +1094,62 @@ def _normalise_pages(pages: Sequence[Any] | None) -> list[_PageBound]:
     return sorted(bounds, key=lambda bound: bound.start)
 
 
-def _normalise_sections(sections: Sequence[Any] | None) -> list[_SectionBound]:
+def _normalise_sections(sections: Sequence[Any] | None) -> _SectionBounds:
     bounds = [bound for item in (sections or ()) if (bound := _section_bound(item)) is not None]
-    return sorted(bounds, key=lambda bound: bound.start)
+    ordered = sorted(bounds, key=lambda bound: bound.start)
+    # Parent index per bound: the nearest shallower bound to its left. In a
+    # proper outline this is exactly the ancestor, so the narrowest-containing
+    # lookup walks parents directly — no sibling rescan per claim.
+    parents: list[int | None] = []
+    stack: list[int] = []
+    for index, bound in enumerate(ordered):
+        while stack and ordered[stack[-1]].level >= bound.level:
+            stack.pop()
+        parents.append(stack[-1] if stack and ordered[stack[-1]].level > 0 else None)
+        stack.append(index)
+    return _SectionBounds(tuple(ordered), tuple(parents))
+
+
+@dataclass(frozen=True)
+class _SectionBounds:
+    """Sorted section bounds with a precomputed parent chain.
+
+    Quacks like ``Sequence[_SectionBound]`` for the rung code; adds the
+    bisect-able starts and the parent indexes the containment lookup walks.
+    """
+
+    bounds: tuple[_SectionBound, ...]
+    parents: tuple[int | None, ...]
+    starts: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.starts:
+            object.__setattr__(self, "starts", tuple(bound.start for bound in self.bounds))
+
+    def __len__(self) -> int:
+        return len(self.bounds)
+
+    def __getitem__(self, index: Any) -> _SectionBound:
+        return self.bounds[index]
+
+    def __iter__(self) -> Iterator[_SectionBound]:
+        return iter(self.bounds)
+
+    def containing(self, start: int, end: int) -> _SectionBound | None:
+        """The narrowest bound fully containing ``[start, end)``."""
+        index = bisect_right(self.starts, start) - 1
+        if index < 0:
+            return None
+        cursor: int | None = index
+        while cursor is not None:
+            bound = self.bounds[cursor]
+            if bound.start <= start and end <= bound.end:
+                return bound
+            if bound.level <= 0:
+                # Flat bounds are non-overlapping: nothing shallower contains.
+                return None
+            cursor = self.parents[cursor]
+        return None
 
 
 def _page_containing(start: int, end: int, pages: Sequence[_PageBound]) -> _PageBound | None:
@@ -1087,10 +1162,20 @@ def _page_containing(start: int, end: int, pages: Sequence[_PageBound]) -> _Page
 def _section_containing(
     start: int, end: int, sections: Sequence[_SectionBound]
 ) -> _SectionBound | None:
-    for section in sections:
-        if section.start <= start and end <= section.end:
-            return section
-    return None
+    """The **narrowest** section fully containing ``[start, end)``.
+
+    With W8 tree bounds the containing nodes form a single ancestor chain and
+    the deepest one starts last, so the walk goes parent-ward in O(depth); a
+    straddling span can still sit inside a shallower ancestor, which the walk
+    reaches exactly. Flat W7 bounds (level 0) are non-overlapping, so the
+    first containing bound is both narrowest and only.
+    """
+    bounds = (
+        sections
+        if isinstance(sections, _SectionBounds)
+        else _normalise_sections(list(sections))
+    )
+    return bounds.containing(start, end)
 
 
 def _resolve_in_page(
@@ -1151,7 +1236,9 @@ def _resolve_in_section(
     Reached only when no page qualifies. A section candidate must hold exactly
     one occurrence; occurrences outside every heading block are invisible to
     this rung (they have no section identity, so attributing them would be a
-    guess). Two qualifying sections cancel out.
+    guess). Two qualifying sections cancel out. With W8 tree bounds each
+    occurrence is attributed to its **narrowest** containing node, so nested
+    sections never double-count one occurrence.
     """
     per_section: list[tuple[_SectionBound, list[tuple[int, int, str]]]] = []
     for hit in hits:
@@ -1193,6 +1280,7 @@ def _resolve_in_section(
         page_no=page.page_no if page is not None else section.page_no,
         scope_span=(section.start, section.end),
         scope_label=section.heading_text,
+        scope_path=section.path,
     )
 
 
@@ -1253,6 +1341,7 @@ def _with_scope(
     page_no: int | None = None,
     scope_span: tuple[int, int] | None = None,
     scope_label: str | None = None,
+    scope_path: tuple[str, ...] | None = None,
 ) -> SpanResolution:
     return SpanResolution(
         resolution.status,
@@ -1263,6 +1352,7 @@ def _with_scope(
         page_no=page_no if page_no is not None else resolution.page_no,
         scope_span=scope_span if scope_span is not None else resolution.scope_span,
         scope_label=scope_label if scope_label is not None else resolution.scope_label,
+        scope_path=scope_path if scope_path is not None else resolution.scope_path,
         context_quote=resolution.context_quote,
         context_span=resolution.context_span,
         row=resolution.row,
@@ -1743,6 +1833,7 @@ def validate_document(
     tables: list[Any] | None = None,
     pages: Sequence[Any] | None = None,
     sections: Sequence[Any] | None = None,
+    section_source: str | None = None,
 ) -> ValidationResult:
     """Turn quote-first guided JSON into validated ``ClaimCreate`` rows.
 
@@ -1752,10 +1843,14 @@ def validate_document(
     refuse a value whose column header is uncertain.
 
     ``pages`` are the document's page spans (``PageSpan``-like) and ``sections``
-    the printed heading blocks (``SectionGeometry``-like, from
-    ``fmd.acquire.canonical``). They power the W7 scope ladder — page and
-    section uniqueness for a quote the model supplied no row context for — and
-    the page number recorded on every resolved claim. They are never evidence.
+    the section bounds (``SectionGeometry``-like). W8 prefers the outline tree
+    bounds (each carries its level and a root→leaf ``path``); without a tree
+    the flat W7 heuristic bounds are used unchanged. They power the W7 scope
+    ladder — page and section uniqueness for a quote the model supplied no row
+    context for — and the page number recorded on every resolved claim. They
+    are never evidence. ``section_source`` names the extractor that produced
+    the bounds (``outline`` | ``heuristic``) and is recorded beside the
+    section-scope qualifier so a degraded run stays visible.
 
     ``fuzzy_threshold`` is accepted for API stability but no longer used: the new
     contract never searches fuzzy windows, because a near-match is not a span.
@@ -1946,6 +2041,7 @@ def validate_document(
             entity_id=entity_id,
             observed_at=observed_at,
             resolved=resolved,
+            section_source=section_source,
         )
         if isinstance(claim, Rejection):
             entry.rejection = claim
@@ -2145,6 +2241,7 @@ def _build_claim(  # noqa: PLR0913 - explicit gates are clearer than a bag of st
     entity_id: int,
     observed_at: datetime | None,
     resolved: list[_ResolvedField],
+    section_source: str | None = None,
 ) -> Rejection | ClaimCreate:
     match = entry.resolution.match
     if match is None or entry.derived is None:
@@ -2200,6 +2297,15 @@ def _build_claim(  # noqa: PLR0913 - explicit gates are clearer than a bag of st
         qualifier["scope_char_start"], qualifier["scope_char_end"] = entry.resolution.scope_span
     if entry.resolution.scope_label:
         qualifier["section_heading"] = entry.resolution.scope_label
+    if entry.resolution.scope == "section":
+        # W8: the qualifier records the outline breadcrumb (root→leaf, leaf
+        # last) and which extractor produced the bounds that resolved this
+        # rung — outline tree, or the flat W7 heuristic when the document has
+        # no tree. Structured metadata, never document text.
+        if entry.resolution.scope_path:
+            qualifier["section_path"] = list(entry.resolution.scope_path)
+        if section_source:
+            qualifier["section_source"] = section_source
     if entry.resolution.context_quote:
         qualifier["context_quote"] = entry.resolution.context_quote
     if entry.resolution.context_span is not None:

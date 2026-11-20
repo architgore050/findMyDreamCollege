@@ -286,14 +286,34 @@ def _pages_for(page_map: Sequence[Any], start: int, end: int) -> tuple[int, ...]
     return tuple(pages)
 
 
-def _cut_before(text: str, target: int, *, page_zone: int, line_zone: int) -> int:
+def _cut_before(
+    text: str,
+    target: int,
+    *,
+    page_zone: int,
+    line_zone: int,
+    heading_starts: Sequence[int] = (),
+) -> int:
     """Move a character-budget cut back to the latest structural boundary.
 
-    Page boundary first (a blank-line separated block), then a single newline,
-    then the raw budget cut. A cut inside a sentence would let the model quote
-    a half sentence; a page-aligned cut keeps table rows and their labels
-    together and makes the overlap zone a real safety margin.
+    W8: a heading start inside the look-back zone wins first — a window that
+    ends exactly where a section begins carries one coherent breadcrumb and
+    never splits a section's opening lines from their heading. Section starts
+    are line starts by construction (each heading is its own acquisition
+    block). Page boundary next (a blank-line separated block), then a single
+    newline, then the raw budget cut. A cut inside a sentence would let the
+    model quote a half sentence; a page-aligned cut keeps table rows and their
+    labels together and makes the overlap zone a real safety margin. When a
+    section is larger than the budget no heading falls inside the zone and the
+    page/line fallback splits inside it — the section's breadcrumb simply
+    repeats on every window that covers it.
     """
+    best_heading = -1
+    for start in heading_starts:
+        if target - page_zone <= start <= target and (start == 0 or text[start - 1] == "\n"):
+            best_heading = max(best_heading, start)
+    if best_heading > 0:
+        return best_heading
     page = text.rfind("\n\n", max(0, target - page_zone), target)
     if page != -1:
         return page + 2
@@ -323,6 +343,7 @@ def plan_windows(
     max_windows: int,
     min_window_chars: int = 1,
     page_map: Sequence[Any] = (),
+    section_starts: Sequence[int] = (),
 ) -> WindowPlan:
     """Split canonical text into overlapping, boundary-aligned windows.
 
@@ -332,6 +353,13 @@ def plan_windows(
     uncovered, ``truncated`` is ``True`` and ``pages_covered`` < ``pages_total``
     — the caller must report ``chunk_budget_exhausted`` rather than continue
     silently.
+
+    ``section_starts`` (W8) are the outline's heading offsets: cuts prefer a
+    heading boundary inside the look-back zone, so a window starts where a
+    section starts whenever the budget allows. A section larger than the
+    budget splits inside it and every window covering it carries that
+    section's breadcrumb. Short documents never reach this function (they stay
+    single-pass).
 
     A tail shorter than ``min_window_chars`` is merged into the previous window
     instead of becoming a stub call, and the overlap is clamped to half a
@@ -343,6 +371,7 @@ def plan_windows(
     window_chars = max(1, window_chars)
     zone = min(max(0, overlap_chars), window_chars // 2)
     line_zone = max(1, min(window_chars, 2000))
+    headings = tuple(sorted({int(start) for start in section_starts if 0 < int(start) < total}))
     windows: list[TextWindow] = []
     prev_cut = 0
     truncated = False
@@ -357,7 +386,13 @@ def plan_windows(
                 )
             )
             break
-        cut = _cut_before(text, target, page_zone=max(1, zone), line_zone=line_zone)
+        cut = _cut_before(
+            text,
+            target,
+            page_zone=max(1, zone),
+            line_zone=line_zone,
+            heading_starts=headings,
+        )
         if total - cut < max(1, min_window_chars):
             start = 0 if not windows else max(0, prev_cut - zone)
             windows.append(

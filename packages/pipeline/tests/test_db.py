@@ -793,3 +793,82 @@ def test_frontier_keeps_post_shape_and_conditional_validators_across_the_queue(
     assert stored.request_headers["If-None-Match"] == '"abc123"'
     assert stored.request_headers["If-Modified-Since"] == "Tue, 13 Oct 2026 10:00:00 GMT"
     assert stored.request_headers["X-Requested-With"] == "XMLHttpRequest"
+
+
+# ----------------------------------------------------------------- sections (W8)
+
+
+def test_sections_repo_round_trip_and_breadcrumb(pg_database) -> None:
+    suffix = _suffix()
+    url = f"https://example.ac.in/outline/{suffix}.pdf"
+    document = DocumentsRepo(pg_database).upsert(
+        DocumentUpsert(url=url, domain="example.ac.in", kind="accreditation")
+    )
+    from fmd.db import SectionNodeCreate, SectionsRepo, SectionTreeWrite
+
+    repo = SectionsRepo(pg_database)
+    tree = SectionTreeWrite(
+        document_id=document.id,
+        extractor="heuristic",
+        extractor_version="pdftext:1.2.3",
+        nodes=[
+            SectionNodeCreate(
+                node_key=1,
+                level=1,
+                title="4. Fees",
+                char_start=100,
+                char_end=400,
+                heading_char_start=100,
+                heading_char_end=108,
+                page_no=2,
+                bbox=[10.0, 20.0, 300.0, 40.0],
+            ),
+            SectionNodeCreate(
+                node_key=2,
+                level=2,
+                title="4.2 Hostel",
+                char_start=140,
+                char_end=400,
+                heading_char_start=140,
+                heading_char_end=150,
+                page_no=2,
+                parent_key=1,
+            ),
+        ],
+    )
+    assert repo.replace_for_document(tree) == 2
+
+    rows = repo.list_for_document(document.id)
+    assert [(row.node_key, row.title, row.level) for row in rows] == [
+        (1, "4. Fees", 1),
+        (2, "4.2 Hostel", 2),
+    ]
+    assert rows[1].parent_id == rows[0].id
+    assert rows[0].bbox == [10.0, 20.0, 300.0, 40.0]
+
+    # The breadcrumb lookup resolves the deepest section containing the span.
+    found = repo.breadcrumb(document.id, 150, 160)
+    assert found is not None
+    assert found["node"].title == "4.2 Hostel"
+    assert found["breadcrumb"] == ["4. Fees", "4.2 Hostel"]
+    # A span before the first heading has no section.
+    assert repo.breadcrumb(document.id, 0, 10) is None
+
+    # A whole-tree write replaces (derived structure, never appended).
+    smaller = SectionTreeWrite(
+        document_id=document.id,
+        extractor="docling",
+        nodes=tree.nodes[:1],
+    )
+    repo.replace_for_document(smaller)
+    assert [row.title for row in repo.list_for_document(document.id)] == ["4. Fees"]
+    repo.delete_for_document(document.id)
+    assert repo.list_for_document(document.id) == []
+
+
+def test_migration_0009_is_registered_and_idempotent(pg_database) -> None:
+    applied = applied_migrations(pg_database)
+    assert "0009_document_sections" in applied
+    # A re-apply is a no-op with the same checksum (never an error).
+    versions = run_migrations(pg_database)
+    assert versions == []

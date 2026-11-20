@@ -8,12 +8,14 @@ never computes anything. Every number it publishes has already passed
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from fmd.acquire.canonical import outline_to_sections
+from fmd.acquire.outline import OutlineNode, SectionIndex, outline_summary
 from fmd.acquire.types import PageSpan
 from fmd.config import Registry, get_registry
 from fmd.config.models import ModelsConfig, ProviderConfig
@@ -22,6 +24,9 @@ from fmd.db.repositories import (
     ClaimsRepo,
     ExtractionCreate,
     ExtractionsRepo,
+    SectionNodeCreate,
+    SectionsRepo,
+    SectionTreeWrite,
     SnapshotRecord,
     SnapshotsRepo,
 )
@@ -129,12 +134,16 @@ class ExtractPipeline:
         default_confidence: float = 0.5,
         adjudicate: bool = False,
         adjudicator: VLMAdjudicator | None = None,
+        sections: SectionsRepo | Any | None = None,
     ) -> None:
         self.router = router
         self.snapshots = snapshots
         self.extractions = extractions
         self.claims = claims
         self.store = store
+        #: The section-tree repo (W8). ``None`` keeps the outline audit-only:
+        #: it still rides in ``structure_json`` but is not persisted as rows.
+        self.sections = sections
         self.tool = tool
         self.tool_version = tool_version
         self.policy = policy or TierPolicy.load()
@@ -213,11 +222,12 @@ class ExtractPipeline:
             )
 
         try:
+            section_bounds, section_source = _doc_section_bounds(doc)
             payload = self.router.call(
                 purpose,
                 schema,
                 prompt.text,
-                user_message(doc.text),
+                user_message(doc.text, document_sections=_document_sections_metadata(doc)),
                 input_ref=f"{snapshot.sha256}:{target.family}:{prompt.version}",
             )
         except ContextExceeded:
@@ -249,7 +259,8 @@ class ExtractPipeline:
             default_confidence=self.default_confidence,
             tables=doc.tables,
             pages=doc.page_map or None,
-            sections=_doc_sections(doc),
+            sections=section_bounds,
+            section_source=section_source,
         )
         adjudications = self._adjudicate(validation.claims, doc.text)
 
@@ -271,9 +282,11 @@ class ExtractPipeline:
                     "outcomes": [item.as_dict() for item in validation.outcomes],
                     "outcome_counts": validation.outcome_counts(),
                     "adjudications": adjudications,
+                    "sections": _outline_structure(doc),
                 },
             )
         )
+        self._persist_sections(snapshot, doc)
 
         stored: list[Any] = []
         for claim in validation.claims:
@@ -339,6 +352,9 @@ class ExtractPipeline:
         is persisted and :class:`ChunkedExtractError` is raised so the run
         ledger records an abstention, not an empty success.
         """
+        outline_index = (
+            SectionIndex(doc.canonical.outline) if doc.canonical is not None else None
+        )
         plan = plan_windows(
             doc.text,
             window_chars=config.window_chars,
@@ -346,6 +362,7 @@ class ExtractPipeline:
             max_windows=config.max_windows_per_document,
             min_window_chars=config.min_window_chars,
             page_map=doc.page_map,
+            section_starts=_outline_starts(doc),
         )
         logger.info(
             "snapshot %s: chunking %s chars into %s window(s) (~%s chars each, overlap %s)",
@@ -390,7 +407,10 @@ class ExtractPipeline:
                     purpose,
                     schema,
                     prompt.text,
-                    user_message(window.text),
+                    user_message(
+                        window.text,
+                        document_sections=_window_sections_metadata(outline_index, window),
+                    ),
                     input_ref=(
                         f"{snapshot.sha256}:{target.family}:{prompt.version}:w{window.index}"
                     ),
@@ -427,6 +447,7 @@ class ExtractPipeline:
                 tables=doc.tables,
                 pages=window_pages,
                 sections=window_sections,
+                section_source=_section_source(doc),
             )
             window_adjudications = self._adjudicate(validation.claims, window.text)
             adjudications.extend({**item, "window": window.index} for item in window_adjudications)
@@ -534,9 +555,11 @@ class ExtractPipeline:
                     "outcome_counts": _outcome_counts(structure_outcomes),
                     "adjudications": adjudications,
                     "chunking": chunk_summary,
+                    "sections": _outline_structure(doc),
                 },
             )
         )
+        self._persist_sections(snapshot, doc)
 
         stored: list[Any] = []
         for claim in kept:
@@ -629,12 +652,130 @@ class ExtractPipeline:
             for item, verdict in decisions
         ]
 
+    def _persist_sections(self, snapshot: SnapshotRecord, doc: ExtractedDoc) -> None:
+        """Persist the outline tree for the snapshot's document (W8).
 
-def _doc_sections(doc: ExtractedDoc) -> tuple[Any, ...] | None:
-    """The document's printed heading blocks, when acquisition derived any."""
-    if doc.canonical is None or not doc.canonical.sections:
+        Derived structure, written wholesale. Only a **non-empty** tree is
+        written: a no-headings document must never clear a tree a prior
+        snapshot produced, and an empty write would look like data loss in the
+        review UI. ``self.sections is None`` keeps the outline audit-only (it
+        still rides in ``structure_json``).
+        """
+        repo = self.sections
+        canonical = doc.canonical
+        if repo is None or canonical is None or not canonical.outline:
+            return
+        nodes = [
+            SectionNodeCreate(
+                node_key=node.node_key,
+                level=node.level,
+                title=node.title,
+                char_start=node.char_start,
+                char_end=node.char_end,
+                heading_char_start=node.heading_char_start,
+                heading_char_end=node.heading_char_end,
+                page_no=node.page_no,
+                bbox=list(node.bbox) if node.bbox is not None else None,
+                parent_key=node.parent_key,
+            )
+            for node in canonical.outline
+        ]
+        repo.replace_for_document(
+            SectionTreeWrite(
+                document_id=snapshot.document_id,
+                extractor=canonical.outline_extractor or "heuristic",
+                extractor_version=f"{doc.tool}:{doc.tool_version or 'unknown'}",
+                nodes=nodes,
+            )
+        )
+
+
+def _doc_section_bounds(doc: ExtractedDoc) -> tuple[tuple[Any, ...] | None, str | None]:
+    """The document's section bounds for the resolver, plus their extractor.
+
+    W8 prefers the outline tree (``SectionGeometry`` bounds carrying level and
+    a root→leaf breadcrumb); a document with no tree keeps the flat W7
+    heuristic bounds, recorded as ``section_source: heuristic`` so a degraded
+    run stays visible. Both are ``None`` when no heading was found.
+    """
+    canonical = doc.canonical
+    if canonical is None:
+        return None, None
+    if canonical.outline:
+        return outline_to_sections(canonical.outline), "outline"
+    if canonical.sections:
+        return canonical.sections, "heuristic"
+    return None, None
+
+
+def _section_source(doc: ExtractedDoc) -> str | None:
+    """Which extractor produced the bounds used for the section rung."""
+    _bounds, source = _doc_section_bounds(doc)
+    return source
+
+
+def _outline_structure(doc: ExtractedDoc) -> dict[str, Any] | None:
+    """Audit summary of the outline in ``extractions.structure_json``."""
+    canonical = doc.canonical
+    if canonical is None:
         return None
-    return doc.canonical.sections
+    if not canonical.outline and not canonical.outline_diagnostic:
+        return None
+    return outline_summary(
+        canonical.outline,
+        extractor=canonical.outline_extractor or "heuristic",
+        diagnostic=canonical.outline_diagnostic,
+    )
+
+
+def _outline_starts(doc: ExtractedDoc) -> tuple[int, ...]:
+    """Heading offsets for chunk cuts at section boundaries."""
+    canonical = doc.canonical
+    if canonical is None or not canonical.outline:
+        return ()
+    return tuple(sorted({node.char_start for node in canonical.outline}))
+
+
+def _render_outline_lines(nodes: Sequence[OutlineNode], limit: int = 200) -> list[str]:
+    lines: list[str] = []
+    for node in nodes:
+        if len(lines) >= limit:
+            lines.append(f"... ({len(nodes) - limit} more headings omitted)")
+            break
+        indent = "  " * (node.level - 1)
+        page = f" (page {node.page_no})" if node.page_no else ""
+        lines.append(f"{indent}- {node.title}{page}")
+    return lines
+
+
+def _document_sections_metadata(doc: ExtractedDoc) -> str | None:
+    """The outline as prompt metadata (never quotable document text)."""
+    canonical = doc.canonical
+    if canonical is None or not canonical.outline:
+        return None
+    lines = _render_outline_lines(canonical.outline)
+    return "\n".join(lines)
+
+
+def _window_sections_metadata(index: SectionIndex | None, window: TextWindow) -> str | None:
+    """Window breadcrumb + the headings the window actually contains.
+
+    The breadcrumb is the section chain in effect at the window's owned start;
+    the listed headings are those fully inside the window, so the model sees
+    where it is without the metadata ever being quotable text (validation
+    resolves quotes against the window body only).
+    """
+    if index is None or not len(index):
+        return None
+    breadcrumb = index.breadcrumb(window.core_start)
+    lines: list[str] = []
+    if breadcrumb:
+        lines.append(f"window breadcrumb: {' > '.join(breadcrumb)}")
+    inner = index.inside(window.char_start, window.char_end)
+    if not inner and not lines:
+        return None
+    lines.extend(_render_outline_lines(inner))
+    return "\n".join(lines)
 
 
 def _window_scope_bounds(
@@ -648,7 +789,9 @@ def _window_scope_bounds(
     ``scope_char_start``/``scope_char_end`` shift with it). A section counts
     only when its printed heading lies fully inside the window: a heading the
     model never saw cannot scope a quote, so a section that started in an
-    earlier window is dropped, never clipped at the heading.
+    earlier window is dropped, never clipped at the heading. W8 outline bounds
+    (level + breadcrumb) are preferred; the flat W7 heuristic bounds are the
+    fallback and keep their shape.
     """
     pages: list[PageSpan] = []
     for span in doc.page_map:
@@ -664,7 +807,12 @@ def _window_scope_bounds(
             )
     sections: list[Any] = []
     if doc.canonical is not None:
-        for section in doc.canonical.sections:
+        bounds = (
+            outline_to_sections(doc.canonical.outline)
+            if doc.canonical.outline
+            else doc.canonical.sections
+        )
+        for section in bounds:
             if (
                 window.char_start <= section.heading_char_start
                 and section.heading_char_end <= window.char_end
@@ -847,6 +995,7 @@ def run_extract(
         extractions=ExtractionsRepo(database),
         claims=ClaimsRepo(database),
         store=store,
+        sections=SectionsRepo(database),
         **pipeline_kwargs,
     )
     return pipeline.run_batch(targets)

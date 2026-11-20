@@ -2786,3 +2786,151 @@ failed-context hard stop, the row-beats-page precedence, absolute offsets,
 section derivation, window-relative bounds, the dedupe rule and the verifier
 plumbing are pinned in `test_extract_validate.py` and
 `test_extract_context.py`.
+
+## 11. Document section tree — the W8 outline (2026-11-19, W8 section-structure)
+
+### The problem, measured
+
+W7 made the span resolver scope-aware, but the "sections" it saw were a flat
+text heuristic (`looks_like_heading`: ALL-CAPS lines, colon labels, annexure
+lead words) with no levels, no hierarchy and no structure for anything
+downstream. The operator proposal this wave implements: a parsed PDF has a
+natural outline, and keeping it gives real section boundaries for scope, a
+breadcrumb ("4. Fees › 4.2 Hostel") for the model, section-aligned chunk
+boundaries, and stable structure for the planner and the review UI.
+
+### Extraction (Docling first, T0/T2 heuristic fallback)
+
+`fmd/acquire/outline.py` builds one tree per document, inside
+`build_canonical` (same blocks, same offsets, zero extra passes):
+
+* **Docling labels preferred.** T1 records the item label on every block
+  (`section_header`, `title`); `page_header`/`footer`/`footnote` are page
+  furniture and never enter the tree. When at least one usable label exists,
+  the tree is Docling-only and the text heuristics do not run — one extractor
+  per tree, recorded on every node and on the extraction structure
+  (`outline.extractor`: `docling` | `heuristic`).
+* **Heuristic fallback** (T0/T2, or T1 with no usable labels): numbered
+  headings (`1.`, `4.2`, `(iii)`, `c.`, Devanagari `१.`, `१.२`), short
+  ALL-CAPS lines, colon-terminated labels and annexure lead words — the W7
+  signals plus numbering and Devanagari. Every heuristic carries a
+  false-positive guard, each pinned by a test: a numbered *sentence*
+  ("1. The institute was established …") fails the sentence-connector veto,
+  the terminal-punctuation veto and the length caps; a numbered *table row*
+  ("1. Tuition fee 85000") fails the amount veto (3-digit numbers, currency
+  tokens); "B.Sc. MLT" fails the interior-dot veto; one lone numbered line is
+  refused outright (chapters come in sequences; `outline.numbered_min_sequence`,
+  default 2). A Devanagari sentence (danda) is refused; a single Devanagari
+  word is refused (a cell, not a title). All thresholds live in
+  `config/acquire.yaml:outline`; none in Python.
+* **Levels are normalised 1..N with no gaps.** Numbered headings open
+  ancestors on a stack keyed on numbering depth (1 → "4.", 2 → "4.2"); an
+  unnumbered heading is a sibling of the previous heading; the stack
+  guarantees `level <= previous + 1`, so "1 → 1.1.1" normalises to
+  "1 → 2". Ranges are classic outline ranges: heading start → next heading at
+  the same or shallower level, so children nest inside parents and siblings
+  never overlap. Each node carries `node_key` (stable ordinal), `level`,
+  `title`, `char_start`/`char_end`, `page_no`, `bbox`, `source`, `parent_key`.
+
+### Persistence and lookup
+
+`db/migrations/0009_document_sections.sql` adds `document_sections`
+(`document_id`, `parent_id`, `node_key`, `level`, `title`, char range,
+heading char range, `page_no`, `bbox_json`, `extractor`,
+`extractor_version`), idempotent (`CREATE TABLE IF NOT EXISTS`), forward-only,
+no edits to 0001–0008. Sections are **derived structure, never evidence**:
+`SectionsRepo.replace_for_document` writes the tree wholesale in one
+transaction, so a re-extraction cannot leave a stale tree. A no-headings
+document writes nothing (it never clears a tree a prior snapshot produced).
+
+The lookup API is O(log n)-ish, never a linear scan per claim:
+`fmd.acquire.outline.SectionIndex.locate(start, end)` bisects the sorted
+heading starts (the deepest containing node is the last one starting at or
+before the span) and walks the precomputed parent chain — O(depth) — to return
+the narrowest containing node plus its root→leaf breadcrumb. In SQL,
+`SectionsRepo.breadcrumb(document_id, start, end)` is one indexed query
+(`document_id, char_start, level DESC` btree) with a recursive parent walk.
+
+### Resolver: real section scope
+
+`validate_document`/`resolve_quote` take the tree bounds when the document has
+an outline (`outline_to_sections`: every node with its level and breadcrumb);
+the flat W7 heuristic bounds remain the fallback and are recorded as
+`section_source: heuristic` on section-scoped claims (outline bounds record
+`outline`). The ladder is unchanged — document → row → page → section →
+UNKNOWN — and the W7 hard rules hold: never first-match, a section qualifies
+only with exactly ONE occurrence, two qualifying sections cancel out. What
+changes is attribution: each occurrence is attributed to its **narrowest**
+containing node, so nested sections never double-count one occurrence, a
+chapter's range never swallows its subsections, and the qualifier records the
+breadcrumb (`section_path: ["4. Fees", "4.2 Hostel"]`) beside the leaf
+heading (`section_heading`). Occurrences outside every section (before the
+first heading, in a no-headings document) stay invisible to the rung — a
+missed heading costs yield, never correctness. Provenance stays absolute:
+`char_start`/`char_end` are canonical offsets whatever rung resolved.
+
+### Prompts: breadcrumbs as metadata, never text
+
+Each window's user message carries its outline after the delimited document
+text (`DOCUMENT SECTIONS (metadata only — NOT document text; never quote
+it)`): the single pass lists the full outline with page numbers; a chunked
+window gets `window breadcrumb: 4. Fees > 4.2 Hostel` plus the headings fully
+inside it. Validation resolves quotes against the window body only, so a
+heading string that exists only in the metadata cannot resolve as a claim
+quote (pinned by test). The system prompts are unchanged (v4/v5 stay current):
+the outline travels as data, so no `prompt_version` bump and recorded replays
+stay valid.
+
+### Chunking: cuts prefer section boundaries
+
+`plan_windows` takes `section_starts`; a cut whose look-back zone holds a
+heading start lands exactly on it, so a window opens where a section opens and
+its metadata carries one coherent breadcrumb. A section larger than the budget
+splits inside it (page/line fallback) and every window covering it reports the
+same breadcrumb. Short documents stay single-pass; the dedupe identity is
+unchanged (the W7 section key `(predicate, value, page, heading)` already
+identifies the fact; the breadcrumb adds no identity the heading does not
+carry).
+
+### Planner
+
+`score_families`/`detect_family` accept `outline_headings`: the tree titles
+join the heading channel and a tree cover line that names a family decides the
+cover (`cover_title`). With no tree (or no family-naming title) the behaviour
+is byte-identical to W5; precedence is unchanged (registry > text > filename
+hints).
+
+### Known limits
+
+* One extractor per tree: when Docling emits labels but misses some headings,
+  the heuristic does not fill the gaps (mixing sources risks inconsistent
+  levels). A T1 document whose labels are unreliable yields a shallower tree;
+  yield cost, not correctness.
+* A "4.2" whose "4." chapter is never printed normalises to level 1 (no-gap
+  rule): attribution stays exact, breadcrumbs are shallower than the visual
+  outline.
+* Numbered list rows without amounts or sentence words ("1. Medical
+  Laboratory Technology") can still become sections when they form a
+  sequence; ranges stay correct, so the cost is cosmetic breadcrumbs, not
+  mis-attribution.
+* `document_sections` is keyed by document; two snapshots of the same URL
+  share it and the latest non-empty tree wins.
+
+### Tests (all offline unless a live DB is supplied)
+
+```bash
+cd packages/pipeline && uv run ruff check .
+uv run pytest tests/test_acquire_outline.py tests/test_extract_validate.py tests/test_extract_sections_metadata.py tests/test_extract_chunking.py tests/test_plan_family_coverage.py
+DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd uv run pytest -q
+uv run python -m fmd.cli eval --golden ../../data/golden   # provenance 1.0
+```
+
+`tests/test_acquire_outline.py` pins the detection guards, level
+normalisation, Docling-label preference (page furniture excluded), the
+mid-subsection breadcrumb lookup and the no-headings diagnostic;
+`test_extract_validate.py` pins the section rung on tree bounds
+(`section_path`, `section_source`, two-section cancellation, narrowest
+containment); `test_extract_sections_metadata.py` pins the metadata block and
+the unquotable-heading rule; `test_extract_chunking.py` pins heading-aligned
+cuts; `test_plan_family_coverage.py` pins the planner seam; `test_db.py` pins
+the 0009 round trip, breadcrumb SQL and wholesale replacement.

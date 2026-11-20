@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from fmd.acquire.canonical import TextBlock, build_canonical
+from fmd.acquire.canonical import TextBlock, build_canonical, outline_to_sections
 from fmd.acquire.types import PageSpan
 from fmd.extract.schemas import ExtractedField, FeeStructure, PlacementReport, SeatMatrix
 from fmd.extract.validate import (
@@ -607,3 +607,145 @@ def test_section_scoped_claim_records_heading_and_section_span() -> None:
     # Provenance stays absolute: the span indexes the canonical document text.
     assert text[claim.char_start : claim.char_end] == "Lab audit: 87 samples cleared."
     assert outcome_for(result, "programme_name").scope == "section"
+
+
+# ------------------------------------------------------------------ W8 section tree
+
+
+def _outline_canonical(lines: list[str]):
+    canonical = build_canonical([TextBlock(page_no=1, text=line) for line in lines])
+    return canonical, outline_to_sections(canonical.outline)
+
+
+def test_section_scoped_claim_records_outline_breadcrumb_and_source() -> None:
+    text = (
+        "4. Fees\n"
+        "4.2 Hostel\n"
+        "Hostel rent is Rs. 24,000 per semester.\n"
+        "5. Placements\n"
+        "Hostel rent is Rs. 24,000 per semester.\n"
+        "Hostel rent is Rs. 24,000 per semester.\n"
+    )
+    canonical, bounds = _outline_canonical(text.splitlines())
+    document = SeatMatrix(
+        programme_name=ExtractedField(quote="Hostel rent is Rs. 24,000 per semester.")
+    )
+
+    result = validate_document(
+        document,
+        text,
+        extraction_id=1,
+        entity_id=2,
+        observed_at=OBSERVED,
+        pages=[PageSpan(page=1, char_start=0, char_end=len(text))],
+        sections=bounds,
+        section_source="outline",
+    )
+
+    assert len(result.claims) == 1
+    qualifier = result.claims[0].qualifier
+    # Document-wide ambiguity (3 occurrences) plus one page (the page rung
+    # fails: the page holds 3) leave the section rung. The occurrence inside
+    # "4.2 Hostel" is attributed to the *narrowest* containing node, so the
+    # fees chapter's own range never swallows it, and the placements section
+    # holds two occurrences, so it cannot qualify either.
+    assert qualifier["resolution_scope"] == "section"
+    assert qualifier["section_heading"] == "4.2 Hostel"
+    assert qualifier["section_path"] == ["4. Fees", "4.2 Hostel"]
+    assert qualifier["section_source"] == "outline"
+    scope = text[qualifier["scope_char_start"] : qualifier["scope_char_end"]]
+    assert scope.startswith("4.2 Hostel")
+    assert scope.count("Hostel rent is Rs. 24,000 per semester.") == 1
+    assert "5. Placements" not in scope
+    # Provenance stays absolute.
+    assert text[result.claims[0].char_start : result.claims[0].char_end] == (
+        "Hostel rent is Rs. 24,000 per semester."
+    )
+
+
+def test_phrase_in_two_sections_stays_unknown_with_tree_bounds() -> None:
+    text = (
+        "4. Fees\n"
+        "Hostel rent is Rs. 24,000 per semester.\n"
+        "5. Placements\n"
+        "Hostel rent is Rs. 24,000 per semester.\n"
+    )
+    canonical, bounds = _outline_canonical(text.splitlines())
+    document = SeatMatrix(
+        programme_name=ExtractedField(quote="Hostel rent is Rs. 24,000 per semester.")
+    )
+
+    result = validate_document(
+        document,
+        text,
+        extraction_id=1,
+        entity_id=2,
+        observed_at=OBSERVED,
+        sections=bounds,
+        section_source="outline",
+    )
+
+    rejection = next(item for item in result.rejections if item.field == "programme_name")
+    assert rejection.reason == "ambiguous_span"
+    assert "sections hold exactly one occurrence" in rejection.detail
+
+
+def test_occurrence_outside_every_outline_section_is_invisible_to_the_rung() -> None:
+    # Both occurrences sit in the preamble, before the first heading: they have
+    # no section identity, so the section rung sees no candidate at all and the
+    # claim stays UNKNOWN (attributing them would be a guess).
+    text = (
+        "Hostel rent is Rs. 24,000 per semester.\n"
+        "Hostel rent is Rs. 24,000 per semester.\n"
+        "4. Fees\n"
+        "Fee schedule intro.\n"
+        "5. Placements\n"
+        "Placement reporting is separate.\n"
+    )
+    _canonical, bounds = _outline_canonical(text.splitlines())
+    document = SeatMatrix(
+        programme_name=ExtractedField(quote="Hostel rent is Rs. 24,000 per semester.")
+    )
+
+    result = validate_document(
+        document,
+        text,
+        extraction_id=1,
+        entity_id=2,
+        observed_at=OBSERVED,
+        sections=bounds,
+        section_source="outline",
+    )
+    rejection = next(item for item in result.rejections if item.field == "programme_name")
+    assert rejection.reason == "ambiguous_span"
+    assert "no section holds exactly one occurrence" in rejection.detail
+
+
+def test_heuristic_sections_report_their_source_when_no_tree_exists() -> None:
+    text = (
+        "LAB AUDIT 2025-26\n"
+        "Lab audit: 87 samples cleared.\n"
+        "STUDENT AFFAIRS\n"
+        "Lab audit: 87 samples cleared.\n"
+        "Lab audit: 87 samples cleared.\n"
+    )
+    canonical = build_canonical([TextBlock(page_no=1, text=line) for line in text.splitlines()])
+    document = SeatMatrix(
+        programme_name=ExtractedField(quote="Lab audit: 87 samples cleared.", confidence=0.9)
+    )
+
+    result = validate_document(
+        document,
+        text,
+        extraction_id=1,
+        entity_id=2,
+        observed_at=OBSERVED,
+        pages=[PageSpan(page=1, char_start=0, char_end=len(text))],
+        sections=canonical.sections,
+        section_source="heuristic",
+    )
+
+    claim = result.claims[0]
+    assert claim.qualifier["resolution_scope"] == "section"
+    assert claim.qualifier["section_source"] == "heuristic"
+    assert "section_path" not in claim.qualifier
