@@ -1,0 +1,156 @@
+# Programme scoping taxonomy (W9) — the tenth registry file.
+#
+# Decides whether a materialised programme is *this product's* target field
+# (Medical Laboratory Technology / Medical Laboratory Science) or not, and
+# records how the decision was made (rule | semantic | manual) so every
+# admission and every exclusion is auditable.
+#
+# Design constraint (docs/product-development-cycle/14-deferred-items.md §B2):
+# exact alias lists are insufficient by design. Universities invent one-off
+# names and the same degree is named differently per country. This file is the
+# TIER-1 rule layer only — fast, deterministic, high precision. Names no rule
+# decides fall through to the semantic equivalence classifier
+# (fmd/programmes/classifier.py, profile `programme_equivalence`), which must
+# cite evidence; a `yes` without evidence is downgraded to `uncertain`, and
+# `uncertain` becomes `needs_review` and never enters the ranking.
+#
+# Precedence (highest wins): manual > exclude > include > semantic > uncertain.
+#
+# Other countries ship as EMPTY stubs: no invented patterns. Equivalence
+# outside India is decided from evidence (claims, regulator names), never from
+# a guessed name list. When a country key is absent, the `default` block is
+# used and the decision is flagged `country_taxonomy_missing`.
+
+version: programmes-v1
+
+# The conceptual reference definition. NOT a name list: this paragraph is the
+# authority the semantic classifier receives (and humans reviewing
+# needs_review rows read the same text). Versioned: the semantic cache key
+# includes it, so editing the definition invalidates cached decisions.
+definition:
+  version: mlt-definition-v1
+  target_field: medical_laboratory_technology
+  statement: >-
+    Diagnostic laboratory science: the practice of performing clinical
+    laboratory investigations on human specimens to support diagnosis and
+    treatment. The field is defined by its working domains — clinical
+    biochemistry, haematology, clinical microbiology, histopathology,
+    blood bank / transfusion science, and immunology / serology — not by any
+    particular degree title. Clinical Laboratory Science, Medical Laboratory
+    Science, Medical Laboratory Technology, Laboratory Medicine and Biomedical
+    Science (when laboratory-medicine accredited) are names the same field
+    carries in different countries.
+  domains:
+    - clinical biochemistry
+    - haematology
+    - clinical microbiology
+    - histopathology
+    - blood bank / transfusion science
+    - immunology / serology
+
+# Semantic equivalence classifier settings (Tier 2). The profile must exist in
+# config/models.yaml; the router is provider-agnostic (never call a provider
+# directly). Uncertainty is the designed outcome when the classifier is
+# unavailable, the evidence is empty, or the model cannot decide.
+classifier:
+  purpose: programme_equivalence
+  prompt_version: v1            # paired with fmd/programmes/prompts/equivalence/v1.md
+  bundle_size: 20               # unique names per model call (one call per new name, not per row)
+  cache: true                   # decisions cached by (normalised name, institution type, definition version)
+  #: A `yes` that cites no evidence is downgraded to `uncertain` before it can
+  #: enter the pool. Fixed by contract (14 §B2 guardrails), not tunable here.
+
+countries:
+  IN:
+    # India v1 vocabulary: B.Sc. MLT/MLS, BMLT, BMLS, MLS, DMLT, Medical
+    # Laboratory Technology, Clinical Laboratory Science. Patterns are regexes
+    # matched (case-insensitive) against the normalised name. Include patterns
+    # deliberately require laboratory context — a bare "B.Sc." include would
+    # admit every science degree and rely on excludes to catch the rest.
+    include_patterns:
+      - '\bmlt\b'
+      - '\bbmlt\b'
+      - '\bmls\b'
+      - '\bbmls\b'
+      - '\bdmlt\b'
+      - 'medical\s+lab(oratory)?\s+(technolog|science)'
+      - 'clinical\s+lab(oratory)?\s+(technolog|science)'
+      - 'medical\s+laborator'
+      - 'clinical\s+laborator'
+      - 'laborator\s+technolog'
+      - 'laborator\s+science'
+      - '\bb\s?sc\b.{0,40}\blaborator'
+      - '\bb\s?sc\b.{0,40}\bmlt\b'
+      - '\bb\s?sc\b.{0,40}\bmls\b'
+    # exclude beats include: a name matching both is out of scope.
+    # Medicine, dentistry, AYUSH, nursing, physiotherapy, pharmacy and
+    # agriculture are adjacent bachelor's programmes that routinely appear on
+    # the same seat-matrix pages; they are not laboratory technology.
+    exclude_patterns:
+      - '\bmbbs\b'
+      - '\bbds\b'
+      - '\bbams\b'
+      - '\bbhms\b'
+      - '\bbums\b'
+      - '\bbsms\b'
+      - 'nursing'
+      - '\bgnm\b'
+      - '\banm\b'
+      - '\bbpt\b'
+      - 'physiotherap'
+      - 'pharm'            # b.pharm / d.pharm / pharmacy / pharmd
+      - 'agricultur'       # agriculture / agricultural (B.Sc. (Hons) Agriculture)
+    # Canonicalisation applied before rule matching and before the semantic
+    # cache key is computed (same normalisation as materialisation grouping).
+    # Mirror of the committed `params.programme_mapping.name_aliases`
+    # vocabulary (config/sources.yaml institution-site block); one source of
+    # truth per concern, documented in both places.
+    aliases:
+      - key: bsc mlt
+        label: B.Sc. Medical Laboratory Technology
+        aliases:
+          - B.Sc. MLT
+          - BSc MLT
+          - B.Sc. Medical Laboratory Technology
+          - BSc Medical Laboratory Technology
+          - Bachelor of Medical Laboratory Technology
+          - Bachelor of Medical Laboratory Technology (BMLT)
+          - BMLT
+      - key: bsc mls
+        label: Bachelor of Medical Laboratory Sciences
+        aliases:
+          - Bachelor of Medical Laboratory Sciences
+          - Bachelor of Medical Laboratory Sciences (B.MLS)
+          - Bachelor of Medical Laboratory Sciences(B.MLS)
+          - B.Sc. Medical Laboratory Science
+          - BSc Medical Laboratory Science
+          - B.MLS
+          - BMLS
+      - key: dmlt
+        label: Diploma in Medical Laboratory Technology
+        aliases:
+          - DMLT
+          - Diploma in Medical Laboratory Technology
+          - Diploma in Medical Laboratory Technician
+
+  # ---- empty stubs: declared, intentionally patternless (no invented names).
+  # Equivalence for these countries is decided by the semantic tier from
+  # evidence (14 §B2), or stays `uncertain` → needs_review.
+  AU: {}
+  NZ: {}
+  US: {}
+  CA: {}
+  GB: {}
+  IE: {}
+  PH: {}
+  AE: {}
+  SA: {}
+  DE: {}
+
+# Fallback for a country that is not declared above (or an institution with no
+# country at all). Ships empty on purpose; the decision is flagged
+# `country_taxonomy_missing` and the name goes to the semantic tier.
+default:
+  include_patterns: []
+  exclude_patterns: []
+  aliases: []

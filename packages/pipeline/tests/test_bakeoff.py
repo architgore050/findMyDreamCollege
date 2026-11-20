@@ -294,6 +294,8 @@ def test_models_config_defaults_and_every_profile_is_env_overridable() -> None:
     # OCR has no router profile: the `ocr_vlm` profile was retired 2026-11-16 and
     # OCR now lives in config/acquire.yaml (T2/T2b backends, an HTTP stage).
     assert "ocr_vlm" not in defaults.profiles
+    # `programme_equivalence` is the W9 Tier-2 semantic equivalence classifier
+    # (config/programmes.yaml is its taxonomy of record).
     assert set(defaults.profiles) == {
         "bulk_extract",
         "hard_pdf",
@@ -301,6 +303,7 @@ def test_models_config_defaults_and_every_profile_is_env_overridable() -> None:
         "entity_adjudication",
         "nlp_rubric",
         "verify",
+        "programme_equivalence",
         "embed",
     }
     # `hard_pdf` is the hosted fallback: provider `api` plus the shared

@@ -30,6 +30,7 @@ from fmd.config.models import (
     ModelsConfig,
     PlanConfig,
     PredicatesConfig,
+    ProgrammesConfig,
     SourcesConfig,
     WeightsConfig,
 )
@@ -47,6 +48,7 @@ CONFIG_FILES: dict[str, str] = {
     "acquire": "acquire.yaml",
     "plan": "plan.yaml",
     "predicates": "predicates.yaml",
+    "programmes": "programmes.yaml",
 }
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -117,6 +119,7 @@ class Registry:
     acquire: AcquireConfig
     plan: PlanConfig
     predicates: PredicatesConfig
+    programmes: ProgrammesConfig
     config_dir: Path
 
     @property
@@ -595,6 +598,31 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
                 "extraction schema and must set requires_period: true"
             )
 
+    # ---------------------------------------------------------------- programmes
+    programmes = registry.programmes
+    if programmes.classifier.purpose not in registry.models.profiles:
+        errors.append(
+            f"programmes.yaml: classifier purpose {programmes.classifier.purpose!r} has no "
+            "profile in models.yaml. Add the profile; the semantic tier must never call a "
+            "provider that the router does not know about."
+        )
+    for country, taxonomy in (*programmes.countries.items(), ("default", programmes.default)):
+        for kind in ("include_patterns", "exclude_patterns"):
+            for pattern in getattr(taxonomy, kind):
+                try:
+                    re.compile(pattern, re.IGNORECASE)
+                except re.error as exc:
+                    errors.append(
+                        f"programmes.yaml: countries[{country}].{kind}: invalid regex "
+                        f"{pattern!r}: {exc}"
+                    )
+    if not programmes.definition.domains:
+        errors.append(
+            "programmes.yaml: definition.domains is empty. The classifier judges against "
+            "the conceptual definition; without the working domains a `yes` cannot be "
+            "grounded (14 §B2)."
+        )
+
 
 def load_registry(
     config_dir: str | Path | None = None,
@@ -630,6 +658,7 @@ def load_registry(
         "acquire": AcquireConfig,
         "plan": PlanConfig,
         "predicates": PredicatesConfig,
+        "programmes": ProgrammesConfig,
     }
     for key, model in model_for.items():
         filename = CONFIG_FILES[key]
@@ -657,6 +686,7 @@ def load_registry(
         acquire=parsed["acquire"],
         plan=parsed["plan"],
         predicates=parsed["predicates"],
+        programmes=parsed["programmes"],
         config_dir=directory.resolve(),
     )
     _validate_cross_references(registry, errors)

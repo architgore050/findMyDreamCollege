@@ -47,6 +47,7 @@ __all__ = [
     "Insight",
     "InsightRules",
     "InsightSelection",
+    "OutOfScopeProgramme",
     "QuantileEstimate",
     "QuantileRules",
     "ScoreContext",
@@ -64,6 +65,15 @@ __all__ = [
     "from_median_range",
     "score_programme",
 ]
+
+
+class OutOfScopeProgramme(RuntimeError):
+    """Raised when scoring is asked to score a programme that is out of scope.
+
+    Scoping (W9) decides what the product ranks; scoring refuses the rows
+    scoping excluded. The orchestration loop skips them *before* this — the
+    exception is the second, independent guard for every other caller.
+    """
 
 
 @dataclass(frozen=True)
@@ -147,6 +157,17 @@ def score_programme(
             cost_rules = registry.cost_rules
     else:
         scoring = config
+    # W9 guard, independent of the orchestration loop: an out-of-scope
+    # programme (rule-excluded, semantic `no`, or `uncertain` awaiting review)
+    # must never be scored, whoever the caller is. `in_scope` is absent on
+    # pre-W9 rows and test views, which stay scoreable.
+    if getattr(programme, "in_scope", True) is False:
+        raise OutOfScopeProgramme(
+            f"programme {entity_id} is out of scope "
+            f"(scope_reason={getattr(programme, 'scope_reason', None)!r}, "
+            f"tier={getattr(programme, 'scope_tier', None)!r}); "
+            "out-of-scope programmes are never scored or ranked"
+        )
     index = ClaimIndex.build(claims)
 
     problems = scoring.validate()

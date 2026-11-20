@@ -394,6 +394,7 @@ class Orchestrator:
         summary.bump("written", outcome.written)
         summary.bump("skipped", outcome.skipped)
         summary.bump("unknown", outcome.unknown)
+        summary.bump("out_of_scope", outcome.out_of_scope)
         for failure in outcome.failures:
             summary.fail("score", str(failure.get("reason")), **failure)
         summary.outcomes.extend({"line": line} for line in outcome.lines)

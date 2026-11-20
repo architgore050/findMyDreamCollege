@@ -202,6 +202,29 @@ profiles:
     temperature: 0
     require_quoted_evidence: true
     required: false
+  programme_equivalence:
+    # W9 Tier-2 semantic equivalence classifier (config/programmes.yaml is the
+    # taxonomy of record). Purpose `programme_equivalence`: given a programme
+    # name no rule decided, plus the institution, affiliation and any
+    # curriculum/regulator claims, decide equivalent yes|no|uncertain against
+    # the conceptual definition, citing evidence. Default is the local Gemma
+    # (same host budget as the other local profiles); env-switchable like every
+    # other profile. Optional on purpose: when the profile does not resolve the
+    # tier degrades to `uncertain` (needs_review), never to a guessed `yes`.
+    provider: ${FMD_PROGRAMME_EQUIV_PROVIDER:-local}
+    model: ${FMD_PROGRAMME_EQUIV_MODEL:-gemma-4-26b-a4b-gguf}
+    provider_env: FMD_PROGRAMME_EQUIV_PROVIDER
+    model_env: FMD_PROGRAMME_EQUIV_MODEL
+    model_example: gemma-4-26b-a4b-gguf
+    temperature: 0
+    guided_json: true
+    max_tokens: 1024
+    context_tokens: 65536
+    quantization: int4
+    thinking: false
+    required: false
+    degrade_reason: programme_classifier_unavailable
+    pricing: {input_per_mtok: 0.0, output_per_mtok: 0.0}
   verify:
     # evidence: structurally different second pass over the bounded source
     # window; it sees the existing quote, never the claimed value, and emits a

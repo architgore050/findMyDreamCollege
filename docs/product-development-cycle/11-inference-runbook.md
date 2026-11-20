@@ -3090,3 +3090,91 @@ flagged), and the completeness metric;
 `tests/test_programmes_db.py` pins the same against Postgres (rerun, dry run,
 superseded-claim update, `get_by_key`, `evidence_for_programme`);
 `tests/test_programmes_cli.py` pins the CLI surfaces end to end.
+
+
+## 13. Three-tier programme scoping — `config/programmes.yaml` (2026-11-20, W9)
+
+### The problem, measured
+
+After materialisation the operator DB held 7 programme rows, 3 of which are not
+this product: an `MBBS` row (Adesh University), a `B.Sc (Hons) Agriculture`
+row (Rani Lakshmi Bai Central Agricultural University), and a duplicate
+`"3. B.Sc. Medical Laboratory Technology"` row (TN Dr. M.G.R. Medical
+University) that existed only because a seat-matrix row number became part of
+the name. Two defects: no target-field scoping, and no name normalisation.
+
+### What changed
+
+* **`config/programmes.yaml` (the tenth registry file)** — country-keyed
+  taxonomy: `countries.IN` carries the include/exclude regexes and the alias
+  table; AU/NZ/US/CA/GB/IE/PH/AE/SA/DE ship as declared **empty stubs** (no
+  invented patterns); `default` is the empty fallback and any name decided
+  under it is flagged `country_taxonomy_missing`. `definition` is the
+  conceptual target-field statement (diagnostic laboratory science: clinical
+  biochemistry, haematology, microbiology, histopathology, blood bank,
+  immunology) — the authority the semantic tier judges against; its version is
+  part of the semantic cache key. Precedence: **manual > exclude > include >
+  semantic > uncertain**.
+* **Normalisation (`fmd/programmes/normalise.py`)** — leading row numbering
+  (`"3. "`, `"3) "`, `"(3) "`, `"#3 "`, `"Sl. 3. "`) and bullets are stripped
+  before ER normalisation, in `normalise_programme_name` itself, so the
+  grouping key and every rule match see the same text. A bare leading number
+  without punctuation is deliberately *not* furniture (`"3-Year B.Sc."`
+  survives). `"3. B.Sc. MLT"` and `"B.Sc. MLT"` now produce one row.
+* **Tier 1 (`fmd/programmes/taxonomy.py`)** — fast deterministic regex rules;
+  exclude beats include. MBBS/BDS/BAMS/BHMS/BUMS/BSMS/nursing/GNM/ANM/BPT/
+  physiotherapy/pharm(acy)/agricultur(e/al) are excluded for IN; B.Sc./BMLT/
+  BMLS/MLS/MLT/DMLT/medical-or-clinical-laboratory names are included.
+  Undecided names are *not* guessed — they fall through.
+* **Tier 2 (`fmd/programmes/classifier.py`)** — semantic equivalence through
+  the router purpose `programme_equivalence` (models.yaml profile, default
+  local Gemma, optional: degrades to `uncertain`). Prompt is versioned
+  (`fmd/programmes/prompts/equivalence/v1.md`, prompt_version `v1`); responses
+  are guided JSON `yes|no|uncertain` + confidence + rationale + evidence.
+  Conservative by construction: no evidence and no field signal ⇒ `uncertain`
+  without a call; a `yes` citing nothing is downgraded to `uncertain`; any
+  provider failure degrades to `uncertain` → `needs_review`, never ranked.
+  Batched (bundle_size from config), cached by sha256 over (normalised name,
+  institution type, definition version) — one call per new name, not per row —
+  persisted in `programme_scope_decisions` with model, prompt version and cache
+  flag per decision.
+* **Tier 3 (`fmd/programmes/service.py`)** — `fmd programmes decide <id>
+  --equivalent|--not-equivalent --note` writes a `manual` decision
+  (`decided_by='human'`) under the same cache key; Tier 1 consumes it before
+  rules and the classifier from the next run, so the system accumulates
+  knowledge instead of re-asking. `fmd programmes requalify [--dry-run]`
+  re-scopes every stored row under the current taxonomy + decisions: folds the
+  row-numbering duplicates (`merge_into` re-points `cost_items`, deletes only
+  the derived duplicate row — claims are never touched), rekeys stale
+  pre-W9 grouping keys, marks MBBS/Agriculture out, applies manual verdicts,
+  and is idempotent (unchanged rows are not rewritten).
+* **Persistence (migration `0010_programme_scoping.sql`)** — `programmes`
+  gains `in_scope`, `scope_reason`, `scope_tier` (rule|semantic|manual),
+  `scope_evidence`, `scope_model`, `scope_prompt_version`, `scope_cached`,
+  `scope_decided_at`; `programme_scope_decisions` is the durable cache +
+  learning-loop store (unique per cache key, never deleted).
+* **Scoring** — `fmd score` skips `in_scope=false` rows before any scoring
+  work and reports the skipped count (`out_of_scope` in the outcome and the
+  run summary); `fmd/score` additionally refuses an out-of-scope programme
+  directly (`OutOfScopeProgramme`), so no caller can rank an MBBS. Out-of-scope
+  rows stay in the database for audit (`fmd programmes list --all`,
+  `inspect` shows tier + evidence).
+
+### Operating it
+
+```bash
+export DATABASE_URL=postgresql://fmd:fmd@localhost:5433/fmd
+cd packages/pipeline
+uv run python -m fmd.cli programmes requalify --dry-run   # the plan, nothing written
+uv run python -m fmd.cli programmes requalify             # merge + rescope + manual verdicts
+uv run python -m fmd.cli programmes decide 8 --not-equivalent --note "MBBS is not MLT"
+uv run python -m fmd.cli programmes list --all            # audit view incl. out-of-scope rows
+uv run python -m fmd.cli programmes inspect <id>          # tier that decided + the evidence
+```
+
+Expected on the operator DB (7 rows before): the `"3. B.Sc."` duplicate folds
+into row 1, MBBS and Agriculture flip to `in_scope=false` with
+`rule_exclude:*` reasons, and `fmd score` reports `out_of_scope=2` (or `3`
+before the merge) while the ranked set holds only laboratory-technology rows.
+Names no rule decides and no evidence backs stay `uncertain` →
+`needs_review` — that is the designed conservative outcome, not a failure.

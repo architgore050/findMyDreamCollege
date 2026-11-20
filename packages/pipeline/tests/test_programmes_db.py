@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from pathlib import Path
 
 import pytest
 
+from fmd.config import load_registry
 from fmd.db import (
     ClaimCreate,
     ClaimsRepo,
@@ -30,6 +32,21 @@ from fmd.orchestrate.ingest import ProgrammeStage
 from fmd.orchestrate.ledger import RunSummary, utcnow
 
 pytestmark = pytest.mark.usefixtures("pg_database")
+
+CONFIG_DIR = Path(__file__).resolve().parents[3] / "config"
+
+def _institution(database, suffix: str, *, country: str | None = "IN") -> int:
+    from fmd.db.repositories import EntityCreate
+
+    entity = EntitiesRepo(database).create(
+        EntityCreate(
+            kind="institution",
+            canonical_name=f"Test University {suffix}",
+            country=country,
+        )
+    )
+    return entity.id
+
 
 
 def _suffix() -> str:
@@ -445,3 +462,144 @@ def test_get_by_key_and_missing_rows(pg_database) -> None:
     assert repo.get_by_key(institution.id, "bsc mlt") is not None
     assert repo.get_by_key(institution.id, "bsc mls") is None
     assert repo.get_by_key(institution.id + 1, "bsc mlt") is None
+
+
+# --------------------------------------------------------- W9 scoping (0010)
+
+
+def test_0010_scope_columns_and_decision_store(pg_database) -> None:
+    from fmd.db.repositories import ProgrammeScopeDecisionCreate
+
+    suffix = _suffix()
+    repo = ProgrammesRepo(pg_database)
+    institution_id = _institution(pg_database, suffix)
+    row = repo.create(
+        ProgrammeCreate(
+            institution_id=institution_id,
+            name="MBBS",
+            credential_level="degree",
+            normalised_name="mbbs",
+            in_scope=False,
+            scope_reason="rule_exclude:\\bmbbs\\b",
+            scope_tier="rule",
+            scope_evidence=["\\bmbbs\\b"],
+            scope_cached=False,
+        )
+    )
+    assert row.in_scope is False
+    fetched = repo.get(row.id)
+    assert fetched.scope_reason == "rule_exclude:\\bmbbs\\b"
+
+    create = ProgrammeScopeDecisionCreate(
+        cache_key="key-" + suffix,
+        normalised_name="mbbs",
+        raw_name="MBBS",
+        institution_type="institution:IN",
+        country="IN",
+        decision="out_of_scope",
+        tier="rule",
+        definition_version="mlt-definition-v1",
+    )
+    record, created = repo.scope_decision_put(create)
+    assert created and record.tier == "rule"
+    record2, created2 = repo.scope_decision_put(
+        create.model_copy(
+            update={"tier": "manual", "decision": "in_scope", "decided_by": "human"}
+        )
+    )
+    assert not created2 and record2.decision == "in_scope"  # manual overwrite wins
+    assert repo.scope_decision_get("key-" + suffix).decided_by == "human"
+    counts = repo.scope_counts()
+    assert counts["in_scope"] >= 0 and "out_of_scope" in counts
+
+
+def test_0010_update_scope_and_merge_into(pg_database) -> None:
+    repo = ProgrammesRepo(pg_database)
+    institution_id = _institution(pg_database, _suffix())
+    survivor = repo.create(
+        ProgrammeCreate(
+            institution_id=institution_id,
+            name="B.Sc. MLT",
+            credential_level="degree",
+            normalised_name="bsc mlt",
+        )
+    )
+    duplicate = repo.create(
+        ProgrammeCreate(
+            institution_id=institution_id,
+            name="3. B.Sc. MLT",
+            credential_level="degree",
+            normalised_name="3 b sc mlt",
+        )
+    )
+    updated = repo.update_scope(
+        survivor.id,
+        in_scope=True,
+        scope_reason="rule_include:mlt",
+        scope_tier="rule",
+        scope_evidence=["pattern"],
+        scope_model=None,
+        scope_prompt_version=None,
+        scope_cached=False,
+        needs_review=False,
+        review_reasons=[],
+        normalised_name="bsc mlt",
+        name="B.Sc. MLT",
+    )
+    assert updated.scope_tier == "rule"
+    stats = repo.merge_into(duplicate.id, survivor.id)
+    assert stats["rows_deleted"] == 1
+    assert repo.get(duplicate.id) is None
+    assert repo.get(survivor.id) is not None
+
+
+def test_0010_in_scope_filter_and_score_skip(pg_database) -> None:
+    from fmd.db.repositories import ClaimsRepo, ProgrammeFilter, ScoresRepo
+    from fmd.orchestrate.score import score_programmes
+    from fmd.score import OutOfScopeProgramme, score_programme
+
+    repo = ProgrammesRepo(pg_database)
+    institution_id = _institution(pg_database, _suffix())
+    in_scope_row = repo.create(
+        ProgrammeCreate(
+            institution_id=institution_id,
+            name="B.Sc. MLT",
+            credential_level="degree",
+            normalised_name="bsc mlt " + _suffix(),
+        )
+    )
+    out_row = repo.create(
+        ProgrammeCreate(
+            institution_id=institution_id,
+            name="MBBS",
+            credential_level="degree",
+            normalised_name="mbbs " + _suffix(),
+            in_scope=False,
+            scope_reason="rule_exclude:mbbs",
+            scope_tier="rule",
+        )
+    )
+    visible_ids = {row.id for row in repo.list(ProgrammeFilter(in_scope=True, limit=100))}
+    hidden_ids = {row.id for row in repo.list(ProgrammeFilter(in_scope=False, limit=100))}
+    assert in_scope_row.id in visible_ids and in_scope_row.id not in hidden_ids
+    assert out_row.id in hidden_ids and out_row.id not in visible_ids
+
+    # The scorer refuses out-of-scope rows directly...
+    from types import SimpleNamespace
+
+    view = SimpleNamespace(
+        id=out_row.id, in_scope=False, scope_reason="rule_exclude:mbbs", scope_tier="rule"
+    )
+    with pytest.raises(OutOfScopeProgramme):
+        score_programme(out_row.id, view, {}, [], config=None)
+    # ...and the orchestration loop skips and reports them.
+    registry = load_registry(CONFIG_DIR, env={})
+    outcome = score_programmes(
+        registry=registry,
+        programmes=repo,
+        claims=ClaimsRepo(pg_database),
+        scores=ScoresRepo(pg_database),
+        limit=100,
+        dry_run=True,
+    )
+    assert outcome.out_of_scope >= 1

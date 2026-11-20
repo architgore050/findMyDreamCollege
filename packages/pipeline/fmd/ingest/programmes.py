@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Any
 
 from fmd.er.normalise import normalise_name
+from fmd.programmes.normalise import strip_row_numbering
+from fmd.programmes.taxonomy import SCOPE_UNCERTAIN_REASON, ScopeDecision
 
 #: Predicate vocabulary is data. The defaults mirror the committed registry so
 #: offline tests and one-off scripts work without a config dir; production
@@ -267,9 +269,15 @@ def _tuple(value: Any) -> tuple[str, ...]:
 
 
 def normalise_programme_name(name: str, mapping: ProgrammeMapping) -> NameMatch:
-    """ER-normalise a programme name, then resolve it through the alias table."""
+    """ER-normalise a programme name, then resolve it through the alias table.
+
+    Leading row numbering (``"3. B.Sc. MLT"``) is stripped *before*
+    normalisation: it is page furniture, not part of the name, and keeping it
+    split one programme into two rows (the W9 defect measured on the operator
+    DB).
+    """
     raw = _text(name)
-    normalised = normalise_name(raw).text
+    normalised = normalise_name(strip_row_numbering(raw)).text
     alias = mapping.aliases.get(normalised)
     if alias is not None:
         key, label = alias
@@ -307,7 +315,7 @@ def credential_level_for(name: str, mapping: ProgrammeMapping) -> str:
     Only word-boundary term matches count; when nothing matches the declared
     default is used and the caller records ``credential_level_defaulted``.
     """
-    key = normalise_name(name).text
+    key = normalise_name(strip_row_numbering(name)).text
     padded = f" {key} "
     for level, terms in mapping.credential_rules:
         for term in terms:
@@ -317,7 +325,7 @@ def credential_level_for(name: str, mapping: ProgrammeMapping) -> str:
 
 
 def credential_was_defaulted(name: str, mapping: ProgrammeMapping) -> bool:
-    key = normalise_name(name).text
+    key = normalise_name(strip_row_numbering(name)).text
     padded = f" {key} "
     return not any(
         f" {term} " in padded for _level, terms in mapping.credential_rules for term in terms
@@ -367,6 +375,10 @@ class ProgrammeDraft:
     normalised_name: str
     credential_level: str
     source_family: str
+    #: The name claim's verbatim value (numbering/decoration included) — what
+    #: the classifier sees and what evidence quotes; ``name`` is the resolved
+    #: label shown to users.
+    raw_name: str | None = None
     duration_months: int | None = None
     internship_months: float | None = None
     seats: int | None = None
@@ -377,6 +389,15 @@ class ProgrammeDraft:
     field_sources: Mapping[str, str] = field(default_factory=dict)
     needs_review: bool = False
     review_reasons: tuple[str, ...] = ()
+    #: Three-tier scoping outcome (W9). No scoper ⇒ defaults: in scope with
+    #: no decision recorded, exactly the pre-W9 behaviour.
+    in_scope: bool = True
+    scope_tier: str | None = None
+    scope_reason: str | None = None
+    scope_evidence: tuple[str, ...] = ()
+    scope_model: str | None = None
+    scope_prompt_version: str | None = None
+    scope_cached: bool = False
 
     def with_affiliation(
         self, entity_id: int | None, *, review: str | None = None
@@ -397,6 +418,7 @@ class ProgrammeDraft:
             normalised_name=self.normalised_name,
             credential_level=self.credential_level,
             source_family=self.source_family,
+            raw_name=self.raw_name,
             duration_months=self.duration_months,
             internship_months=self.internship_months,
             seats=self.seats,
@@ -407,6 +429,36 @@ class ProgrammeDraft:
             field_sources=dict(self.field_sources),
             needs_review=self.needs_review or reason is not None,
             review_reasons=reasons,
+            in_scope=self.in_scope,
+            scope_tier=self.scope_tier,
+            scope_reason=self.scope_reason,
+            scope_evidence=self.scope_evidence,
+            scope_model=self.scope_model,
+            scope_prompt_version=self.scope_prompt_version,
+            scope_cached=self.scope_cached,
+        )
+
+    def with_scope(self, decision: ScopeDecision) -> ProgrammeDraft:
+        """Apply one scoping decision (rule | semantic | manual).
+
+        An ``uncertain`` decision excludes the row from the ranking AND raises
+        ``needs_review`` with ``scope_uncertain`` — visible in the queue, never
+        silently dropped. Other review reasons are preserved.
+        """
+        reasons = list(self.review_reasons)
+        if decision.needs_review:
+            reasons.append(SCOPE_UNCERTAIN_REASON)
+        return replace(
+            self,
+            needs_review=self.needs_review or decision.needs_review,
+            review_reasons=tuple(dict.fromkeys(reasons)),
+            in_scope=decision.in_scope,
+            scope_tier=decision.tier,
+            scope_reason=decision.reason,
+            scope_evidence=tuple(decision.evidence),
+            scope_model=decision.model,
+            scope_prompt_version=decision.prompt_version,
+            scope_cached=decision.cached,
         )
 
 
@@ -479,12 +531,16 @@ def programme_drafts(
     mapping: ProgrammeMapping,
     *,
     resolve_institution: Any | None = None,
+    scoper: Any | None = None,
 ) -> tuple[list[ProgrammeDraft], list[dict[str, Any]]]:
     """Turn supported claims into drafts plus per-group rejections.
 
     ``claims`` may be claim records or mappings. ``document_role`` is optional;
     when present, anything other than ``evidence`` is refused so a navigation
-    or inventory document can never create a programme.
+    or inventory document can never create a programme. ``scoper`` (the W9
+    three-tier service) receives each draft's raw name, institution context
+    and curriculum claims and returns the scope decision applied to the draft;
+    without one, drafts keep the pre-W9 defaults (in scope, no decision).
     """
     eligible = [claim for claim in claims if _eligible(claim)]
     grouped: dict[int, list[Any]] = {}
@@ -552,7 +608,10 @@ def programme_drafts(
                 )
             )
 
-    return _flag_similar_names(drafts), rejected
+    drafts = _flag_similar_names(drafts)
+    if scoper is not None:
+        drafts = _apply_scoping(drafts, grouped, resolve_institution, scoper)
+    return drafts, rejected
 
 
 def _qualifier_programme_key(claim: Any, mapping: ProgrammeMapping) -> str | None:
@@ -643,6 +702,7 @@ def _draft_for_name(
         normalised_name=match.key,
         credential_level=credential,
         source_family=str(_get(name_claim, "predicate", "")).split(".", 1)[0],
+        raw_name=raw_name,
         duration_months=duration_months,
         internship_months=internship_months,
         seats=seats,
@@ -673,26 +733,65 @@ def _flag_similar_names(drafts: list[ProgrammeDraft]) -> list[ProgrammeDraft]:
             flagged.append(draft)
             continue
         reasons = tuple(dict.fromkeys([*draft.review_reasons, reason]))
-        flagged.append(
-            ProgrammeDraft(
-                institution_id=draft.institution_id,
-                name=draft.name,
-                normalised_name=draft.normalised_name,
-                credential_level=draft.credential_level,
-                source_family=draft.source_family,
-                duration_months=draft.duration_months,
-                internship_months=draft.internship_months,
-                seats=draft.seats,
-                medium=draft.medium,
-                affiliated_university_name=draft.affiliated_university_name,
-                affiliated_university_id=draft.affiliated_university_id,
-                recognition_status=draft.recognition_status,
-                field_sources=draft.field_sources,
-                needs_review=True,
-                review_reasons=reasons,
-            )
-        )
+        # dataclasses.replace keeps every other field (including the W9 scope
+        # state) exactly as the scoping tiers produced it.
+        flagged.append(replace(draft, needs_review=True, review_reasons=reasons))
     return flagged
+
+
+def _apply_scoping(
+    drafts: list[ProgrammeDraft],
+    grouped: Mapping[int, Sequence[Any]],
+    resolve_institution: Any | None,
+    scoper: Any,
+) -> list[ProgrammeDraft]:
+    """Run the three-tier scoper over the drafts and apply its decisions.
+
+    The scoper receives the raw claim name (so it can strip row numbering with
+    the same rule the grouping used), the institution's country/kind/name and
+    the curriculum/regulator claims that back the classifier's evidence.
+    """
+    from fmd.programmes.service import ScopeInput, evidence_from_claims
+
+    pairs: list[tuple[ProgrammeDraft, ScopeInput]] = []
+    for draft in drafts:
+        institution_name = None
+        country = None
+        kind = None
+        if resolve_institution is not None:
+            entity = resolve_institution(draft.institution_id)
+            if entity is not None:
+                institution_name = getattr(entity, "canonical_name", None)
+                country = getattr(entity, "country", None)
+                kind = getattr(entity, "kind", None)
+        raw_name = _raw_claim_name(draft)
+        inp = ScopeInput(
+            institution_id=draft.institution_id,
+            raw_name=raw_name,
+            normalised_name=draft.normalised_name,
+            institution_name=institution_name,
+            institution_kind=kind,
+            country=country,
+            department=draft.affiliated_university_name,
+            claims=evidence_from_claims(grouped.get(draft.institution_id, ())),
+        )
+        pairs.append((draft, inp))
+    # scope_all returns one (input, decision) pair per input, in order.
+    decisions = dict(scoper.scope_all([inp for _draft, inp in pairs]))
+    return [
+        draft if decisions.get(inp) is None else draft.with_scope(decisions[inp])
+        for draft, inp in pairs
+    ]
+
+
+def _raw_claim_name(draft: ProgrammeDraft) -> str:
+    """The claim's verbatim name value for one draft (numbering included).
+
+    The draft's ``name`` is the alias-resolved label; the classifier should
+    see what the document actually printed, because a one-off name may be
+    numbered or decorated and the verbatim form is what evidence cites.
+    """
+    return draft.raw_name or draft.name
 
 
 __all__ = [

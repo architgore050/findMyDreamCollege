@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from fmd.db.repositories import ProgrammeCreate
@@ -200,6 +201,13 @@ def programme_create_from_draft(draft: ProgrammeDraft) -> ProgrammeCreate:
         needs_review=draft.needs_review,
         review_reasons=list(draft.review_reasons),
         source_family=draft.source_family,
+        in_scope=draft.in_scope,
+        scope_reason=draft.scope_reason,
+        scope_tier=draft.scope_tier,  # type: ignore[arg-type]
+        scope_evidence=list(draft.scope_evidence),
+        scope_model=draft.scope_model,
+        scope_prompt_version=draft.scope_prompt_version,
+        scope_cached=draft.scope_cached,
     )
 
 
@@ -259,7 +267,39 @@ def _existing_row(programmes: Any, institution_id: int, normalised_name: str) ->
     return None
 
 
+def _scope_content(payload: ProgrammeCreate) -> tuple[Any, ...]:
+    """The scoping decision's *content*, without its timestamp."""
+    return (
+        payload.in_scope,
+        payload.scope_reason,
+        payload.scope_tier,
+        tuple(payload.scope_evidence or ()),
+        payload.scope_model,
+        payload.scope_prompt_version,
+        payload.scope_cached,
+    )
+
+
+def _with_decided_at(payload: ProgrammeCreate, *, existing: Any | None) -> ProgrammeCreate:
+    """Stamp ``scope_decided_at`` only when the decision itself is new.
+
+    A fresh decision (new row, or content that differs from the stored row)
+    gets ``now``; an unchanged decision keeps the stored timestamp so a rerun
+    of an unchanged corpus writes nothing.
+    """
+    if payload.scope_tier is None:
+        return payload
+    if existing is not None and _scope_content(payload) == _scope_content(existing):
+        return payload.model_copy(update={"scope_decided_at": existing.scope_decided_at})
+    return payload.model_copy(update={"scope_decided_at": datetime.now(UTC)})
+
+
 _AFFILIATION_COLUMN = "affiliated_university"
+
+#: Metadata, not content: when a row is otherwise unchanged, its
+#: ``scope_decided_at`` must not tick on every run (that would break
+#: idempotence), so the value-comparison safety net skips it.
+_METADATA_COLUMNS = frozenset({"field_sources", "scope_decided_at"})
 
 
 def _changed_fields(
@@ -286,7 +326,7 @@ def _changed_fields(
     old_view = existing.model_dump(exclude={"id", "created_at"})
     new_view = payload.model_dump()
     for column in sorted(set(old_view) | set(new_view)):
-        if column == "field_sources" or column not in old_view or column not in new_view:
+        if column in _METADATA_COLUMNS or column not in old_view or column not in new_view:
             continue
         if old_view[column] != new_view[column]:
             name = _AFFILIATION_COLUMN if column == "affiliated_university_id" else column
@@ -369,6 +409,7 @@ def materialise_programmes(
     entities: Any | None = None,
     mapping: ProgrammeMapping | None = None,
     *,
+    scoper: Any | None = None,
     dry_run: bool = False,
     force: bool = False,
 ) -> MaterialiseResult:
@@ -377,8 +418,11 @@ def materialise_programmes(
     ``programmes`` needs ``materialisation_claims()`` and ``upsert()`` (the
     :class:`~fmd.db.repositories.ProgrammesRepo` interface; test fakes use the
     same two methods). ``entities`` is an optional duck-typed EntitiesRepo for
-    institution resolution and affiliation linking. ``dry_run`` writes nothing;
-    ``force`` rewrites rows that would otherwise be left untouched.
+    institution resolution and affiliation linking. ``scoper`` is the optional
+    W9 three-tier scoping service: when present every draft is scoped
+    (rule → semantic → manual) before it is written; when absent drafts keep
+    the pre-W9 defaults. ``dry_run`` writes nothing; ``force`` rewrites rows
+    that would otherwise be left untouched.
     """
     fetch = getattr(programmes, "materialisation_claims", None)
     claims: list[Any] = list(fetch() or []) if callable(fetch) else []
@@ -389,6 +433,7 @@ def materialise_programmes(
         claims,
         mapping,
         resolve_institution=_resolve_institution_fn(entities),
+        scoper=scoper,
     )
     aggregates_refused = tuple(
         AggregateRefusal(
@@ -412,11 +457,14 @@ def materialise_programmes(
     for draft in drafts:
         resolved = draft.with_affiliation(resolve_university(draft.affiliated_university_name))
         payload = programme_create_from_draft(resolved)
+        payload = _with_decided_at(payload, existing=None)
         existing = (
             _existing_row(programmes, resolved.institution_id, resolved.normalised_name)
             if lookup_available
             else None
         )
+        if existing is not None:
+            payload = _with_decided_at(payload, existing=existing)
         existing_id = getattr(existing, "id", None) if existing is not None else None
         changes = (
             _changed_fields(existing, payload, field_for_predicate) if existing is not None else ()
@@ -484,6 +532,8 @@ def materialise_from_database(
     database: Any,
     registry: Any | None = None,
     *,
+    scoper: Any | None = None,
+    router: Any | None = None,
     dry_run: bool = False,
     force: bool = False,
 ) -> MaterialiseResult:
@@ -492,17 +542,48 @@ def materialise_from_database(
     The mapping comes from the registry's institution-site source
     (``params.programme_mapping``) when a registry is supplied, otherwise from
     the committed defaults — the same resolution the crawl-path stage uses.
+    When no ``scoper`` is supplied one is built from the registry's
+    ``config/programmes.yaml`` taxonomy (Tier 1 + cached manual decisions);
+    ``router`` (the provider-agnostic model router) additionally enables the
+    Tier-2 semantic classifier. Without a router, names no rule decides stay
+    ``uncertain`` → ``needs_review`` — conservative by construction.
     """
     from fmd.orchestrate.ingest import ProgrammeStage
 
     stage = ProgrammeStage.from_database(database, registry)
+    mapping = stage.mapping()
+    if scoper is None:
+        scoper = _scoper_for(database, registry, mapping, router=router)
     return materialise_programmes(
         stage.programmes,
         stage.entities,
-        stage.mapping(),
+        mapping,
+        scoper=scoper,
         dry_run=dry_run,
         force=force,
     )
+
+
+def _scoper_for(
+    database: Any, registry: Any | None, mapping: ProgrammeMapping, *, router: Any | None
+) -> Any | None:
+    """A scoper over the registry taxonomy, or ``None`` without one.
+
+    The decision store is the DB repo when available (the cache and the
+    manual-decision learning loop persist); test fakes without the scope
+    methods simply run store-less.
+    """
+    programmes_config = getattr(registry, "programmes", None)
+    if programmes_config is None:
+        return None
+    from fmd.programmes.service import RepoDecisionStore, build_scoper
+
+    store = None
+    if callable(getattr(database, "connection", None)):
+        from fmd.db.repositories import ProgrammesRepo
+
+        store = RepoDecisionStore(ProgrammesRepo(database))
+    return build_scoper(registry, mapping, store=store, router=router)
 
 
 def materialise_stage_run(stage: Any, *, summary: RunSummary) -> list[Any]:
@@ -510,12 +591,26 @@ def materialise_stage_run(stage: Any, *, summary: RunSummary) -> list[Any]:
 
     ``force=True`` keeps the stage's historical semantics (every draft is
     rewritten on every run, so a vanished claim cannot linger); the on-demand
-    CLI defaults to writing only changed rows.
+    CLI defaults to writing only changed rows. The stage is scoped with the
+    registry taxonomy (Tier 1 rules + stored manual decisions, no router —
+    names no rule decides stay ``uncertain`` → ``needs_review`` and are queued
+    for `fmd programmes requalify`, which runs the full semantic pass).
     """
+    mapping = stage.mapping()
+    scoper = None
+    programmes_config = getattr(stage, "registry", None)
+    if programmes_config is not None and getattr(programmes_config, "programmes", None):
+        from fmd.programmes.service import RepoDecisionStore, build_scoper
+
+        store = None
+        if hasattr(stage.programmes, "scope_decision_get"):
+            store = RepoDecisionStore(stage.programmes)
+        scoper = build_scoper(stage.registry, mapping, store=store, router=None)
     result = materialise_programmes(
         stage.programmes,
         stage.entities,
-        stage.mapping(),
+        mapping,
+        scoper=scoper,
         dry_run=False,
         force=True,
     )

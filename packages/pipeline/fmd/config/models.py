@@ -359,6 +359,94 @@ class PredicatesConfig(ConfigModel):
         return value
 
 
+# ------------------------------------------------------------------------ programmes
+
+
+class ProgrammeDefinition(ConfigModel):
+    """The conceptual target-field definition the classifier receives.
+
+    Deliberately prose + domain list, never a name list: this is the authority
+    the semantic tier judges against (14 §B2). ``version`` is part of the
+    semantic cache key, so editing the definition invalidates cached decisions.
+    """
+
+    version: str
+    target_field: str
+    statement: str
+    domains: list[str] = Field(default_factory=list)
+
+    @field_validator("version", "target_field", "statement")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be non-empty")
+        return value
+
+
+class ProgrammeClassifierConfig(ConfigModel):
+    """Tier-2 semantic classifier settings (router purpose, batching, cache)."""
+
+    purpose: str
+    prompt_version: str
+    bundle_size: int = 20
+    cache: bool = True
+
+    @field_validator("purpose", "prompt_version")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be non-empty")
+        return value
+
+    @field_validator("bundle_size")
+    @classmethod
+    def _positive_bundle(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("bundle_size must be >= 1")
+        return value
+
+
+class CountryTaxonomy(ConfigModel):
+    """One country's Tier-1 rule block.
+
+    Patterns are regexes matched case-insensitively against the normalised
+    programme name. ``exclude`` beats ``include``. An empty block is a valid
+    stub: it declares the country and defers every name to the semantic tier.
+    """
+
+    include_patterns: list[str] = Field(default_factory=list)
+    exclude_patterns: list[str] = Field(default_factory=list)
+    aliases: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ProgrammesConfig(ConfigModel):
+    """Typed view of the tenth registry file, ``config/programmes.yaml``."""
+
+    version: str
+    definition: ProgrammeDefinition
+    classifier: ProgrammeClassifierConfig
+    countries: dict[str, CountryTaxonomy]
+    default: CountryTaxonomy
+
+    @field_validator("version")
+    @classmethod
+    def _version_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("version must be non-empty")
+        return value
+
+    def taxonomy_for(self, country: str | None) -> tuple[CountryTaxonomy, bool]:
+        """The rule block for ``country`` plus whether it fell back to default.
+
+        A declared key (even an empty stub) returns its own block; an unknown
+        code or a NULL country returns ``default`` and reports the fallback so
+        the decision can carry the ``country_taxonomy_missing`` flag.
+        """
+        if country and (taxonomy := self.countries.get(country.strip().upper())) is not None:
+            return taxonomy, False
+        return self.default, True
+
+
 # --------------------------------------------------------------------------- models
 
 
