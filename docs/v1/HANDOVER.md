@@ -23,6 +23,38 @@ invariant findings live here so the next agent does not re-derive them.
   `export PATH=~/.local/bin:$PATH` (corepack shim). Postgres data:
   `/home/z/my-project/.tools/pgdata`.
 
+## Wave 3 — T2 parse cache (2026-11-21)
+
+- **Foundation first:** backlog items 3–4 presuppose the W10 branch, which had
+  never been merged. Verified (approve) and merged as PR #3 before extending.
+- **Scope decision — cache only locally pinnable engines.** The brief's key
+  requirements (engine + engine version + model ids) can only be satisfied
+  honestly when the engine identity is derivable *without the engine*. RapidOCR
+  reports its version via importlib.metadata and pins model ids in config —
+  cacheable. qwen3vl/paddleocr report their version only through the service;
+  caching under `version=None` would alias a service-side model swap — exactly
+  the failure the key requirements exist to prevent — so those T2 results are
+  refused (`t2_engine_fingerprint_unavailable`) and OCR'd live every time.
+  If the operator wants qwen3vl caching, the service contract needs a
+  model-identity field in `/extract` responses first (a backend change, not a
+  cache change).
+- **No schema bump.** The T2 payload reuses the W10 schema (same
+  ExtractedDoc shape; engine provenance already in `tool`/`tool_version`/
+  `engine_meta`). `PARSE_SCHEMA_VERSION` stays 1 — no T1 invalidation.
+- **Two caches, one store/table.** `document_parses` already carries `tier`;
+  T2 rows are just rows with tier="T2" and a fingerprint-bearing key. Lookup
+  order is T1 then T2 (a T2 hit skips both Docling probing and OCR).
+- **Bug the tests caught** (kept as a lesson): the store gate initially
+  reloaded the default registry instead of using the run's policy — the
+  model-swap invalidation test failed exactly because the gate compared the
+  doc against the *committed* config, not the *run's* config. Gates must use
+  the identity the run actually had.
+- **Sizing note:** the batched runner's page sizing still reads the T1 cache
+  (`pages_for`). T2-cached scans report unknown pages to the sizer until their
+  first convert-then-cache cycle; they are never truncated or split (documents
+  finish whole), so the cost is one conservative cycle, not correctness.
+  Candidate follow-up: sizer reads max(pages across tier caches).
+
 ## Wave 2 — acceptance harness completeness (2026-11-21)
 
 - **Decision: a canonical `EXPECTED_CHECKS` id manifest + a safety net**, not
