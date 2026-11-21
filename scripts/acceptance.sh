@@ -134,6 +134,53 @@ record() {
 
 note() { echo "acceptance: $*"; }
 
+# ------------------------------------------------------- canonical check manifest
+#
+# Every check id this script can ever record, in section order. The verdict
+# table must carry a verdict for ALL of them on every run: a check that a
+# dependency path forgets to record is "silently omitted" — the exact failure
+# mode this harness exists to prevent. Two layers enforce that:
+#   1. every dependency branch records honest SKIPs for its dependent checks;
+#   2. the safety net before the verdict (search "harness safety net") records
+#      a SKIP for any manifest id that reached no verdict at all, so even a
+#      future editing mistake cannot make a check vanish quietly.
+# Pinned by packages/pipeline/tests/test_acceptance_manifest.py; surfaced in
+# the --json-out report under "manifest".
+EXPECTED_CHECKS=(
+  "compose/smoke"
+  "preflight/db-reachable"
+  "preflight/migrations"
+  "preflight/registry-seeded"
+  "preflight/model-reachable"
+  "preflight/serve-local-probe"
+  "api/server"
+  "api/health"
+  "api/sources"
+  "api/programmes"
+  "api/programme-detail"
+  "api/programme-cost"
+  "api/programme-filters"
+  "api/rankings"
+  "api/compare"
+  "api/exams"
+  "api/exclusions"
+  "web/pnpm"
+  "web/lint"
+  "web/build"
+  "web/test"
+  "web/server"
+  "web/render /"
+  "web/render /shortlist"
+  "web/render /programmes/<id>"
+  "web/render /compare"
+  "web/render /exams"
+  "web/render /exclusions"
+  "web/render /sources"
+  "privacy/response-bodies"
+  "privacy/api-logs"
+  "privacy/db-rows"
+)
+
 # ----------------------------------------------------------------- http helpers
 
 http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$1" 2>/dev/null; }
@@ -510,7 +557,16 @@ note "section 3: web gates"
 
 if [ -z "$PNPM_BIN" ]; then
   record "web/pnpm" "SKIP" "pnpm not installed — run: corepack enable pnpm"
+  for label in lint build test; do
+    record "web/$label" "SKIP" "pnpm not installed"
+  done
+  record "web/server" "SKIP" "pnpm not installed"
+  for route in "/" "/shortlist" "/programmes/<id>" "/compare" "/exams" "/exclusions" "/sources"; do
+    record "web/render $route" "SKIP" "pnpm not installed"
+  done
 else
+  # The whole web section depends on pnpm; every check it gates gets a verdict.
+  record "web/pnpm" "PASS" "pnpm available ($(pnpm --version 2>/dev/null || echo "$PNPM_BIN"))"
   if [ ! -d "$WEB_DIR/node_modules" ]; then
     note "installing web dependencies (pnpm install --frozen-lockfile)"
     (cd "$WEB_DIR" && "$PNPM_BIN" install --frozen-lockfile) >"$WORK_DIR/pnpm-install.log" 2>&1 \
@@ -555,22 +611,35 @@ else
 
   if [ "$WEB_UP" -eq 1 ]; then
     routes=("/" "/shortlist" "/compare" "/exams" "/exclusions" "/sources")
-    if [ -n "$PROGRAMME_ID" ]; then routes+=("/programmes/$PROGRAMME_ID"); fi
+    if [ -n "$PROGRAMME_ID" ]; then
+      routes+=("/programmes/$PROGRAMME_ID")
+    else
+      # Keep the programme route in the verdict even with an empty database.
+      record "web/render /programmes/<id>" "SKIP" \
+        "no programme id from the API (empty database?) — run: fmd migrate && fmd seed, then make crawl"
+    fi
     for route in "${routes[@]}"; do
       slug="$(echo "$route" | sed 's|/|-|g;s|^-||;s|-$||')"
       [ -z "$slug" ] && slug="root"
       page="$WORK_DIR/page-${slug}.html"
       status="$(fetch_to "$WEB_BASE_URL$route" "$page")"
+      result="PASS"; detail="200, no raw NaN/undefined, no bare composite decimal"
       if [ "$status" != "200" ]; then
-        record "web/render $route" "FAIL" "HTTP $status (expected 200)"
-        continue
+        result="FAIL"; detail="HTTP $status (expected 200)"
+      elif ! run_check html "$page" >"$WORK_DIR/html-${slug}.txt" 2>&1; then
+        result="FAIL"; detail="artifact in rendered HTML: $(head -3 "$WORK_DIR/html-${slug}.txt" | tr '\n' ' ')"
       fi
-      if ! run_check html "$page" >"$WORK_DIR/html-${slug}.txt" 2>&1; then
-        record "web/render $route" "FAIL" \
-          "artifact in rendered HTML: $(head -3 "$WORK_DIR/html-${slug}.txt" | tr '\n' ' ')"
-        continue
-      fi
-      record "web/render $route" "PASS" "200, no raw NaN/undefined, no bare composite decimal"
+      record "web/render $route" "$result" "$detail"
+      case "$route" in
+        /programmes/*)
+          # The manifest carries the placeholder id; mirror the concrete
+          # route's verdict onto it so a healthy populated run is not
+          # flagged by the safety net as "check never ran".
+          if [ "$route" != "/programmes/<id>" ]; then
+            record "web/render /programmes/<id>" "$result" "mirrored from web/render $route: $detail"
+          fi
+          ;;
+      esac
     done
   else
     for route in "/" "/shortlist" "/programmes/<id>" "/compare" "/exams" "/exclusions" "/sources"; do
@@ -645,6 +714,21 @@ fi
 
 # =================================================================== verdict
 
+# Harness safety net: no manifest check may end a run without a verdict. A
+# miss here means an editing mistake dropped a `record` call from some
+# dependency branch — surface it as an explicit SKIP naming the bug, never
+# let the check vanish quietly.
+for expected in "${EXPECTED_CHECKS[@]}"; do
+  found=0
+  for name in "${CHECK_NAMES[@]}"; do
+    if [ "$name" = "$expected" ]; then found=1; break; fi
+  done
+  if [ "$found" -eq 0 ]; then
+    record "$expected" "SKIP" \
+      "harness safety net: check never ran — a section aborted early or a dependency branch forgot to record it; treat as a harness bug"
+  fi
+done
+
 echo
 echo "========================== ACCEPTANCE =========================="
 printf '%-38s %-6s %s\n' "CHECK" "RESULT" "DETAIL"
@@ -660,9 +744,11 @@ if [ -n "$JSON_OUT" ]; then
   names_nl="$(printf '%s\n' "${CHECK_NAMES[@]}")"
   results_nl="$(printf '%s\n' "${CHECK_RESULTS[@]}")"
   details_nl="$(printf '%s\n' "${CHECK_DETAILS[@]}")"
+  expected_nl="$(printf '%s\n' "${EXPECTED_CHECKS[@]}")"
   FMD_ACCEPTANCE_NAMES="$names_nl" \
   FMD_ACCEPTANCE_RESULTS="$results_nl" \
   FMD_ACCEPTANCE_DETAILS="$details_nl" \
+  FMD_ACCEPTANCE_EXPECTED="$expected_nl" \
   "${PY_RUNNER[@]}" - "$JSON_OUT" "$PASS_COUNT" "$FAIL_COUNT" "$SKIP_COUNT" "$SENTINEL" <<'PYEOF'
 import json, os, sys
 from datetime import datetime, timezone
@@ -671,14 +757,29 @@ path = sys.argv[1]
 names = [n for n in os.environ.get("FMD_ACCEPTANCE_NAMES", "").split("\n") if n]
 results = [r for r in os.environ.get("FMD_ACCEPTANCE_RESULTS", "").split("\n") if r]
 details = [d for d in os.environ.get("FMD_ACCEPTANCE_DETAILS", "").split("\n")]
+expected = [n for n in os.environ.get("FMD_ACCEPTANCE_EXPECTED", "").split("\n") if n]
+# A check may be recorded more than once (e.g. an extra contract probe after a
+# PASS); for manifest completeness a name is covered if it appears at all.
+recorded = set(names)
+missing = [n for n in expected if n not in recorded]
+fail_count = int(sys.argv[3])
 report = {
     "format": "fmd-acceptance-v1",
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "sentinel": sys.argv[5],
     "totals": {
         "passed": int(sys.argv[2]),
-        "failed": int(sys.argv[3]),
+        "failed": fail_count,
         "skipped": int(sys.argv[4]),
+    },
+    "verdict": "FAIL" if fail_count > 0 else "PASS",
+    "manifest": {
+        # The canonical id list lives in scripts/acceptance.sh (EXPECTED_CHECKS)
+        # and is pinned by packages/pipeline/tests/test_acceptance_manifest.py.
+        "expected": expected,
+        "recorded": sorted(recorded),
+        "missing": missing,
+        "complete": len(missing) == 0,
     },
     "checks": [
         {"name": name, "result": result, "detail": detail}
@@ -688,6 +789,8 @@ report = {
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(report, fh, indent=2)
 print(f"acceptance: report written to {path}")
+if missing:
+    print(f"acceptance: WARNING — checks never recorded: {', '.join(missing)}")
 PYEOF
 fi
 
