@@ -175,6 +175,16 @@ def _t2_settings(spec: Any) -> Any | None:
         return None
 
 
+def _distribution_version(distribution: str) -> str | None:
+    """Installed-package version, or ``None`` (cheap; no model load)."""
+    try:
+        import importlib.metadata as _metadata
+
+        return _metadata.version(distribution)
+    except Exception:
+        return None
+
+
 def t2_engine_fingerprint(acquire: Any) -> dict[str, Any] | None:
     """The locally derivable identity of the configured T2 engine, or ``None``.
 
@@ -197,12 +207,7 @@ def t2_engine_fingerprint(acquire: Any) -> dict[str, Any] | None:
     settings = _t2_settings(spec)
     if settings is None or not settings.rec_model_id or not settings.rec_keys_id:
         return None
-    try:
-        import importlib.metadata as _metadata
-
-        engine_version = _metadata.version("rapidocr")
-    except Exception:
-        return None
+    engine_version = _distribution_version("rapidocr")
     if not engine_version:
         return None
     return {
@@ -672,7 +677,7 @@ def _refuse_t2_store(doc: ExtractedDoc, key: str, acquire: Any) -> CacheMiss | N
       fingerprint (env drift between the run and the config read) — the key was
       computed from an identity the run did not actually use.
     """
-    acquire = _default_policy()
+    acquire = _acquire_of(acquire)
     fingerprint = t2_engine_fingerprint(acquire)
     if fingerprint is None:
         return CacheMiss(
@@ -761,7 +766,11 @@ def acquire_document(
     """
     from fmd.extract.pdf import _is_pdf, extract_document
 
-    if cache is None or snapshot_sha256 is None or not _is_pdf(data, content_type):
+    if (
+        (cache is None and t2_cache is None)
+        or snapshot_sha256 is None
+        or not _is_pdf(data, content_type)
+    ):
         if not allow_convert:
             # extract --from-cache / --no-acquire with nothing behind the run:
             # the document has no cached parse, and it will not be converted.
@@ -775,7 +784,12 @@ def acquire_document(
         miss.info["pages"] = _page_count(doc)
         return doc, miss
 
-    doc, provenance = cache.lookup(snapshot_sha256, policy)
+    doc: ExtractedDoc | None = None
+    provenance: CacheHit | CacheMiss
+    if cache is not None:
+        doc, provenance = cache.lookup(snapshot_sha256, policy)
+    else:
+        provenance = CacheMiss(None, MISS_NO_ENTRY, "no T1 cache configured")
     if doc is not None:
         return doc, provenance
 
@@ -793,7 +807,7 @@ def acquire_document(
         data, content_type=content_type, policy=policy, t0=t0, t1=t1, t2=t2, t2b=t2b
     )
     tier_cache = t2_cache if (doc.tier == "T2" and t2_cache is not None) else cache
-    if cacheable(doc):
+    if cacheable(doc) and tier_cache is not None:
         stored = tier_cache.store_parse(snapshot_sha256, doc, policy)
         miss.stored = isinstance(stored, CacheHit)
         miss.info["stored"] = miss.stored
@@ -803,7 +817,8 @@ def acquire_document(
     else:
         miss.info["pages"] = _page_count(doc)
         miss.info["stored"] = False
-        miss.info["not_cacheable_tier"] = doc.tier
+        if not cacheable(doc):
+            miss.info["not_cacheable_tier"] = doc.tier
     return doc, miss
 
 
