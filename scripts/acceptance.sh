@@ -557,8 +557,6 @@ note "section 3: web gates"
 
 if [ -z "$PNPM_BIN" ]; then
   record "web/pnpm" "SKIP" "pnpm not installed — run: corepack enable pnpm"
-  # The whole web section depends on pnpm: record honest SKIPs for every check
-  # it would have carried out, so none of them vanish from the verdict table.
   for label in lint build test; do
     record "web/$label" "SKIP" "pnpm not installed"
   done
@@ -567,6 +565,8 @@ if [ -z "$PNPM_BIN" ]; then
     record "web/render $route" "SKIP" "pnpm not installed"
   done
 else
+  # The whole web section depends on pnpm; every check it gates gets a verdict.
+  record "web/pnpm" "PASS" "pnpm available ($(pnpm --version 2>/dev/null || echo "$PNPM_BIN"))"
   if [ ! -d "$WEB_DIR/node_modules" ]; then
     note "installing web dependencies (pnpm install --frozen-lockfile)"
     (cd "$WEB_DIR" && "$PNPM_BIN" install --frozen-lockfile) >"$WORK_DIR/pnpm-install.log" 2>&1 \
