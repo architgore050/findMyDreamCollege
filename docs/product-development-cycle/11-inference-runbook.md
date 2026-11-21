@@ -1170,7 +1170,64 @@ run: hand them the command, do not add a wait loop. `scripts/serve_ocr.sh
 vision-start` is only needed for scanned pages and needs the optional 10.6 GB
 vision fetch first (§3.2); without it T2 degrades to the human queue and that is
 the honest state.
+### 6.1 Batched acquire (W10, 2026-11-21) — stop → acquire on CUDA → extract
 
+The fused loop idled the GPU during every conversion: Docling ran on CPU
+(1.0–3.8 s/page) while the 26B held its 64k KV cache, and re-running
+extraction re-converted every document. Two changes fix both halves:
+
+* **Persistent T1 parse cache** (`document_parses`, migration 0011 + the
+  content-addressed object store). Key = (snapshot sha256, tier=`T1`,
+  policy digest, payload schema version). **The Docling device is not part of
+  the key** — a CUDA parse is reusable by a CPU run and vice versa. A policy
+  or schema bump invalidates; corrupt/truncated/mismatched entries reconvert
+  with a recorded reason and never crash. Cache hit ⇒ zero Docling calls.
+* **Batched orchestrator** (`fmd extract --batched`): per cycle — ensure
+  server stopped → acquire one page-batch on CUDA (zero LLM calls) → ensure
+  server started and `/health` ready (poll with timeout) → extract that batch
+  from cache → repeat. Sizing is **by pages, evaluated only at document
+  boundaries** (`batch.pages`, default 100): the document that crosses the
+  limit always finishes in full in the same cycle and no further document
+  starts; a known-size document that would cross is deferred whole; a 434-page
+  document runs alone. No document is ever truncated, dropped, or split across
+  cycles, and nothing is cached or extracted while incomplete.
+
+Measured constants behind the defaults (operator host, 2026-11-20): CUDA
+conversion 0.166–0.9 s/page vs CPU 1.0–3.8 s/page; ~20–25 s per server
+restart (`scripts/serve_local.sh` stop + start + `/health`); **break-even
+~20–25 pages/cycle** — below that the restart costs more than the CUDA
+speedup saves, above it batching wins. The 100-page default leaves ~4–5×
+margin. A ~1,000-page backlog therefore plans to ~10–12 cycles (~10 cycles at
+100 pages/cycle, more if large documents straddle boundaries).
+
+```bash
+# the batched pass (operator, GPU host): parse cache + page-batched cycles
+scripts/batch_extract.sh --dry-run --limit 20            # plan only, writes nothing
+scripts/batch_extract.sh --limit 20                      # real run; server stopped at the end
+scripts/batch_extract.sh --limit 20 --keep-server        # leave the server running
+scripts/batch_extract.sh --limit 20 --device cpu         # CPU acquisition instead of CUDA
+
+# split by hand when you want to control the GPU window yourself:
+python -m fmd.cli acquire --device cuda --pages 300      # convert + cache, zero LLM calls
+scripts/serve_local.sh start
+python -m fmd.cli extract --from-cache --limit 50        # zero Docling on this path
+scripts/serve_local.sh stop
+
+# Degraded mode: FMD_SERVER_CONTROL=off (or no server_script) falls back to
+# CPU acquisition + inline extraction and records server_control=degraded in
+# the summary — the run still happens, honestly labelled.
+FMD_SERVER_CONTROL=off python -m fmd.cli extract --batched --limit 20
+```
+
+Exit codes: the run is non-zero only when nothing was extractable (or an
+acquisition/device failure was recorded). Every exit path stops the model
+server (try/finally) unless `--keep-server`; Ctrl-C between cycles loses only
+in-flight work — persisted parses and claims stay, and the next run resumes
+(skips documents with a cached parse and a completed extraction). Known gaps:
+T2/OCR output is not cached (acquisition of scans re-runs OCR every time); a
+Docling library upgrade is recorded in the payload but does not invalidate
+stored parses; the GPU path is validated only through fakes in CI — the
+operator runs the real pass.
 ## 7. Offline mode (no outbound network)
 
 Set three variables in the shell (or `.env`); `.env.example` carries the same

@@ -158,6 +158,25 @@ financing_options(id, scope, lender, scheme, rate_min, rate_max, collateral_rule
 
 **Programme scoping (W9, 2026-11-20):** the `programmes` table is scoped before it is ranked. `config/programmes.yaml` — the tenth registry file — is a country-keyed taxonomy (`countries.IN` rules; other countries are declared empty stubs; `default` + `country_taxonomy_missing` for the rest) plus the versioned conceptual definition of the target field. Materialisation normalises names (leading row numbering is furniture and is stripped) and scopes every row in three tiers with precedence manual > exclude > include > semantic > uncertain: Tier 1 deterministic include/exclude regexes, Tier 2 a semantic equivalence classifier (router purpose `programme_equivalence`) that must cite evidence and answers yes/no/uncertain, cached by (normalised name, institution type, definition version) in `programme_scope_decisions`, Tier 3 human `fmd programmes decide` verdicts that become manual decisions Tier 1 consumes on the next run. `uncertain` never enters the ranking: it is `in_scope=false` + `needs_review`. Out-of-scope rows are kept with their `scope_reason`/`scope_tier`/`scope_evidence` for audit and are skipped (and counted) by scoring. Details and limits: runbook §13.
 
+**Parse cache and batched acquisition (W10, 2026-11-21):** the fused
+extract loop is split by a persistent T1 parse cache — Docling parses are
+stored as versioned JSON in the content-addressed object store with a lookup
+row in `document_parses` (migration 0011, forward-only), keyed by
+(snapshot sha256, tier, policy digest, schema version) with the Docling
+device deliberately excluded so a CUDA parse serves a CPU run and vice versa;
+a policy or schema bump invalidates. Writes are atomic (object first, row
+second), a cache entry represents a complete document only, and
+live-vs-cache extraction is proven identical on a committed parse fixture.
+`fmd acquire` converts and caches with zero LLM calls; `fmd extract
+--from-cache` extracts with zero Docling calls; `fmd extract --batched`
+cycles stop-server → acquire one page-batch on CUDA → start-server
+(`/health` ready) → extract-from-cache, sizing by pages evaluated only at
+document boundaries (the crossing document always finishes; nothing is ever
+truncated or split; server stopped on every exit path unless
+`--keep-server`), with a degraded CPU fallback recorded when server control
+is unavailable. Measured break-even is ~20–25 pages/cycle against the ~20–25 s
+restart cost; the default batch is 100 pages (runbook §6.1).
+
 **Hard rules**
 - `claims` is append-only. Corrections insert a new row and set `superseded_by`.
 - `claims.quote` is stored verbatim. `char_start/char_end` index into `extractions.text`.

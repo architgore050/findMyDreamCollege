@@ -82,6 +82,86 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="re-extract snapshots already processed at this tool version",
     )
+    # ---- W10 phase split: parse cache, stage flags, batched orchestrator ----
+    extract_parser.add_argument(
+        "--from-cache",
+        action="store_true",
+        help="extract only from cached parses; guaranteed to invoke no Docling "
+        "(a document without a cached parse is recorded missing_parse_cache)",
+    )
+    extract_parser.add_argument(
+        "--no-acquire",
+        action="store_true",
+        help="skip inline conversion; a document without a cached parse is "
+        "recorded missing_parse_cache and the run continues",
+    )
+    extract_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the plan (documents, known pages, expected cache hits), "
+        "write nothing, contact no model URL",
+    )
+    extract_parser.add_argument(
+        "--batched",
+        action="store_true",
+        help="batched orchestrator: per cycle stop server -> acquire one "
+        "page-batch on CUDA -> start server (/health ready) -> extract the "
+        "batch from cache; the server is stopped on every exit path unless "
+        "--keep-server",
+    )
+    extract_parser.add_argument(
+        "--batch-pages",
+        type=int,
+        default=None,
+        help="target converted pages per cycle (default: acquire.yaml batch.pages); "
+        "sizing is evaluated only at document boundaries and the document that "
+        "crosses the limit always finishes",
+    )
+    extract_parser.add_argument(
+        "--keep-server",
+        action="store_true",
+        help="leave the model server running after the batched run",
+    )
+    extract_parser.add_argument(
+        "--server-script",
+        default=None,
+        help="server-control script (start|stop|status|probe); default: "
+        "acquire.yaml batch.server_script",
+    )
+    extract_parser.add_argument(
+        "--device",
+        choices=["cpu", "cuda"],
+        default=None,
+        help="Docling device for acquisition (default: acquire.yaml batch.device "
+        "for --batched, else FMD_DOCLING_DEVICE/config)",
+    )
+
+    acquire_parser = subparsers.add_parser(
+        "acquire",
+        help="convert documents into cached parses (W10); makes zero LLM calls",
+    )
+    acquire_parser.add_argument(
+        "--limit", type=int, default=None, help="maximum documents to acquire"
+    )
+    acquire_parser.add_argument(
+        "--pages",
+        type=int,
+        default=None,
+        help="page budget: evaluated only at document boundaries — the document "
+        "that crosses it is converted in full, then acquisition stops",
+    )
+    acquire_parser.add_argument(
+        "--device",
+        choices=["cpu", "cuda"],
+        default=None,
+        help="Docling device for this run (overrides FMD_DOCLING_DEVICE/config)",
+    )
+    acquire_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the plan (documents, known pages, expected cache hits), "
+        "convert nothing, write nothing",
+    )
 
     plan_parser = subparsers.add_parser(
         "plan",
@@ -550,9 +630,85 @@ def _cmd_crawl(args: argparse.Namespace) -> int:
 
 
 def _cmd_extract(args: argparse.Namespace) -> int:
+    if args.batched:
+        return _cmd_extract_batched(args)
     orchestrator, database = _orchestrator(args)
     try:
-        summary = orchestrator.extract(limit=args.limit, force=args.force)
+        summary = orchestrator.extract(
+            limit=args.limit,
+            force=args.force,
+            from_cache=args.from_cache,
+            no_acquire=args.no_acquire,
+            dry_run=args.dry_run,
+        )
+    finally:
+        database.close()
+    print(summary.as_json())
+    return 1 if summary.failed else 0
+
+
+def _batch_settings(args: argparse.Namespace) -> dict[str, Any]:
+    """Batched-run settings: acquire.yaml ``batch`` block with CLI overrides."""
+    registry = load_registry(args.config_dir)
+    batch = getattr(registry.acquire, "batch", None)
+    defaults = {
+        "pages": 100,
+        "device": "cuda",
+        "server_script": None,
+        "keep_server": False,
+        "poll_timeout_s": 600,
+    }
+    if batch is not None:
+        defaults.update(
+            {
+                "pages": int(batch.pages),
+                "device": str(batch.device),
+                "server_script": batch.server_script,
+                "keep_server": bool(batch.keep_server),
+                "poll_timeout_s": int(batch.poll_timeout_s),
+            }
+        )
+    if getattr(args, "batch_pages", None) is not None:
+        defaults["pages"] = int(args.batch_pages)
+    if getattr(args, "device", None):
+        defaults["device"] = str(args.device)
+    if getattr(args, "keep_server", False):
+        defaults["keep_server"] = True
+    if getattr(args, "server_script", None):
+        defaults["server_script"] = str(args.server_script)
+    return defaults
+
+
+def _cmd_extract_batched(args: argparse.Namespace) -> int:
+    from fmd.orchestrate.batched import BatchedRunner
+
+    settings = _batch_settings(args)
+    orchestrator, database = _orchestrator(args)
+    try:
+        runner = BatchedRunner(
+            orchestrator=orchestrator,
+            batch_pages=settings["pages"],
+            device=settings["device"],
+            keep_server=settings["keep_server"],
+            poll_timeout_s=settings["poll_timeout_s"],
+            server_script=settings["server_script"],
+        )
+        summary = runner.run(limit=args.limit, dry_run=args.dry_run)
+    finally:
+        database.close()
+    print(summary.as_json())
+    return 1 if summary.failed else 0
+
+
+def _cmd_acquire(args: argparse.Namespace) -> int:
+    orchestrator, database = _orchestrator(args)
+    try:
+        summary = orchestrator.acquire(
+            limit=args.limit,
+            pages=args.pages,
+            device=args.device,
+            dry_run=args.dry_run,
+        )
     finally:
         database.close()
     print(summary.as_json())
@@ -1554,6 +1710,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_crawl(args)
         if args.command == "extract":
             return _cmd_extract(args)
+        if args.command == "acquire":
+            return _cmd_acquire(args)
         if args.command == "plan":
             return _cmd_plan(args)
         if args.command == "verify":

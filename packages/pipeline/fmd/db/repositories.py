@@ -773,6 +773,29 @@ class DomainPolitenessRecord(RowModel):
     quarantined_until: datetime | None = None
 
 
+class DocumentParsePut(RowModel):
+    """One parse-cache lookup row (migration 0011).
+
+    ``key_digest`` is the caller-computed cache key (sha256 over snapshot sha,
+    tier, policy digest and payload schema version); the components are stored
+    beside it so a row is auditable without recomputing the key.
+    """
+
+    key_digest: str
+    snapshot_sha256: str
+    tier: str
+    policy_digest: str
+    schema_version: int
+    object_sha256: str
+    pages: int
+    parser: str
+    parser_version: str | None = None
+
+
+class DocumentParseRecord(DocumentParsePut):
+    created_at: datetime | None = None
+
+
 # --------------------------------------------------------------------------- repos
 
 
@@ -3689,6 +3712,61 @@ class PipelineRunsRepo:
         return [_pipeline_run(row) for row in rows]
 
 
+class DocumentParsesRepo:
+    """The parse-cache lookup table (migration 0011, W10 batched acquire).
+
+    Rows point at content-addressed payload objects in the snapshot store; the
+    write order is always object first, row second, so an interrupted write
+    leaves an unreachable orphan object (harmless, content-addressed) and never
+    a row that reads back as a hit.
+    """
+
+    def __init__(self, database: Database) -> None:
+        self.db = database
+
+    def put(self, parse: DocumentParsePut) -> DocumentParseRecord:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO document_parses
+                    (key_digest, snapshot_sha256, tier, policy_digest, schema_version,
+                     object_sha256, pages, parser, parser_version)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (key_digest) DO UPDATE SET
+                    object_sha256 = EXCLUDED.object_sha256,
+                    pages = EXCLUDED.pages,
+                    parser = EXCLUDED.parser,
+                    parser_version = EXCLUDED.parser_version
+                RETURNING *
+                """,
+                (
+                    parse.key_digest,
+                    parse.snapshot_sha256,
+                    parse.tier,
+                    parse.policy_digest,
+                    parse.schema_version,
+                    parse.object_sha256,
+                    parse.pages,
+                    parse.parser,
+                    parse.parser_version,
+                ),
+            ).fetchone()
+        assert row is not None
+        return _document_parse(row)
+
+    def get(self, key_digest: str) -> DocumentParseRecord | None:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM document_parses WHERE key_digest = %s", (key_digest,)
+            ).fetchone()
+        return _document_parse(row) if row else None
+
+    def count(self) -> int:
+        with self.db.connection() as conn:
+            row = conn.execute("SELECT count(*) AS n FROM document_parses").fetchone()
+        return int(row["n"]) if row else 0
+
+
 class CrawlFrontierRepo:
     def __init__(self, database: Database) -> None:
         self.db = database
@@ -4130,3 +4208,7 @@ def _score(row: dict[str, Any]) -> ScoreRecord:
         computed_at=row["computed_at"],
         id=row["id"],
     )
+
+
+def _document_parse(row: dict[str, Any]) -> DocumentParseRecord:
+    return DocumentParseRecord.model_validate(row)
