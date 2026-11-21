@@ -48,6 +48,8 @@ A. Parse cache (the enabling piece)
    converter). Corrupt, truncated, or schema-mismatched cache ⇒ reconvert and record a reason; never
    crash, never guess.
 5. Writes are atomic (temp object → move, then row). An interrupted write must never be read back.
+   A cache entry represents a **complete document only**: never cache a partially converted document,
+   never extract one, and never resume a half-converted file — a failed document is retried from scratch.
 6. Live-convert and cached-parse paths must produce **identical extraction output** for the same document.
    Prove it with a committed parse fixture: extract from a mocked live conversion and from the cache,
    assert identical claim tuples and identical spans.
@@ -71,9 +73,12 @@ C. Batched orchestrator
 11. `fmd extract --batched [--batch-pages 100] [--dry-run] [--keep-server] [--server-script PATH]`:
     per cycle — ensure server stopped → acquire one page-batch on CUDA → ensure server started and
     `/health` is ready (poll with timeout) → extract that batch from cache → repeat.
-12. **Batch sizing is by pages, and the limit is a soft one**: accumulate documents until the converted
-    page total reaches `batch_pages`, and always process at least one document even if it alone exceeds
-    the limit. Default `100` (break-even measured at ~20–25 pages/cycle; 100 leaves margin).
+12. **Batch sizing is by pages, evaluated only at document boundaries.** Accumulate *completed*
+    documents until the converted page total reaches `batch_pages`, then stop taking new documents. The
+    document that crosses the limit is **always finished** — converted in full and extracted in the same
+    cycle — and no further document starts. A document larger than `batch_pages` runs alone. Never
+    truncate a document, drop pages, or split one document across cycles. Default `100` (break-even
+    measured at ~20–25 pages/cycle; 100 leaves margin).
 13. Server control is injected, not hardcoded: an interface with `stop()`, `start()`, `wait_ready()`;
     the default adapter shells out to `scripts/serve_local.sh` from `config/acquire.yaml`. Tests use a
     fake controller and assert call order and that the server is **stopped at the end** (try/finally),
@@ -103,6 +108,11 @@ E. Tests (offline; no network, no model download, no real Docling conversion, no
 - live-vs-cache extraction equivalence on the committed parse fixture (identical claims + spans)
 - `acquire` makes zero LLM calls; `extract --from-cache` makes zero Docling calls
 - `--no-acquire` with missing parse ⇒ `missing_parse_cache`, run continues
+- document atomicity: with `batch_pages=100`, a 140-page document is converted in full and extracted in
+  the same cycle, then the cycle ends; a 40-page document that would cross the limit is never started;
+  a 434-page document runs alone
+- a conversion that fails midway caches nothing and extracts nothing for that document; the next run
+  retries it from scratch (no partial parse is ever read)
 - soft page limit: 100-page limit with a 434-page document processes it alone
 - fake controller call order (stop → acquire → start → wait_ready → extract) and server stopped on
   converter exception, on LLM exception, and on SIGINT
@@ -146,7 +156,9 @@ Report the concrete new test names and their outcomes, and any acceptance item y
 by fake.
 
 findings.json must state: the cache key and invalidation rules, the atomic-write scheme, the batch-sizing
-rule, the controller call order, the exact operator command sequence for a real run, the measured
+rule (cutoff evaluated at document boundaries only; the document that crosses the limit always finishes;
+no document is ever truncated, split across cycles, or cached/extracted while incomplete), the controller
+call order, the exact operator command sequence for a real run, the measured
 constants the defaults are based on (CUDA 0.166–0.9 s/page vs CPU 1.0–3.8 s/page; ~20–25 s per server
 restart; break-even ~20–25 pages), the expected cycle count for a ~1,000-page backlog, and known gaps
 (T2 not cached, GPU path validated only via fakes, Docling library-version invalidation policy).
