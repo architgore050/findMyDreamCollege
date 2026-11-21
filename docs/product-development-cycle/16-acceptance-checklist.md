@@ -38,6 +38,7 @@ one check FAILED**; SKIPs are listed as known gaps in the final table.
 
 | # | Check | Verdicts | Enforced invariant |
 |---|---|---|---|
+| 0 | `compose/smoke` | PASS (LIVE) / FAIL / SKIP | compose file parses; when the stack is up, the api container connects to db over the declared `fmd-net` network (the 2026-11-21 DNS-split fix) and a running web answers on its published port; offline pins: `tests/test_compose_wiring.py` |
 | 1 | `preflight/db-reachable` | PASS (LIVE) / SKIP | operator runnability |
 | 2 | `preflight/migrations` | PASS (LIVE) / FAIL / SKIP | `schema_migrations` count == `db/migrations/*.sql` count |
 | 3 | `preflight/registry-seeded` | PASS (LIVE) / FAIL / SKIP | sources & countries rows exist (`fmd migrate && fmd seed`) |

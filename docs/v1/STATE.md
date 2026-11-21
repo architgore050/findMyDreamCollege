@@ -32,6 +32,43 @@ risks).
 ## Done
 
 - (bootstrap) docs/v1 state files created and committed.
+- **Wave 1 (PLAN #1) — compose network wiring + acceptance compose smoke (branch
+  `v1/w1-compose-wiring`).**
+  - Root cause of the observed `Temporary failure in name resolution` loop:
+    compose DNS resolves service names only among containers attached to the
+    *same* network; the project-default network name varies with the compose
+    project, so a db started under a different project/`-p`/checkout left api
+    resolving nothing until its entrypoint gave up and `restart: unless-stopped`
+    looped it forever.
+  - Fix: every service (db, searxng, ocr, ocr-paddle, api, worker, web) now
+    attaches to one declared network `fmd-net` with a fixed *physical* name
+    (`networks: {fmd-net: {name: fmd-net}}`), so every invocation of this file
+    converges on one segment and service aliases (`db`, `api`, `web`) follow the
+    containers. db gained `restart: unless-stopped`. Runtime `network_mode:
+    host` is forbidden (build-time `build.network: host` kept — documented
+    BuildKit DNS workaround).
+  - `scripts/acceptance.sh` gained section 0 `compose/smoke`: docker absent →
+    SKIP (reason); daemon down → SKIP; compose config invalid → FAIL; stack up →
+    decisive probe (api container connects to db at DATABASE_URL via psycopg) +
+    web port probe. Offline invariants pinned by
+    `packages/pipeline/tests/test_compose_wiring.py` (11 tests).
+  - Doc 16 check inventory: `compose/smoke` recorded as check #0 (19 checks total).
+  - Offline functional proof: `scripts/acceptance.sh` full run in this sandbox →
+    **23 passed / 0 failed / 7 skipped, VERDICT PASS** (with a migrated+seeded
+    local Postgres: countries=13, sources=30, source_exclusions=4, exams=8);
+    with docker absent the new check SKIPs with its reason; `--json-out` mode
+    exercised. The two earlier FAILs were the harness honestly reporting an
+    empty DB — fixed by migrate+seed, not by code.
+  - Gates: ruff ✓ · pytest offline 1366 ✓ · DB-gated 1446 ✓ · eval provenance 1.0 ✓ ·
+    web lint/test/build ✓.
+  - **Verifier verdict: approve** (independent subagent). Fixed from its findings
+    before merge: compose/smoke gates the live probe on db AND api (partial
+    stack → SKIP, not false FAIL); web running-but-not-answering → FAIL
+    (matches the doc-16 row); service-set test uses exact equality; doc-16 row
+    lists the FAIL verdict. Noted, not fixed (pre-existing, out of scope):
+    `http_code` returns "" not "000" when curl is missing — helper-wide
+    pattern, tracked for wave 2's harness pass.
+  - Residual: the live `make up` boot itself needs docker → LQ-1 (unchanged).
 
 ## In-PR
 

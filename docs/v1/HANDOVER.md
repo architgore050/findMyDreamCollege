@@ -23,6 +23,34 @@ invariant findings live here so the next agent does not re-derive them.
   `export PATH=~/.local/bin:$PATH` (corepack shim). Postgres data:
   `/home/z/my-project/.tools/pgdata`.
 
-## Wave 1 — compose wiring (in progress)
+## Wave 1 — compose wiring (2026-11-21)
 
-(decision record pending)
+- **Decision: declared network with fixed physical name `fmd-net`.** Rejected
+  alternatives: (a) relying on the pinned project `name:` alone — it fixes
+  invocations of *this* file, but not a db already running under an older
+  project name, which is exactly how the failure was observed; (b) `external`
+  network pre-created by the operator — adds a manual bootstrap step to the
+  fresh-clone path (definition-of-done #1) for no benefit here. The fixed-name
+  declared network keeps `make up` zero-touch while converging split
+  invocations.
+- **Kept the api `dns: [1.1.1.1, 8.8.8.8]` override** (systemd-resolved stub
+  hosts). On user-defined networks the override configures *forwarders* of
+  Docker's embedded DNS; service names still resolve internally. If an operator
+  host blocks outbound UDP/53, external crawl fetches degrade — that is a
+  crawl-time concern, not the db-DNS failure this wave fixed.
+- **`db` now has `restart: unless-stopped`**: the api/worker health-gate on it,
+  so a crashed db previously wedged the stack silently.
+- **New acceptance check `compose/smoke` is read-only** (never `up`s the stack):
+  config validation + live probes only when the stack is already running.
+  A full boot remains the operator's LQ-1 — pulling/building images in an
+  acceptance gate would make the daily path 10+ minutes and network-dependent.
+- Risk noted: `docker compose ps --format/--status` flags need a compose v2
+  new enough to support them; on an old compose the smoke check degrades to
+  SKIP (never a false PASS).
+
+## Wave 1 operator verification pending
+
+LQ-1 in LOCAL-QUEUE.md: run `make up` + `scripts/acceptance.sh` on a docker
+host and commit back `reports/acceptance.json`. Until then, wave 1 is
+"done (code + offline gates)", not "verified live" — the distinction is kept
+explicit everywhere.
