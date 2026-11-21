@@ -133,6 +133,12 @@ risks).
     pattern, tracked for wave 2's harness pass.
   - Residual: the live `make up` boot itself needs docker → LQ-1 (unchanged).
 
+## Merged to main (verified via GitHub API)
+
+- PR #1 (wave 1 compose wiring), PR #2 (wave 2 acceptance manifest), PR #3
+  (W10 foundation: T1 parse cache + batched acquire), PR #4 (wave 3 T2 parse
+  cache, engine-pinned keys). Local main synced to 33eb59f.
+
 ## In-PR
 
 - (none)
@@ -144,4 +150,8 @@ risks).
 
 ## Next
 
-- Wave 1 (PLAN #1): compose network wiring + acceptance compose smoke.
+- Wave 4 (PLAN #4): resource-phased acquisition double buffering. The W10
+  batched runner (now on main) already time-shares server-stopped acquisition
+  and server-up extraction; wave 4 must overlap next-batch CPU prep with the
+  GPU window. Verifier for PR #3 mapped the exact symbols (orchestrate/batched.py
+  `_run_cycle`). Then waves 5-10 per PLAN order.
