@@ -460,6 +460,21 @@ def test_incomplete_t2_documents_are_never_cached(tmp_path, pinned_engine):
     assert refusal.reason == MISS_NOT_PDF
 
 
+def test_t2_parse_is_refused_by_a_t1_tier_cache(tmp_path, pinned_engine):
+    """Cross-tier hardening (verifier finding): a T2 parse handed to a T1-tier
+    cache must never be stored — a fingerprint-free T1 key would let an OCR
+    parse survive an engine-version bump."""
+    from fmd.store import SnapshotStore
+
+    t1_repo = FakeParsesRepo()
+    t1_cache = ParseCache(t1_repo, SnapshotStore(tmp_path / "t1store"), tier="T1")
+    doc = rapidocr_doc(fingerprint=pinned_engine)
+    refusal = t1_cache.store_parse("d" * 64, doc, _policy())
+    assert refusal.reason == MISS_NOT_PDF
+    assert "does not match cache tier" in (refusal.detail or "")
+    assert t1_repo.count() == 0
+
+
 def test_t2_cache_skips_the_ocr_run_on_repeat_acquisition(tmp_path, pinned_engine):
     """Second acquisition of the same scan: a verified T2 hit invokes no tier
     function at all — the OCR work is never repeated."""

@@ -511,6 +511,9 @@ class CacheMiss:
             payload["detail"] = self.detail[:500]
         if self.stored:
             payload["stored"] = True
+        refusal = self.info.get("store_refusal")
+        if refusal:
+            payload["store_refusal"] = refusal
         return payload
 
 
@@ -627,6 +630,16 @@ class ParseCache:
             return CacheMiss(None, MISS_DISABLED, f"key derivation failed: {exc}")
         if doc.tier not in CACHED_TIERS or doc.fallback_from is not None:
             return CacheMiss(key, MISS_NOT_PDF, f"tier {doc.tier!r} is not cacheable")
+        if doc.tier != self.tier:
+            # Cross-tier hardening: a T2 parse stored under a T1-tier cache
+            # would carry a fingerprint-free T1 key and survive an engine
+            # bump — the exact aliasing the T2 key exists to prevent. Only
+            # the cache whose tier matches the parse may store it.
+            return CacheMiss(
+                key,
+                MISS_NOT_PDF,
+                f"parse tier {doc.tier!r} does not match cache tier {self.tier!r}",
+            )
         if doc.ocr_anomaly or doc.needs_review or doc.is_empty:
             return CacheMiss(key, MISS_NOT_PDF, "incomplete or refused parse is never cached")
         if self.tier == "T2":

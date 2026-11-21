@@ -58,8 +58,13 @@ risks).
     and 41 W10 tests untouched and green.
   - Gates: ruff ✓ · pytest offline 1432 ✓ · DB-gated 1521 ✓ · eval
     provenance 1.0 ✓. Web untouched this wave.
-  - Residual: real-engine cache behaviour on the operator host (rapidocr
-    models present, scanned corpus) = LQ-5.
+  - **Verifier verdict: approve** (independent subagent; scope decision judged
+    as satisfying the brief's intent, not a dodge). Hardened from its findings
+    before merge: store_parse refuses a parse whose tier differs from the
+    cache tier (cross-tier aliasing via an injected T1-only cache); store
+    refusals now reach run-summary outcome rows via CacheMiss.as_dict; doc 05
+    gains the G8.1 parse-cache scope row. New test pins the cross-tier refusal
+    (12 T2 tests total, 53 cache-suite tests green).
 - **Wave 2 (PLAN #2) — acceptance harness offline-complete + JSON manifest
   (branch `v1/w2-acceptance-complete`).**
   - `scripts/acceptance.sh` now carries a canonical `EXPECTED_CHECKS` manifest
