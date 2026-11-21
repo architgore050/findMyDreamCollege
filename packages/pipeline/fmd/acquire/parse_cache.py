@@ -12,13 +12,27 @@ Cache key = sha256 over a canonical JSON of
 
     (snapshot_sha256, tier, policy_digest, schema_version)
 
-* ``tier`` is the tier whose parse is stored — ``"T1"`` only in this patch
-  (T0 pdftext is cheap to redo; T2/OCR output is a known gap, never cached);
+* ``tier`` is the tier whose parse is stored — ``"T1"`` (Docling, born-digital)
+  and ``"T2"`` (in-process RapidOCR/PP-OCR scans) as of wave v1-w3. T0 pdftext
+  is cheap to redo and stays uncached; **T2 results from HTTP engines
+  (qwen3vl/paddleocr) are not cached**: their engine version is only knowable
+  by asking a service, so a model swap behind the same URL could not be
+  detected — exactly what the key must catch. In-process engines report a
+  locally derivable version (importlib.metadata) and are cached under an
+  ``engine_fingerprint`` (see below);
 * ``policy_digest`` covers the device-independent, parse-shaping subset of
-  ``config/acquire.yaml`` — a policy or schema change invalidates;
-* **the Docling device is deliberately not part of the key**: a CUDA parse is
-  reusable by a CPU run and vice versa. The Docling library version is
-  recorded in the payload for provenance but does not invalidate (known gap).
+  ``config/acquire.yaml`` — a policy or schema change invalidates. The digest
+  is tier-scoped: T1 projects the Docling block, T2 projects the T2 engine
+  block (engine selection, raster/budget/confidence knobs, model ids);
+* **the device is deliberately not part of the key**: a CUDA parse is
+  reusable by a CPU run and vice versa, for every tier;
+* for cached tiers with a locally derivable engine identity (T2/RapidOCR) the
+  key additionally covers an ``engine_fingerprint`` —
+  ``{engine, engine_version, model_ids, model_source, model_sha256}`` — so an
+  engine-version bump or a model-id change invalidates. T1 passes no
+  fingerprint: its key layout is unchanged by this wave (the Docling library
+  version is recorded in the payload for provenance but does not invalidate —
+  known, documented gap).
 
 Guarantees:
 
@@ -56,8 +70,9 @@ logger = logging.getLogger(__name__)
 #: ``config/acquire.yaml:cache.schema_version``, which must agree).
 PARSE_SCHEMA_VERSION = 1
 
-#: The only tier cached in this patch.
-CACHED_TIERS = ("T1",)
+#: Tiers whose complete parses are cached. T2 covers the in-process OCR engine
+#: only (see the module docstring for why HTTP engines are excluded).
+CACHED_TIERS = ("T1", "T2")
 
 # Stable miss/reconvert reasons (never prose).
 MISS_NO_ENTRY = "no_cache_entry"
@@ -66,21 +81,33 @@ MISS_SCHEMA_MISMATCH = "schema_mismatch"
 MISS_OBJECT_MISSING = "cache_object_missing"
 MISS_NOT_PDF = "not_pdf_cached_tier"
 MISS_DISABLED = "cache_unavailable"
+#: The T2 engine's identity cannot be pinned locally (HTTP service) — refusing
+#: to cache is the honest move: a model swap behind the same URL must never be
+#: silently aliased by a stale parse.
+MISS_ENGINE_UNPINNED = "t2_engine_fingerprint_unavailable"
+#: The document's own engine provenance disagrees with the locally derived
+#: fingerprint (env drift between the run and the config read) — never cache.
+MISS_ENGINE_MISMATCH = "t2_engine_meta_mismatch"
 
 #: Parse-shaping fields of ``config/acquire.yaml`` that feed the policy digest.
 #: Deliberately excludes every device/artifact/endpoint setting: those change
 #: where and on what hardware a parse runs, never what the parse says.
 _PARSE_POLICY_FIELDS = ("tiers", "outline", "anomaly")
 _T1_PARSE_FIELDS = ("tool", "model", "granularity")
+_T2_PARSE_FIELDS = ("backend", "tool", "model", "granularity")
 
 
-def parse_policy_digest(acquire: Any) -> str:
+def parse_policy_digest(acquire: Any, tier: str = "T1") -> str:
     """Device-independent digest of the acquire registry's parse-shaping keys.
 
     ``acquire`` is the validated ``AcquireConfig``. Extra keys allowed by the
     model (``extra="allow"``) are included only when they are one of the named
     parse-shaping blocks, so adding an unrelated knob to the registry never
-    invalidates the cache wholesale.
+    invalidates the cache wholesale. The digest is **tier-scoped**: the T1
+    projection is byte-identical to the pre-T2 layout (existing T1 keys and
+    rows stay valid), while T2 additionally covers the T2 engine block and the
+    RapidOCR settings that shape OCR output. Device settings are excluded from
+    both projections.
     """
     projection: dict[str, Any] = {}
     for name in _PARSE_POLICY_FIELDS:
@@ -88,13 +115,107 @@ def parse_policy_digest(acquire: Any) -> str:
         if value is None:
             continue
         projection[name] = _plain(value)
-    t1 = (getattr(acquire, "backends", None) or {}).get("T1")
-    if t1 is not None:
-        projection["backends.T1"] = {
-            key: _plain(getattr(t1, key, None)) for key in _T1_PARSE_FIELDS
-        }
+    backends = (getattr(acquire, "backends", None) or {})
+    if tier == "T1":
+        t1 = backends.get("T1")
+        if t1 is not None:
+            projection["backends.T1"] = {
+                key: _plain(getattr(t1, key, None)) for key in _T1_PARSE_FIELDS
+            }
+    elif tier == "T2":
+        t2 = backends.get("T2")
+        if t2 is not None:
+            projection["backends.T2"] = {
+                key: _plain(getattr(t2, key, None)) for key in _T2_PARSE_FIELDS
+            }
+            settings = _t2_settings(t2)
+            projection["backends.T2.settings"] = (
+                {
+                    key: _plain(getattr(settings, key, None))
+                    for key in _T2_SETTINGS_FIELDS
+                }
+                if settings is not None
+                else None
+            )
     payload = json.dumps(projection, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+#: RapidOCRSettings fields that shape OCR output (raster, budgets, model ids,
+#: hygiene thresholds). The device is deliberately absent — see the header.
+_T2_SETTINGS_FIELDS = (
+    "det_model_id",
+    "rec_model_id",
+    "rec_keys_id",
+    "model_source",
+    "model_sha256",
+    "lang_rec",
+    "min_box_confidence",
+    "conjunct_risk_score_max",
+    "normalise_digits",
+    "max_pages",
+    "max_seconds",
+    "dpi",
+    "max_side_px",
+)
+
+
+def _t2_settings(spec: Any) -> Any | None:
+    """The validated RapidOCR settings for the T2 spec, or ``None``.
+
+    Pure data construction (no model load). A registry that cannot produce
+    valid settings cannot run T2 either; the digest then carries ``None`` so
+    the key still changes if the registry is repaired into validity.
+    """
+    try:
+        from fmd.acquire.rapidocr_backend import RapidOCRSettings
+
+        return RapidOCRSettings.from_spec(spec, env={})
+    except Exception:
+        return None
+
+
+def t2_engine_fingerprint(acquire: Any) -> dict[str, Any] | None:
+    """The locally derivable identity of the configured T2 engine, or ``None``.
+
+    Returns ``{engine, engine_version, model_ids, model_source, model_sha256}``
+    for engines whose version and model ids can be pinned **without loading
+    the engine or contacting a service** (today: the in-process RapidOCR
+    runner). Returns ``None`` for HTTP engines (qwen3vl/paddleocr) or an
+    unusable registry — those T2 results are refused by :meth:`ParseCache.store_parse`
+    rather than cached under an unpinned identity. The device is deliberately
+    absent: it changes where the engine runs, never what it reads.
+    """
+    acquire = _acquire_of(acquire)
+    backends = (getattr(acquire, "backends", None) or {})
+    spec = backends.get("T2")
+    if spec is None:
+        return None
+    backend = str(getattr(spec, "backend", "") or "").strip().lower()
+    if backend != "rapidocr":
+        return None
+    settings = _t2_settings(spec)
+    if settings is None or not settings.rec_model_id or not settings.rec_keys_id:
+        return None
+    try:
+        import importlib.metadata as _metadata
+
+        engine_version = _metadata.version("rapidocr")
+    except Exception:
+        return None
+    if not engine_version:
+        return None
+    return {
+        "engine": "rapidocr",
+        "engine_version": engine_version,
+        "model_ids": {
+            "det": settings.det_model_id,
+            "rec": settings.rec_model_id,
+            "rec_keys": settings.rec_keys_id,
+        },
+        "model_source": settings.model_source,
+        "model_sha256": settings.model_sha256 or {},
+    }
 
 
 def _plain(value: Any) -> Any:
@@ -118,19 +239,30 @@ def _plain(value: Any) -> Any:
     return str(value)
 
 
-def parse_key(snapshot_sha256: str, tier: str, policy_digest: str) -> str:
-    """The cache key: sha256 over the canonical component tuple."""
-    canonical = json.dumps(
-        {
-            "snapshot_sha256": str(snapshot_sha256).lower(),
-            "tier": str(tier),
-            "policy_digest": str(policy_digest),
-            "schema_version": PARSE_SCHEMA_VERSION,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+def parse_key(
+    snapshot_sha256: str,
+    tier: str,
+    policy_digest: str,
+    engine_fingerprint: dict[str, Any] | None = None,
+) -> str:
+    """The cache key: sha256 over the canonical component tuple.
+
+    ``engine_fingerprint`` is ``None`` for T1 (layout unchanged by the T2
+    wave) and the locally derived engine identity for T2 — an engine-version
+    bump or a model-id change produces a different key, i.e. a miss and a
+    reconvert, never a stale reuse.
+    """
+    canonical: dict[str, Any] = {
+        "snapshot_sha256": str(snapshot_sha256).lower(),
+        "tier": str(tier),
+        "policy_digest": str(policy_digest),
+        "schema_version": PARSE_SCHEMA_VERSION,
+    }
+    if engine_fingerprint is not None:
+        canonical["engine_fingerprint"] = engine_fingerprint
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 # ------------------------------------------------------------------ serialise
@@ -395,7 +527,16 @@ class ParseCache:
 
     # ------------------------------------------------------------------ keying
     def key_for(self, snapshot_sha256: str, policy: Any) -> str:
-        return parse_key(snapshot_sha256, self.tier, parse_policy_digest(_acquire_of(policy)))
+        acquire = _acquire_of(policy)
+        fingerprint = (
+            t2_engine_fingerprint(acquire) if self.tier == "T2" else None
+        )
+        return parse_key(
+            snapshot_sha256,
+            self.tier,
+            parse_policy_digest(acquire, tier=self.tier),
+            engine_fingerprint=fingerprint,
+        )
 
     def pages_for(self, snapshot_sha256: str, policy: Any) -> int | None:
         """Known page count for batch sizing, without loading the payload."""
@@ -439,7 +580,7 @@ class ParseCache:
             return None, CacheMiss(key, MISS_SCHEMA_MISMATCH, "row schema_version differs")
         if str(getattr(row, "tier", "")) != self.tier:
             return None, CacheMiss(key, MISS_SCHEMA_MISMATCH, "row tier differs")
-        if str(getattr(row, "policy_digest", "")) != parse_policy_digest(acquire):
+        if str(getattr(row, "policy_digest", "")) != parse_policy_digest(acquire, tier=self.tier):
             return None, CacheMiss(key, MISS_SCHEMA_MISMATCH, "policy digest differs")
         try:
             payload = self.store.get(str(row.object_sha256))
@@ -470,9 +611,9 @@ class ParseCache:
         """Write one *complete* parse; returns provenance, never raises.
 
         Order: payload bytes → object store (atomic) → lookup row. Only a
-        complete, cacheable parse (T1, born-digital, no review flag, non-empty)
-        is accepted; anything else is reported with a reason and nothing is
-        written.
+        complete, cacheable parse (T1 born-digital, or T2 through a locally
+        pinned engine; no review flag; non-empty) is accepted; anything else is
+        reported with a reason and nothing is written.
         """
         acquire = _acquire_of(policy)
         try:
@@ -483,6 +624,10 @@ class ParseCache:
             return CacheMiss(key, MISS_NOT_PDF, f"tier {doc.tier!r} is not cacheable")
         if doc.ocr_anomaly or doc.needs_review or doc.is_empty:
             return CacheMiss(key, MISS_NOT_PDF, "incomplete or refused parse is never cached")
+        if self.tier == "T2":
+            refusal = _refuse_t2_store(doc, key, acquire)
+            if refusal is not None:
+                return refusal
         payload = serialize_parse(doc)
         try:
             object_sha = self.store.put(payload)
@@ -494,7 +639,7 @@ class ParseCache:
                     key_digest=key,
                     snapshot_sha256=str(snapshot_sha256).lower(),
                     tier=self.tier,
-                    policy_digest=parse_policy_digest(acquire),
+                    policy_digest=parse_policy_digest(acquire, tier=self.tier),
                     schema_version=PARSE_SCHEMA_VERSION,
                     object_sha256=object_sha,
                     pages=_page_count(doc),
@@ -514,6 +659,52 @@ class ParseCache:
             parser=str(doc.tool),
             parser_version=doc.tool_version,
         )
+
+
+def _refuse_t2_store(doc: ExtractedDoc, key: str, acquire: Any) -> CacheMiss | None:
+    """T2-specific store gate: the engine identity must be pinned and consistent.
+
+    Two refusals, both honest and stable:
+
+    * the configured engine has no locally derivable fingerprint (HTTP service
+      engines) — caching would alias a future model swap behind the same URL;
+    * the document's own engine provenance disagrees with the locally derived
+      fingerprint (env drift between the run and the config read) — the key was
+      computed from an identity the run did not actually use.
+    """
+    acquire = _default_policy()
+    fingerprint = t2_engine_fingerprint(acquire)
+    if fingerprint is None:
+        return CacheMiss(
+            key, MISS_ENGINE_UNPINNED, "engine version/model ids not locally derivable"
+        )
+    meta = doc.engine_meta or {}
+    engine = str(meta.get("engine") or doc.tool or "")
+    version = str(meta.get("engine_version") or doc.tool_version or "")
+    model_ids = meta.get("model_ids")
+    if engine != fingerprint["engine"] or version != fingerprint["engine_version"]:
+        return CacheMiss(
+            key,
+            MISS_ENGINE_MISMATCH,
+            "doc reports {doc_engine}@{doc_ver!r}, config pins {cfg}@{cfg_ver!r}".format(
+                doc_engine=engine,
+                doc_ver=version,
+                cfg=fingerprint["engine"],
+                cfg_ver=fingerprint["engine_version"],
+            ),
+        )
+    if not isinstance(model_ids, dict) or not model_ids:
+        return CacheMiss(key, MISS_ENGINE_MISMATCH, "document carries no model ids")
+    ids = fingerprint["model_ids"]
+    for role in ("det", "rec", "rec_keys"):
+        reported = model_ids.get(role)
+        if role in ids and str(reported or "") != str(ids.get(role)):
+            return CacheMiss(
+                key,
+                MISS_ENGINE_MISMATCH,
+                f"model id {role}: doc reports {reported!r}, config pins {ids.get(role)!r}",
+            )
+    return None
 
 
 def _acquire_of(policy: Any) -> Any:
@@ -545,6 +736,7 @@ def acquire_document(
     content_type: str | None = None,
     policy: Any = None,
     cache: ParseCache | None = None,
+    t2_cache: ParseCache | None = None,
     snapshot_sha256: str | None = None,
     t0: Any = None,
     t1: Any = None,
@@ -555,11 +747,14 @@ def acquire_document(
     """The cached seam around :func:`fmd.extract.pdf.extract_document`.
 
     Lookup before conversion: a verified hit reconstructs the parse and invokes
-    no tier function at all. A miss converts live via the ordinary tier
-    dispatch and stores the result when it is a complete T1 parse. With
-    ``allow_convert=False`` (``extract --from-cache`` / ``--no-acquire``) a
-    miss returns ``(None, miss)`` instead of converting — Docling is never
-    invoked on that path.
+    no tier function at all. The T1 cache is consulted first; with a
+    ``t2_cache`` configured, the T2 cache is consulted next — a stored T2 parse
+    implies these exact bytes are a scan that this engine+policy already read
+    completely, so the OCR run is skipped outright. A miss converts live via
+    the ordinary tier dispatch and stores the result in the cache matching the
+    resulting tier when it is complete. With ``allow_convert=False``
+    (``extract --from-cache`` / ``--no-acquire``) a miss returns
+    ``(None, miss)`` instead of converting — no converter, no OCR.
 
     Returns ``(doc, provenance)``; ``doc`` is ``None`` only for the
     cache-only miss case.
@@ -584,6 +779,11 @@ def acquire_document(
     if doc is not None:
         return doc, provenance
 
+    if t2_cache is not None:
+        doc, t2_provenance = t2_cache.lookup(snapshot_sha256, policy)
+        if doc is not None:
+            return doc, t2_provenance
+
     miss = provenance
     if not allow_convert:
         return None, CacheMiss(miss.key_digest, "missing_parse_cache", miss.reason)
@@ -592,11 +792,14 @@ def acquire_document(
     doc = extract_document(
         data, content_type=content_type, policy=policy, t0=t0, t1=t1, t2=t2, t2b=t2b
     )
+    tier_cache = t2_cache if (doc.tier == "T2" and t2_cache is not None) else cache
     if cacheable(doc):
-        stored = cache.store_parse(snapshot_sha256, doc, policy)
+        stored = tier_cache.store_parse(snapshot_sha256, doc, policy)
         miss.stored = isinstance(stored, CacheHit)
         miss.info["stored"] = miss.stored
         miss.info["pages"] = _page_count(doc)
+        if not miss.stored:
+            miss.info["store_refusal"] = getattr(stored, "reason", None)
     else:
         miss.info["pages"] = _page_count(doc)
         miss.info["stored"] = False
@@ -626,6 +829,8 @@ __all__ = [
     "CacheMiss",
     "MISS_CORRUPT",
     "MISS_DISABLED",
+    "MISS_ENGINE_MISMATCH",
+    "MISS_ENGINE_UNPINNED",
     "MISS_NO_ENTRY",
     "MISS_NOT_PDF",
     "MISS_OBJECT_MISSING",
@@ -640,4 +845,5 @@ __all__ = [
     "parse_policy_digest",
     "reconstruct_parse",
     "serialize_parse",
+    "t2_engine_fingerprint",
 ]
