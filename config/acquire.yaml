@@ -296,6 +296,11 @@ cache:
   # Versioned parse payload schema (fmd/acquire/parse_cache.py). Bumping this
   # invalidates every stored parse; the loader cross-checks it against
   # PARSE_SCHEMA_VERSION so the two cannot drift apart silently.
+  # Cached tiers: T1 (Docling, born-digital) and T2 (in-process RapidOCR only,
+  # keys additionally pinned to the engine fingerprint — engine version + model
+  # ids; device excluded). HTTP OCR engines (qwen3vl/paddleocr) are never
+  # cached: their version is not locally pinnable, so a service-side model swap
+  # could not be detected. See 11-inference-runbook.md, "T2 parse cache".
   schema_version: 1
 
 batch:

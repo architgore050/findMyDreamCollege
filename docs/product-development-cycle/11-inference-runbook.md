@@ -1182,6 +1182,20 @@ extraction re-converted every document. Two changes fix both halves:
   the key** — a CUDA parse is reusable by a CPU run and vice versa. A policy
   or schema bump invalidates; corrupt/truncated/mismatched entries reconvert
   with a recorded reason and never crash. Cache hit ⇒ zero Docling calls.
+* **T2 parse cache (2026-11-21, wave v1-w3)** — same store, same table,
+  tier-scoped. In-process OCR (RapidOCR/PP-OCR) results are cached under a key
+  that additionally pins an **engine fingerprint**: `{engine, engine_version,
+  model_ids(det/rec/rec_keys), model_source, model_sha256}`. An engine-version
+  bump or a model-id change invalidates (miss ⇒ reconvert ⇒ new row); the
+  **device is excluded** like every tier. The T2 policy digest covers the T2
+  block + the RapidOCR settings that shape output (raster, budgets,
+  confidence thresholds). **HTTP engines (qwen3vl/paddleocr) are NOT cached**:
+  their engine version is only knowable by asking a service, so a model swap
+  behind the same URL could not be detected — those results are refused with
+  `t2_engine_fingerprint_unavailable`, never cached under an unpinned
+  identity. A cached T2 parse implies these exact bytes are a scan the pinned
+  engine read completely under the current policy: `fmd acquire`/`extract`
+  skip the OCR run outright (T1 cache consulted first, T2 second).
 * **Batched orchestrator** (`fmd extract --batched`): per cycle — ensure
   server stopped → acquire one page-batch on CUDA (zero LLM calls) → ensure
   server started and `/health` ready (poll with timeout) → extract that batch

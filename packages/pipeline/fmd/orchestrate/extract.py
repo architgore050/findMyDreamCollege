@@ -97,6 +97,7 @@ class Extractor:
         predicates: Any | None = None,
         sections: SectionsRepo | Any | None = None,
         parse_cache: Any | None = None,
+        t2_parse_cache: Any | None = None,
         t0: Any = None,
         t1: Any | None = None,
         allow_convert: bool = True,
@@ -118,6 +119,8 @@ class Extractor:
         self.sections = sections
         #: Parse cache (W10). ``None`` keeps the fused inline-conversion path.
         self.parse_cache = parse_cache
+        #: T2 parse cache (wave v1-w3); threaded into the pipeline.
+        self.t2_parse_cache = t2_parse_cache
         #: Injected T0/T1 tier callables (test seams), passed to the pipeline.
         self.t0 = t0
         self.t1 = t1
@@ -144,6 +147,7 @@ class Extractor:
             tool_version=self.tool_version,
             sections=self.sections,
             parse_cache=self.parse_cache,
+            t2_parse_cache=self.t2_parse_cache,
             t0=self.t0,
             t1=self.t1,
             allow_convert=self.allow_convert,

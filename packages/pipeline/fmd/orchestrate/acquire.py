@@ -85,11 +85,13 @@ class AcquisitionStage:
         t0: Any = None,
         t1: Any = None,
         device: str | None = None,
+        t2_parse_cache: ParseCache | Any | None = None,
     ) -> None:
         self.snapshots = snapshots
         self.documents = documents
         self.store = store
         self.parse_cache = parse_cache
+        self.t2_parse_cache = t2_parse_cache
         self.policy = policy
         self.tool_version = tool_version
         self.t0 = t0
@@ -119,15 +121,7 @@ class AcquisitionStage:
             target, _reason = self._target(snapshot, document)
             if target is None:
                 continue
-            hit = False
-            pages: int | None = None
-            if self.parse_cache is not None:
-                try:
-                    hit = bool(self.parse_cache.has_parse(snapshot.sha256, self.policy))
-                    if hit:
-                        pages = self.parse_cache.pages_for(snapshot.sha256, self.policy)
-                except Exception as exc:  # a plan must not fail on cache trouble
-                    logger.warning("parse-cache peek failed for snapshot %s: %s", snapshot.id, exc)
+            hit, pages = self._cache_status(snapshot.sha256)
             items.append(
                 AcquisitionItem(
                     snapshot_id=snapshot.id,
@@ -140,6 +134,23 @@ class AcquisitionStage:
                 )
             )
         return items
+
+    def _cache_status(self, sha256: str) -> tuple[bool, int | None]:
+        """Cached-parse status across the tier caches (T1 first, then T2).
+
+        A T2 row means these exact bytes were read completely by the pinned
+        OCR engine under the current policy — the snapshot converts zero pages
+        in this stage, exactly like a T1 hit.
+        """
+        for cache in (self.parse_cache, self.t2_parse_cache):
+            if cache is None:
+                continue
+            try:
+                if cache.has_parse(sha256, self.policy):
+                    return True, cache.pages_for(sha256, self.policy)
+            except Exception as exc:  # a plan must not fail on cache trouble
+                logger.warning("parse-cache peek failed for snapshot %s: %s", sha256, exc)
+        return False, None
 
     # ------------------------------------------------------------------ execution
     def run(
@@ -217,26 +228,35 @@ class AcquisitionStage:
         """Convert (or cache-hit) one snapshot; append exactly one outcome row."""
         if item.cache_hit:
             # Lookup happens before conversion; a verified hit reconstructs
-            # the parse and invokes no converter at all.
-            doc, provenance = self.parse_cache.lookup(item.sha256, self.policy)
-            if doc is None:
-                # The row said hit but the payload failed verification
-                # (corrupt/truncated/moved): reconvert, record the reason.
-                info = provenance.as_dict()
-                summary.bump("converted")
-                summary.bump("cache_misses")
-                return self._convert(item, summary, force_reason=info.get("reason"))
-            hit_info = provenance.as_dict()
-            summary.bump("cache_hits")
-            summary.outcomes.append(
-                {
-                    **item.as_dict(),
-                    "outcome": "cache_hit",
-                    "pages": hit_info.get("pages"),
-                    "key_digest": hit_info.get("key_digest"),
-                }
+            # the parse and invokes no converter at all. T1 is consulted
+            # first, then T2 (the plan reported a hit in either cache).
+            first_miss: dict[str, Any] | None = None
+            for cache in (self.parse_cache, self.t2_parse_cache):
+                if cache is None:
+                    continue
+                doc, provenance = cache.lookup(item.sha256, self.policy)
+                if doc is not None:
+                    hit_info = provenance.as_dict()
+                    summary.bump("cache_hits")
+                    summary.outcomes.append(
+                        {
+                            **item.as_dict(),
+                            "outcome": "cache_hit",
+                            "pages": hit_info.get("pages"),
+                            "key_digest": hit_info.get("key_digest"),
+                            "tier": cache.tier,
+                        }
+                    )
+                    return {"pages": hit_info.get("pages") or 0}
+                if first_miss is None:
+                    first_miss = provenance.as_dict()
+            # The rows said hit but the payloads failed verification
+            # (corrupt/truncated/moved): reconvert, record the reason.
+            summary.bump("converted")
+            summary.bump("cache_misses")
+            return self._convert(
+                item, summary, force_reason=(first_miss or {}).get("reason")
             )
-            return {"pages": hit_info.get("pages") or 0}
         return self._convert(item, summary)
 
     def _convert(
@@ -268,6 +288,7 @@ class AcquisitionStage:
                 content_type=item.content_type,
                 policy=self.policy,
                 cache=self.parse_cache,
+                t2_cache=self.t2_parse_cache,
                 snapshot_sha256=item.sha256,
                 t0=self.t0,
                 t1=self.t1,
