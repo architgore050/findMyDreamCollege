@@ -141,6 +141,7 @@ class ExtractPipeline:
         adjudicator: VLMAdjudicator | None = None,
         sections: SectionsRepo | Any | None = None,
         parse_cache: Any | None = None,
+        t2_parse_cache: Any | None = None,
         t0: Any = None,
         t1: Any = None,
         t2: Any = None,
@@ -155,6 +156,9 @@ class ExtractPipeline:
         #: Parse cache (W10). ``None`` keeps the legacy fused behaviour: every
         #: run converts inline and nothing is cached.
         self.parse_cache = parse_cache
+        #: T2 parse cache (wave v1-w3): consumed after the T1 lookup so a
+        #: stored OCR parse skips the OCR run; live T2 results store here.
+        self.t2_parse_cache = t2_parse_cache
         #: Injected tier callables (test seams, passed straight through to the
         #: tier dispatcher).
         self.t0 = t0
@@ -201,6 +205,7 @@ class ExtractPipeline:
             content_type=snapshot.content_type,
             policy=self.policy,
             cache=self.parse_cache,
+            t2_cache=self.t2_parse_cache,
             snapshot_sha256=snapshot.sha256,
             t0=self.t0,
             t1=self.t1,

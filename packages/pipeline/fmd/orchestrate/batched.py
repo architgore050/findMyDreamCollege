@@ -314,6 +314,12 @@ class BatchedRunner:
             return getter()
         return None
 
+    def _t2_parse_cache(self) -> Any | None:
+        getter = getattr(self.orchestrator, "_t2_parse_cache", None)
+        if getter is not None:
+            return getter()
+        return None
+
     def _extractor(self, *, allow_convert: bool) -> Extractor:
         orchestrator = self.orchestrator
         return Extractor(
@@ -328,6 +334,7 @@ class BatchedRunner:
             predicates=getattr(orchestrator.registry, "predicates", None),
             sections=orchestrator.sections,
             parse_cache=self._parse_cache(),
+            t2_parse_cache=self._t2_parse_cache(),
             t0=self.t0,
             t1=self.t1,
             allow_convert=allow_convert,
@@ -343,6 +350,7 @@ class BatchedRunner:
             documents=orchestrator.documents,
             store=orchestrator.store if orchestrator.store is not None else orchestrator._store(),
             parse_cache=self._parse_cache(),
+            t2_parse_cache=self._t2_parse_cache(),
             policy=policy,
             tool_version=self.tool_version,
             device=self.device,

@@ -80,6 +80,7 @@ class Orchestrator:
         planner: Any | None = None,
         sections: Any | None = None,
         parse_cache: Any | None = None,
+        t2_parse_cache: Any | None = None,
         t0: Any | None = None,
         t1: Any | None = None,
     ) -> None:
@@ -91,6 +92,7 @@ class Orchestrator:
         self.tool_version = tool_version
         self.max_source_failures = max_source_failures
         self._parse_cache_instance = parse_cache
+        self._t2_parse_cache_instance = t2_parse_cache
         # Injected tier callables (test seams), handed to the extract stage.
         self.t0 = t0
         self.t1 = t1
@@ -179,6 +181,26 @@ class Orchestrator:
             DocumentParsesRepo(self.database), self._store()
         )
         return self._parse_cache_instance
+
+    def _t2_parse_cache(self) -> Any | None:
+        """The persistent T2 (in-process OCR) parse cache, or ``None``.
+
+        Same store, same table, tier-scoped keys (engine fingerprint inside).
+        ``None`` without a database or without a default constructor path —
+        an injected T2 cache wins; otherwise T2 caching follows the same
+        availability rule as T1.
+        """
+        if self._t2_parse_cache_instance is not None:
+            return self._t2_parse_cache_instance
+        if self.database is None:
+            return None
+        from fmd.acquire.parse_cache import ParseCache
+        from fmd.db.repositories import DocumentParsesRepo
+
+        self._t2_parse_cache_instance = ParseCache(
+            DocumentParsesRepo(self.database), self._store(), tier="T2"
+        )
+        return self._t2_parse_cache_instance
 
     def _default_ledger(self) -> RunLedger:
         # With Postgres available the run ledger is the ``pipeline_runs`` table;
@@ -379,6 +401,7 @@ class Orchestrator:
                 documents=self.documents,
                 store=self._store(),
                 parse_cache=parse_cache,
+                t2_parse_cache=self._t2_parse_cache(),
                 tool_version=self.tool_version,
             )
             items = stage.plan(limit=limit)
@@ -422,6 +445,7 @@ class Orchestrator:
             predicates=self.registry.predicates,
             sections=self.sections,
             parse_cache=parse_cache,
+            t2_parse_cache=self._t2_parse_cache(),
             t0=self.t0,
             t1=self.t1,
             allow_convert=allow_convert,
@@ -467,6 +491,7 @@ class Orchestrator:
             documents=self.documents,
             store=self._store(),
             parse_cache=self._parse_cache(),
+            t2_parse_cache=self._t2_parse_cache(),
             policy=AcquirePolicy.load(acquire=self.registry.acquire),
             tool_version=self.tool_version,
             device=device,
