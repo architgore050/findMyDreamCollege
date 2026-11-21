@@ -332,7 +332,6 @@ def test_empty_tier_output_raises_before_any_claim_is_published(
     tmp_path: Path, registry, monkeypatch
 ) -> None:
     """An empty OCR/scan result aborts the snapshot: no extraction, no claims."""
-    import fmd.extract.pipeline as pipeline_module
     from fmd.acquire.errors import TierUnavailable
     from fmd.acquire.types import ExtractedDoc
 
@@ -344,7 +343,12 @@ def test_empty_tier_output_raises_before_any_claim_is_published(
         tool="rapidocr",
         notes=("models_missing: rec not found",),
     )
-    monkeypatch.setattr(pipeline_module, "extract_document", lambda *a, **k: empty)
+    # W10: the conversion seam now lives behind the parse cache
+    # (fmd.acquire.parse_cache.acquire_document), which dispatches through
+    # fmd.extract.pdf.extract_document — patch that seam.
+    monkeypatch.setattr(
+        "fmd.extract.pdf.extract_document", lambda *a, **k: empty
+    )
     text = "ignored"
     store = SnapshotStore(tmp_path)
     digest = store.put(text.encode("utf-8"))

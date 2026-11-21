@@ -391,6 +391,7 @@ def test_requalify_uncertain_rows_stay_out_and_queued(registry) -> None:
     scoper = build_scoper(registry)  # no router: semantic unavailable
     result = requalify_programmes(repo, FakeEntities(), ProgrammeMapping.from_params(None), scoper)
     assert result.uncertain == 1
+    assert result.would_classify == 1 and result.would_defer == 1
     [row] = repo.list_all()
     assert row.in_scope is False
     assert row.needs_review is True

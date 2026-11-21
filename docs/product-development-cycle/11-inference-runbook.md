@@ -1098,6 +1098,31 @@ is now `acquisition_failed:docling_cuda_oom`: the document is marked
 `needs_review`, the run summary is `ok:false`, and the CLI exits non-zero. It
 never reports a clean run with zero claims.
 
+**Measured 2026-11-20 (RTX 5080 Laptop 16303 MiB, 30 GB RAM; four documents,
+7–434 pages).** The "cannot fit" claim above is now quantified:
+
+| LLM config | VRAM used/free | decode tok/s (short / after 8.8k) | Docling CPU s/page | Docling CUDA s/page |
+|---|---|---|---|---|
+| 64k q8_0 KV on GPU (production) | 15052 / 1251 MiB | 130.8 / 106.8 | 1.0–3.8 | **OOM** (needs ~1.0–1.3 GiB; 589 MiB free after context) |
+| 64k `--no-kv-offload` (KV in RAM) | 14130 / 2173 MiB | 66.2 / **18.0** | unchanged | 0.16–0.87 |
+| 32k q8_0 KV on GPU | 14584 / 1719 MiB | 125.7 / 105.0 | unchanged | not safe (~1.06 GiB headroom) |
+| 64k q4_0 KV on GPU | 14582 / 1721 MiB | 126.1 / 109.7 | unchanged | not safe; 4-bit KV quality unvalidated |
+
+- `--no-kv-offload` frees only **~0.9 GiB** (the KV itself), which is exactly
+  Docling's requirement; the pair fits with 23 MiB to spare. The price is
+  **−49% decode short, −83% after an 8.8k prompt** (18 tok/s), and −91% when
+  Docling is concurrently on CUDA. Not a default.
+- **CPU Docling is nearly free from the LLM's point of view**: 64k KV on GPU +
+  Docling on CPU ran concurrently at 47.3 pages/min with LLM decode −6%. Host
+  RSS is **2.2 GiB (small docs) / 4.1 GiB (161 p) / 5.2 GiB (434 p)**.
+- Docling on CUDA is **2–6× faster per page** (0.16 vs 1.31 s/page on a 161-page
+  report). The only way to have it is to **stop `llama-server` for the
+  acquisition batch**, then restart for extraction — or accept the KV-offload
+  decode penalty. There is no dynamic "load KV when needed" in llama.cpp; KV is
+  resident for the server's lifetime.
+- 32k or q4_0 KV do not free enough for CUDA Docling either (~1.0–1.1 GiB), so
+  shortening the context buys nothing for coexistence.
+
 ```bash
 # 0) once per boot: host text model (weights already on host; no download)
 scripts/serve_local.sh start
@@ -1145,7 +1170,64 @@ run: hand them the command, do not add a wait loop. `scripts/serve_ocr.sh
 vision-start` is only needed for scanned pages and needs the optional 10.6 GB
 vision fetch first (§3.2); without it T2 degrades to the human queue and that is
 the honest state.
+### 6.1 Batched acquire (W10, 2026-11-21) — stop → acquire on CUDA → extract
 
+The fused loop idled the GPU during every conversion: Docling ran on CPU
+(1.0–3.8 s/page) while the 26B held its 64k KV cache, and re-running
+extraction re-converted every document. Two changes fix both halves:
+
+* **Persistent T1 parse cache** (`document_parses`, migration 0011 + the
+  content-addressed object store). Key = (snapshot sha256, tier=`T1`,
+  policy digest, payload schema version). **The Docling device is not part of
+  the key** — a CUDA parse is reusable by a CPU run and vice versa. A policy
+  or schema bump invalidates; corrupt/truncated/mismatched entries reconvert
+  with a recorded reason and never crash. Cache hit ⇒ zero Docling calls.
+* **Batched orchestrator** (`fmd extract --batched`): per cycle — ensure
+  server stopped → acquire one page-batch on CUDA (zero LLM calls) → ensure
+  server started and `/health` ready (poll with timeout) → extract that batch
+  from cache → repeat. Sizing is **by pages, evaluated only at document
+  boundaries** (`batch.pages`, default 100): the document that crosses the
+  limit always finishes in full in the same cycle and no further document
+  starts; a known-size document that would cross is deferred whole; a 434-page
+  document runs alone. No document is ever truncated, dropped, or split across
+  cycles, and nothing is cached or extracted while incomplete.
+
+Measured constants behind the defaults (operator host, 2026-11-20): CUDA
+conversion 0.166–0.9 s/page vs CPU 1.0–3.8 s/page; ~20–25 s per server
+restart (`scripts/serve_local.sh` stop + start + `/health`); **break-even
+~20–25 pages/cycle** — below that the restart costs more than the CUDA
+speedup saves, above it batching wins. The 100-page default leaves ~4–5×
+margin. A ~1,000-page backlog therefore plans to ~10–12 cycles (~10 cycles at
+100 pages/cycle, more if large documents straddle boundaries).
+
+```bash
+# the batched pass (operator, GPU host): parse cache + page-batched cycles
+scripts/batch_extract.sh --dry-run --limit 20            # plan only, writes nothing
+scripts/batch_extract.sh --limit 20                      # real run; server stopped at the end
+scripts/batch_extract.sh --limit 20 --keep-server        # leave the server running
+scripts/batch_extract.sh --limit 20 --device cpu         # CPU acquisition instead of CUDA
+
+# split by hand when you want to control the GPU window yourself:
+python -m fmd.cli acquire --device cuda --pages 300      # convert + cache, zero LLM calls
+scripts/serve_local.sh start
+python -m fmd.cli extract --from-cache --limit 50        # zero Docling on this path
+scripts/serve_local.sh stop
+
+# Degraded mode: FMD_SERVER_CONTROL=off (or no server_script) falls back to
+# CPU acquisition + inline extraction and records server_control=degraded in
+# the summary — the run still happens, honestly labelled.
+FMD_SERVER_CONTROL=off python -m fmd.cli extract --batched --limit 20
+```
+
+Exit codes: the run is non-zero only when nothing was extractable (or an
+acquisition/device failure was recorded). Every exit path stops the model
+server (try/finally) unless `--keep-server`; Ctrl-C between cycles loses only
+in-flight work — persisted parses and claims stay, and the next run resumes
+(skips documents with a cached parse and a completed extraction). Known gaps:
+T2/OCR output is not cached (acquisition of scans re-runs OCR every time); a
+Docling library upgrade is recorded in the payload but does not invalidate
+stored parses; the GPU path is validated only through fakes in CI — the
+operator runs the real pass.
 ## 7. Offline mode (no outbound network)
 
 Set three variables in the shell (or `.env`); `.env.example` carries the same
@@ -3178,3 +3260,14 @@ into row 1, MBBS and Agriculture flip to `in_scope=false` with
 before the merge) while the ranked set holds only laboratory-technology rows.
 Names no rule decides and no evidence backs stay `uncertain` →
 `needs_review` — that is the designed conservative outcome, not a failure.
+
+`--dry-run` is offline by contract: it never constructs the model router, so
+it succeeds with `FMD_LOCAL_LLM_URL` pointing at a dead port. Rules and manual
+decisions still decide as usual; names that would reach Tier 2 are reported as
+`would_classify` (and counted in `would_defer`, since no decision is written)
+alongside `would_admit`, `would_reject` and `would_defer`. Every real semantic
+decision persists its provenance — the configured profile's model id
+(`scope_model`, the reproducible string; the provider-resolved id is not
+exposed by the router yet — known gap) alongside the prompt
+version (`v1`) and definition version in the cache key, and `scope_cached`
+(false for a fresh call, true for a cache hit or manual replay).

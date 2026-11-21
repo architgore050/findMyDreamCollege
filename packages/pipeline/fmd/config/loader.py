@@ -475,6 +475,45 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
     if acquire.bbox.page_epsilon < 0:
         errors.append("acquire.yaml: bbox.page_epsilon must be >= 0")
 
+    # ------------------------------------------------------- batched acquire (W10)
+    batch = acquire.batch
+    if batch is not None:
+        if batch.pages <= 0:
+            errors.append(
+                f"acquire.yaml: batch.pages must be > 0 (zero/negative page limits are "
+                f"rejected), got {batch.pages}"
+            )
+        if batch.device not in ("cpu", "auto", "cuda"):
+            errors.append(
+                f"acquire.yaml: batch.device {batch.device!r} is outside the known set "
+                "(cpu, auto, cuda)"
+            )
+        if batch.poll_timeout_s <= 0:
+            errors.append(
+                f"acquire.yaml: batch.poll_timeout_s must be > 0, got {batch.poll_timeout_s}"
+            )
+        if batch.server_script is not None and not str(batch.server_script).strip():
+            errors.append(
+                "acquire.yaml: batch.server_script must be a path or unset (null); "
+                "an empty string would silently disable server control"
+            )
+    cache_block = acquire.cache
+    if cache_block is not None:
+        if cache_block.schema_version <= 0:
+            errors.append(
+                f"acquire.yaml: cache.schema_version must be > 0, got {cache_block.schema_version}"
+            )
+        else:
+            from fmd.acquire.parse_cache import PARSE_SCHEMA_VERSION
+
+            if cache_block.schema_version != PARSE_SCHEMA_VERSION:
+                errors.append(
+                    f"acquire.yaml: cache.schema_version {cache_block.schema_version} must "
+                    f"equal fmd.acquire.parse_cache.PARSE_SCHEMA_VERSION "
+                    f"({PARSE_SCHEMA_VERSION}); bump both together or every stored parse "
+                    "is invalidated on one side only"
+                )
+
     # ---------------------------------------------------------------- planning
     plan = registry.plan
     if not plan.version.strip():
