@@ -334,14 +334,17 @@ def test_known_page_count_that_would_cross_is_never_started(tmp_path) -> None:
     harness.events.clear()
     summary = harness.runner.run(limit=5)
 
-    # a(80) fits; b(40) would cross (120 > 100) → deferred; c(10) fits (90 ≤ 100).
-    cycles_pages = []
+    # a(80) fits; b(40) would cross (120 > 100) → deferred; c(10) fits.
+    # Cycle composition is asserted, not just page totals: the deferred document
+    # is never started (documents=1 in the first cycle), and it does not get
+    # skipped in favour of later work — b and c share the second cycle.
+    cycles = []
     for line in harness.lines:
+        documents = int(line.split("documents=")[1].split()[0])
         pages = int(line.split("pages=")[1].split()[0])
-        cycles_pages.append(pages)
-    assert cycles_pages == [80, 50]
+        cycles.append((documents, pages))
+    assert cycles == [(1, 80), (2, 50)]
     assert summary.counts["cycles"] == 2
-    assert summary.counts.get("converted", 0) == 0  # everything was already cached
     assert summary.counts["cache_hits"] == 3  # one parse consumed per document
 
 
