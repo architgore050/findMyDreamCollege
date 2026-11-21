@@ -32,8 +32,31 @@ risks).
 ## Done
 
 - (bootstrap) docs/v1 state files created and committed.
-- **Wave 1 (PLAN #1) — compose network wiring + acceptance compose smoke (branch
-  `v1/w1-compose-wiring`).**
+- **Wave 2 (PLAN #2) — acceptance harness offline-complete + JSON manifest
+  (branch `v1/w2-acceptance-complete`).**
+  - `scripts/acceptance.sh` now carries a canonical `EXPECTED_CHECKS` manifest
+    (32 ids ≥ the doc-16 rows) and a safety net before the verdict: any manifest
+    id that reached no verdict gets an explicit SKIP naming the harness bug.
+    Dependency branches record honest SKIPs for everything they gate
+    (pnpm-absent ⇒ web/lint,build,test,server + 7 renders; live web with empty
+    DB ⇒ `web/render /programmes/<id>` SKIP).
+  - `--json-out` report (format `fmd-acceptance-v1`) now carries `verdict` and
+    `manifest {expected, recorded, missing, complete}` for CI.
+  - Pins: `packages/pipeline/tests/test_acceptance_manifest.py` (6 tests:
+    manifest == canonical inventory, record-site coverage incl. variable sites,
+    safety-net iteration, JSON fields, writer parses).
+  - **The safety net proved itself in its first run**: it caught `web/pnpm`
+    never being recorded when pnpm *is* present — fixed by recording PASS in
+    that branch.
+  - Functional proof: full offline run → **24 passed / 0 failed / 8 skipped,
+    manifest complete=true (expected 32, missing [])**.
+  - Gates: ruff ✓ · pytest offline 1372 ✓ · DB-gated 1452 ✓ · eval
+    provenance 1.0 ✓ · web lint/test/build ✓ (exercised in the run).
+  - Granular commits pushed to `v1/w2-acceptance-complete` as work progressed
+    (319ff62 script, 8a6a7d3 pins, eafbd5d web/pnpm fix) — per operator
+    protocol of 2026-11-21: everything is on GitHub before any summary.
+- **Wave 1 (PLAN #1) — compose network wiring + acceptance compose smoke
+  (PR #1, merged 2026-11-21).**
   - Root cause of the observed `Temporary failure in name resolution` loop:
     compose DNS resolves service names only among containers attached to the
     *same* network; the project-default network name varies with the compose

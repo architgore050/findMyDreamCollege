@@ -23,6 +23,31 @@ invariant findings live here so the next agent does not re-derive them.
   `export PATH=~/.local/bin:$PATH` (corepack shim). Postgres data:
   `/home/z/my-project/.tools/pgdata`.
 
+## Wave 2 — acceptance harness completeness (2026-11-21)
+
+- **Decision: a canonical `EXPECTED_CHECKS` id manifest + a safety net**, not
+  per-branch record-site audits alone. The doc-16 "18 checks" are rows that
+  expand to 32 check ids (`compose/smoke`, 5 preflight, 11 api, 5 web gates,
+  7 renders, 3 privacy); the manifest is the finer-grained truth and the doc
+  rows stay the human grouping. The net (records SKIP for any id that reached
+  no verdict) is the invariant-carrying layer; the pins
+  (`test_acceptance_manifest.py`) freeze the manifest and the record-site
+  coverage, including the two variable sites (`api/$label`, `web/render $route`).
+- **The net caught a real bug on its first full run**: `web/pnpm` was only
+  recorded on its SKIP branch; with pnpm present the id never reached the
+  verdict table. This is exactly the failure mode the brief bans ("no check
+  silently omitted") and it had survived every previous green run. Keep the net.
+- JSON contract for CI (`--json-out`, format `fmd-acceptance-v1`): `totals`,
+  `verdict` (`PASS`/`FAIL` — FAIL iff any check FAILED; SKIP never fails),
+  `manifest.complete` must be true for a trustworthy run, per-check
+  `name`/`result`/`detail`. A check may appear more than once (contract probes
+  after a PASS add rows); `manifest.recorded` is name-deduplicated.
+- `web/pnpm-install` is an auxiliary setup step (records only failures) and is
+  intentionally outside the manifest; the pins whitelist it.
+- Known limitation (recorded, not fixed): `http_code` returns "" (not "000")
+  when curl itself is missing — pre-existing helper-wide pattern; out of
+  wave-2 scope (keep diffs scoped per wave).
+
 ## Wave 1 — compose wiring (2026-11-21)
 
 - **Decision: declared network with fixed physical name `fmd-net`.** Rejected
