@@ -52,9 +52,16 @@ risks).
     manifest complete=true (expected 32, missing [])**.
   - Gates: ruff ✓ · pytest offline 1372 ✓ · DB-gated 1452 ✓ · eval
     provenance 1.0 ✓ · web lint/test/build ✓ (exercised in the run).
+  - **Verifier verdict: approve** (independent subagent; full path trace of all
+    32 ids, no invariant violation, no verdict-flip path). Fixed from its one
+    actionable finding: the live render loop mirrors the concrete programme
+    route's verdict onto the manifest placeholder `web/render /programmes/<id>`
+    so a healthy populated run no longer draws a false "check never ran" net row
+    (its simulated populated run had shown exactly that false alarm).
   - Granular commits pushed to `v1/w2-acceptance-complete` as work progressed
-    (319ff62 script, 8a6a7d3 pins, eafbd5d web/pnpm fix) — per operator
-    protocol of 2026-11-21: everything is on GitHub before any summary.
+    (319ff62 script, 8a6a7d3 pins, eafbd5d web/pnpm fix, mirror fix + docs) —
+    per operator protocol of 2026-11-21: everything is on GitHub before any
+    summary.
 - **Wave 1 (PLAN #1) — compose network wiring + acceptance compose smoke
   (PR #1, merged 2026-11-21).**
   - Root cause of the observed `Temporary failure in name resolution` loop:

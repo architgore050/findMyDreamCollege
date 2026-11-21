@@ -623,16 +623,23 @@ else
       [ -z "$slug" ] && slug="root"
       page="$WORK_DIR/page-${slug}.html"
       status="$(fetch_to "$WEB_BASE_URL$route" "$page")"
+      result="PASS"; detail="200, no raw NaN/undefined, no bare composite decimal"
       if [ "$status" != "200" ]; then
-        record "web/render $route" "FAIL" "HTTP $status (expected 200)"
-        continue
+        result="FAIL"; detail="HTTP $status (expected 200)"
+      elif ! run_check html "$page" >"$WORK_DIR/html-${slug}.txt" 2>&1; then
+        result="FAIL"; detail="artifact in rendered HTML: $(head -3 "$WORK_DIR/html-${slug}.txt" | tr '\n' ' ')"
       fi
-      if ! run_check html "$page" >"$WORK_DIR/html-${slug}.txt" 2>&1; then
-        record "web/render $route" "FAIL" \
-          "artifact in rendered HTML: $(head -3 "$WORK_DIR/html-${slug}.txt" | tr '\n' ' ')"
-        continue
-      fi
-      record "web/render $route" "PASS" "200, no raw NaN/undefined, no bare composite decimal"
+      record "web/render $route" "$result" "$detail"
+      case "$route" in
+        /programmes/*)
+          # The manifest carries the placeholder id; mirror the concrete
+          # route's verdict onto it so a healthy populated run is not
+          # flagged by the safety net as "check never ran".
+          if [ "$route" != "/programmes/<id>" ]; then
+            record "web/render /programmes/<id>" "$result" "mirrored from web/render $route: $detail"
+          fi
+          ;;
+      esac
     done
   else
     for route in "/" "/shortlist" "/programmes/<id>" "/compare" "/exams" "/exclusions" "/sources"; do
