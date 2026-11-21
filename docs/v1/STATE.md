@@ -32,6 +32,34 @@ risks).
 ## Done
 
 - (bootstrap) docs/v1 state files created and committed.
+- **Wave 3 (PLAN #3) — T2 parse cache, engine-pinned keys (branch
+  `v1/w3-t2-parse-cache`). Foundation: the never-merged W10 branch
+  ("persistent T1 parse cache + batched page-window acquire") was verified
+  (approve) and merged as PR #3 first — items 3–4 presuppose it.**
+  - Key: T2 rows carry an `engine_fingerprint` {engine, engine_version,
+    model_ids(det/rec/rec_keys), model_source, model_sha256} inside the key;
+    an engine-version bump or model-id change invalidates. Device excluded for
+    every tier. T1 key layout byte-identical to W10 (fingerprint=None).
+  - Scope decision (recorded in HANDOVER): only engines whose version+model
+    ids are locally pinnable without a service (rapidocr via importlib
+    metadata) are cached; qwen3vl/paddleocr T2 results are refused with a
+    stable reason rather than cached under an aliasable identity.
+  - The T2 policy digest projects the T2 block + RapidOCRSettings parse-shaping
+    fields; store gate refuses docs whose own engine_meta disagrees with the
+    locally derived fingerprint (env drift). Atomicity/completeness inherit
+    from the W10 scheme (object first, row second; complete documents only).
+  - Wiring: AcquisitionStage/Extractor/ExtractPipeline/BatchedRunner/
+    Orchestrator thread `t2_parse_cache`; acquire+extract consult T1 then T2;
+    live T2 results store into the T2 cache; batched sizing unchanged.
+  - Tests: 11 new T2 tests (invalidation on engine bump + model swap, device
+    exclusion, live-vs-cached claim equality, roundtrip identity, refusals,
+    zero-tier-call hits) + a gate fix the tests caught (store gate must use
+    the run's policy, not a reloaded default registry). All 13 T1 cache tests
+    and 41 W10 tests untouched and green.
+  - Gates: ruff ✓ · pytest offline 1432 ✓ · DB-gated 1521 ✓ · eval
+    provenance 1.0 ✓. Web untouched this wave.
+  - Residual: real-engine cache behaviour on the operator host (rapidocr
+    models present, scanned corpus) = LQ-5.
 - **Wave 2 (PLAN #2) — acceptance harness offline-complete + JSON manifest
   (branch `v1/w2-acceptance-complete`).**
   - `scripts/acceptance.sh` now carries a canonical `EXPECTED_CHECKS` manifest
