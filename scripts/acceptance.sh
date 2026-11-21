@@ -14,6 +14,9 @@
 #
 # Sections (each check prints PASS / FAIL / SKIP; the table at the end is the
 # verdict; exit is non-zero iff at least one check FAILED):
+#   0. Compose smoke      infra/docker-compose.yml parses, and when the stack
+#                         is up: api reaches the db over the declared network,
+#                         web answers on its published port
 #   1. Preflight          DB reachable, migrations applied, registry seeded,
 #                         model reachable (fmd llm doctor --live), serve_local probe
 #   2. API contract sweep GET health/sources/programmes/programmes/{id},
@@ -193,6 +196,67 @@ except Exception:
     pass
 PYEOF
 }
+
+# =================================================================== 0. COMPOSE SMOKE
+#
+# Why this exists (2026-11-21): the api container was observed looping
+# "Temporary failure in name resolution" while the db ran under a different
+# compose project — compose DNS only resolves among containers attached to the
+# same network, and the project-default network name varies with the project.
+# infra/docker-compose.yml now attaches every service to one declared network
+# with the fixed physical name `fmd-net`; this check proves that wiring live
+# when docker is present and the stack is up, and SKIPs honestly when it is not.
+# The static invariants (every service attaches fmd-net, DATABASE_URL names the
+# db service, etc.) are pinned offline by packages/pipeline/tests/test_compose_wiring.py.
+
+note "section 0: compose smoke"
+
+COMPOSE_FILE="$REPO_ROOT/infra/docker-compose.yml"
+COMPOSE="docker compose -f $COMPOSE_FILE"
+COMPOSE_WEB_PORT="${COMPOSE_WEB_PORT:-3000}"
+if ! command -v docker >/dev/null 2>&1; then
+  record "compose/smoke" "SKIP" \
+    "docker not installed — compose wiring is pinned offline by tests/test_compose_wiring.py; boot the stack yourself (make up) for the live probe"
+elif ! docker info >/dev/null 2>&1; then
+  record "compose/smoke" "SKIP" "docker daemon unreachable (is docker running?)"
+elif ! $COMPOSE config --quiet >/dev/null 2>&1; then
+  record "compose/smoke" "FAIL" \
+    "docker compose config rejected infra/docker-compose.yml — run: docker compose -f infra/docker-compose.yml config"
+else
+  running="$($COMPOSE ps --format '{{.Service}}' --status running 2>/dev/null | sort | tr '\n' ' ')"
+  case "$running" in
+    *db*api*|*api*db*)
+      if $COMPOSE exec -T api python -c "import os, psycopg
+with psycopg.connect(os.environ['DATABASE_URL'], connect_timeout=3) as c:
+    assert c.execute('SELECT 1').fetchone() == (1,)
+" >/dev/null 2>&1; then
+        if echo "$running" | grep -q web; then
+          if [ "$(http_code "http://127.0.0.1:$COMPOSE_WEB_PORT/")" != "000" ]; then
+            record "compose/smoke" "PASS" \
+              "compose config valid; api container connects to db over the declared network; web answers on :$COMPOSE_WEB_PORT (LIVE)"
+          else
+            record "compose/smoke" "FAIL" \
+              "web service is running but its published port :$COMPOSE_WEB_PORT answers nothing — check the web container and NEXT_PUBLIC_API_URL"
+          fi
+        else
+          record "compose/smoke" "PASS" \
+            "compose config valid; api container connects to db over the declared network (web not running yet: ${running})"
+        fi
+      else
+        record "compose/smoke" "FAIL" \
+          "api container cannot reach db at DATABASE_URL — service DNS/network split is back; verify all services attach networks: [fmd-net]"
+      fi
+      ;;
+    *db*|*api*)
+      record "compose/smoke" "SKIP" \
+        "partial stack running (docker compose ps: ${running}) — the wiring probe needs db AND api up; boot the full stack with make up"
+      ;;
+    *)
+      record "compose/smoke" "SKIP" \
+        "compose file valid; stack not running (docker compose ps: ${running:-nothing}) — boot it with make up for the live wiring probe"
+      ;;
+  esac
+fi
 
 # =================================================================== 1. PREFLIGHT
 

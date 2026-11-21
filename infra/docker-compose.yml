@@ -14,10 +14,29 @@ name: findmydreamcollege
 # every container that calls the host vLLM (port 8000/8001) therefore carries
 # `extra_hosts: ["host.docker.internal:host-gateway"]`. The URL itself has one
 # name: FMD_LOCAL_LLM_URL (router) / FMD_OCR_VLLM_URL (OCR adapter).
+#
+# Network wiring (wave v1-w1, 2026-11-21): every service attaches to one
+# declared network whose *physical* name is fixed to `fmd-net`, independent of
+# the compose project name. Compose DNS resolves service names only among
+# containers attached to the same network, so a service started under a
+# different project (a stray `-p`, an older checkout, `docker compose up db`
+# from a second clone) used to leave `api` looping
+# "Temporary failure in name resolution" for `db`. A fixed-name declared
+# network converges all invocations of this file onto one segment; the
+# service-name aliases (`db`, `api`, `web`) follow the containers, so any
+# `docker compose -f infra/docker-compose.yml ...` invocation finds the same db.
+# `scripts/acceptance.sh` (`compose/smoke`) and
+# `packages/pipeline/tests/test_compose_wiring.py` pin this wiring.
+
+networks:
+  fmd-net:
+    name: fmd-net # fixed physical name; survives split/odd-project invocations
+    driver: bridge
 
 services:
   db:
     image: pgvector/pgvector:pg17
+    networks: [fmd-net]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-fmd}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fmd}
@@ -25,6 +44,7 @@ services:
     ports: ["${POSTGRES_PORT:-5433}:5432"]
     volumes:
       - dbdata:/var/lib/postgresql/data
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fmd} -d ${POSTGRES_DB:-fmd}"]
       interval: 5s
@@ -36,6 +56,7 @@ services:
   searxng:
     image: searxng/searxng:latest
     profiles: ["discovery"]
+    networks: [fmd-net]
     ports: ["${SEARXNG_PORT:-8888}:8080"]
     environment:
       SEARXNG_BASE_URL: http://localhost:${SEARXNG_PORT:-8888}/
@@ -58,6 +79,7 @@ services:
         OCR_REQUIREMENTS: requirements-vision.txt
         VCS_REF: ${VCS_REF:-unknown}
     image: findmydreamcollege/ocr:${FMD_IMAGE_TAG:-local}
+    networks: [fmd-net]
     environment:
       FMD_OCR_CONFIG: /config/acquire.yaml
       FMD_OCR_TIER: ${FMD_OCR_TIER:-T2}
@@ -105,6 +127,7 @@ services:
         OCR_NEEDS_VENV_PACKAGES: "1"
         VCS_REF: ${VCS_REF:-unknown}
     image: findmydreamcollege/ocr-paddle:${FMD_IMAGE_TAG:-local}
+    networks: [fmd-net]
     environment:
       FMD_OCR_CONFIG: /config/acquire.yaml
       FMD_OCR_TIER: T2b
@@ -148,6 +171,7 @@ services:
         VCS_REF: ${VCS_REF:-unknown}
     image: findmydreamcollege/pipeline:${FMD_IMAGE_TAG:-local}
     command: ["uvicorn", "fmd.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    networks: [fmd-net]
     env_file:
       - path: ../.env
         required: false
@@ -210,6 +234,7 @@ services:
         VCS_REF: ${VCS_REF:-unknown}
     image: findmydreamcollege/pipeline:${FMD_IMAGE_TAG:-local}
     command: ["python", "-m", "fmd.cli", "worker"]
+    networks: [fmd-net]
     env_file:
       - path: ../.env
         required: false
@@ -243,6 +268,7 @@ services:
       # Next inlines NEXT_PUBLIC_* at build time, so this must be a build arg.
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    networks: [fmd-net]
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     ports: ["${WEB_PORT:-3000}:3000"]
