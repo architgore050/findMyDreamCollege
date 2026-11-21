@@ -603,6 +603,50 @@ class AcquireBBoxPolicy(ConfigModel):
     gate_tiers: list[str] = Field(default_factory=list)
 
 
+class AcquireBatchConfig(ConfigModel):
+    """Batched acquisition (W10): one CUDA page-batch per server restart.
+
+    Validated strictly (unknown keys rejected in the loader): a typo here must
+    fail config load, not silently change how a 1,000-page backlog is cut.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Target converted pages per cycle. Sizing is evaluated only at document
+    #: boundaries: the document that crosses the limit is always converted in
+    #: full and extracted in the same cycle, and no further document starts.
+    #: Default 100 — break-even measured at ~20–25 pages/cycle (CUDA
+    #: 0.166–0.9 s/page vs CPU 1.0–3.8 s/page, ~20–25 s per server restart);
+    #: 100 leaves margin.
+    pages: int = 100
+    #: Docling device for the acquisition phase (cpu|auto|cuda). The batched
+    #: runner stops the model server first, so cuda is the measured default;
+    #: `auto` defers to Docling's own detection.
+    device: str = "cuda"
+    #: Server-control script (start|stop|status|probe contract). Unset or
+    #: missing on the host ⇒ degraded mode: CPU acquisition + inline
+    #: extraction, recorded in the summary — never a failed run by itself.
+    server_script: str | None = None
+    #: Leave the model server running after the batched run ends. Default off:
+    #: every exit path stops the server (try/finally).
+    keep_server: bool = False
+    #: /health readiness poll ceiling for `wait_ready` after a server start.
+    poll_timeout_s: int = 600
+
+
+class AcquireCacheConfig(ConfigModel):
+    """Parse-cache payload schema version (W10).
+
+    Must agree with ``fmd.acquire.parse_cache.PARSE_SCHEMA_VERSION``; the
+    loader cross-checks the two so the YAML and the code cannot drift apart
+    silently. Bumping it invalidates every stored parse.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = 1
+
+
 class AcquireConfig(ConfigModel):
     """Typed view of ``config/acquire.yaml`` (brief §9 text layer)."""
 
@@ -611,6 +655,8 @@ class AcquireConfig(ConfigModel):
     anomaly: AcquireAnomalyThresholds
     backends: dict[str, AcquireBackend]
     bbox: AcquireBBoxPolicy
+    batch: AcquireBatchConfig | None = None
+    cache: AcquireCacheConfig | None = None
 
 
 # --------------------------------------------------------------------------- planning
