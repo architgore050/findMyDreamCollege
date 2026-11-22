@@ -320,6 +320,38 @@ class BatchedRunner:
             return getter()
         return None
 
+    def _tier_caches(self) -> list[Any]:
+        """The tier caches in lookup order (T1 first, then T2).
+
+        Sizing consults every tier cache a document's parse may live in: since
+        wave v1-w3 a scanned document's parse is a T2 row, and a sizer that
+        reads T1 only would treat it as unknown-pages forever (converted in
+        full every cycle it appears, never deferred whole).
+        """
+        caches = [self._parse_cache(), self._t2_parse_cache()]
+        return [cache for cache in caches if cache is not None]
+
+    def _has_parse(self, snapshot_sha256: str) -> bool:
+        policy = self._sizing_policy()
+        for cache in self._tier_caches():
+            try:
+                if cache.has_parse(snapshot_sha256, policy):
+                    return True
+            except Exception:  # a sizing peek must never fail a cycle
+                continue
+        return False
+
+    def _pages_for(self, snapshot_sha256: str) -> int | None:
+        """The cached page count, first hit across the tier caches (T1→T2)."""
+        policy = self._sizing_policy()
+        for cache in self._tier_caches():
+            try:
+                if cache.has_parse(snapshot_sha256, policy):
+                    return cache.pages_for(snapshot_sha256, policy)
+            except Exception:
+                continue
+        return None
+
     def _extractor(self, *, allow_convert: bool) -> Extractor:
         orchestrator = self.orchestrator
         return Extractor(
@@ -437,9 +469,9 @@ class BatchedRunner:
             known_pages: int | None = None
             if cache is not None:
                 try:
-                    cache_hit = bool(cache.has_parse(snapshot.sha256, self._sizing_policy()))
+                    cache_hit = self._has_parse(snapshot.sha256)
                     if cache_hit:
-                        known_pages = cache.pages_for(snapshot.sha256, self._sizing_policy())
+                        known_pages = self._pages_for(snapshot.sha256)
                 except Exception:  # plan only: cache trouble is not a plan failure
                     cache_hit = False
             work.append(
@@ -563,15 +595,6 @@ class BatchedRunner:
                 acquire=self.orchestrator.registry.acquire
             )
         return self._sizing_policy_instance
-
-    def _pages_for(self, snapshot_sha256: str) -> int | None:
-        cache = self._parse_cache()
-        if cache is None:
-            return None
-        try:
-            return cache.pages_for(snapshot_sha256, self._sizing_policy())
-        except Exception:
-            return None
 
     def _run_cycle(
         self,

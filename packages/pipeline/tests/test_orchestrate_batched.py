@@ -273,7 +273,8 @@ def test_controller_call_order_stop_acquire_start_wait_extract_then_stop(tmp_pat
     assert summary.counts["cycles"] == 1
     assert summary.counts["extracted"] == 1
     assert summary.counts["converted"] == 1
-    assert summary.counts["pages"] == 3
+    # line_pages counts known pages too, even when no conversion ran
+    assert "pages=3" in harness.lines[0]
     assert summary.counts["llm_calls"] >= 1
     assert harness.lines and harness.lines[0].startswith("[batch] cycle=1")
     assert "device=cuda" in harness.lines[0]
@@ -674,3 +675,64 @@ def test_resolve_script_finds_repo_relative_path() -> None:
     resolved = resolve_script("scripts/serve_local.sh")
     assert resolved.is_file()
     assert resolved.name == "serve_local.sh"
+
+
+class _StubT2Cache:
+    """Runner-facing T2 tier cache stub: sizing + lookup, no store."""
+
+    def __init__(self, rows: dict[str, tuple[int, Any]]) -> None:
+        self.rows = rows
+
+    def has_parse(self, sha, policy) -> bool:
+        return sha in self.rows
+
+    def pages_for(self, sha, policy):
+        row = self.rows.get(sha)
+        return row[0] if row else None
+
+    def lookup(self, sha, policy):
+        from fmd.acquire.parse_cache import CacheHit, CacheMiss
+
+        row = self.rows.get(sha)
+        if row is None:
+            return None, CacheMiss(None, "no_cache_entry", "stub")
+        return row[1], CacheHit(
+            key_digest="stub" * 8,
+            object_sha256="o" * 64,
+            pages=row[0],
+            parser="rapidocr",
+            parser_version="3.10.0",
+        )
+
+
+def test_sizing_reads_t2_cache_rows(tmp_path) -> None:
+    """Wave-3 sizing note: a T2-cached scan is known-pages to the batch sizer —
+    it goes straight to the extract phase of its first cycle and no converter
+    is ever invoked for it."""
+    registry = _registry()
+    harness = BatchedHarness(tmp_path, registry, batch_pages=100)
+    _document, scan = harness.add_document(
+        "https://college.ac.in/scan.pdf", "scan-doc", 3
+    )
+    del harness.t1_pages["scan-doc"]  # a live conversion would raise: must not run
+    from dataclasses import replace as _replace
+
+    from test_w10_support import report_doc
+
+    t2doc = _replace(
+        report_doc(), tier="T2", tool="rapidocr", tool_version="3.10.0"
+    )
+    harness.orchestrator._t2_parse_cache_instance = _StubT2Cache(
+        {scan.sha256: (3, t2doc)}
+    )
+
+    summary = harness.runner.run(limit=5)
+
+    assert summary.failed is False
+    assert summary.counts["extracted"] == 1
+    assert summary.counts.get("converted", 0) == 0
+    assert "convert:scan-doc" not in harness.events, (
+        "a T2-cached scan must not be converted in the acquire phase"
+    )
+    # line_pages counts known pages too, even when no conversion ran
+    assert "pages=3" in harness.lines[0]
