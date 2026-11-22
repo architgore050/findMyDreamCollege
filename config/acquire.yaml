@@ -331,3 +331,9 @@ batch:
   # ready within this budget aborts the cycle with a clear error and leaves
   # the server stopped.
   poll_timeout_s: 600
+  # Double buffering (wave v1-w4): while a cycle's extraction phase keeps the
+  # server (and the GPU) up, this many next-batch documents' bytes are read
+  # off-thread so the next server-stopped window converts instead of doing
+  # disk I/O. The worker touches the object store only — never a converter,
+  # never the model server. 0 disables it.
+  prefetch_documents: 4

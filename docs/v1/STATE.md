@@ -31,6 +31,24 @@ risks).
 
 ## Done
 
+- **Wave 4 (PLAN #4) — double-buffered batched runner + tier-aware sizing
+  (branch `v1/w4-double-buffer`).**
+  - `PrefetchBuffer` (one worker, object store only): next batch's snapshot
+    bytes are read off-thread while the GPU window is open; the acquire loop
+    consumes them via the new `AcquisitionStage.run(data_for=...)` seam and
+    falls back to a live read when a byte set has not landed. `prefetch_depth`
+    → registry knob `batch.prefetch_documents` (default 4, 0 disables,
+    negative rejected by the loader; CLI-wired like every sibling knob).
+  - Sizing across tiers: T2-cached scans are known-pages to the sizer (the
+    wave-3 sizing note, implemented; T2-cached scan ⇒ zero conversions in its
+    first cycle, tested).
+  - Verifier: **request-changes → fixed** (registry wiring, restored the
+    unjustified call-order test edit, ruff format on changed files, docs,
+    prefetch-failure logging). Stress scenarios: no thread-safety blocker.
+  - Gates: ruff clean + format clean on changed files · pytest offline 1451 ✓
+    · DB-gated 1540 ✓ · eval provenance 1.0 ✓ · web untouched (diff empty).
+  - Residual: real-GPU validation = LQ-4 (unchanged).
+
 - (bootstrap) docs/v1 state files created and committed.
 - **Wave 3 (PLAN #3) — T2 parse cache, engine-pinned keys (branch
   `v1/w3-t2-parse-cache`). Foundation: the never-merged W10 branch

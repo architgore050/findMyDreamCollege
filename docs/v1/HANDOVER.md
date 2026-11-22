@@ -23,6 +23,33 @@ invariant findings live here so the next agent does not re-derive them.
   `export PATH=~/.local/bin:$PATH` (corepack shim). Postgres data:
   `/home/z/my-project/.tools/pgdata`.
 
+## Wave 4 — double-buffered batched runner (2026-11-22)
+
+- **Interpretation of the brief:** "CPU work for the next batch" = the disk
+  I/O + cache peeks the acquire loop would otherwise do serially inside the
+  server-stopped window. Docling/OCR conversions stay inside that window (the
+  brief's second clause); the prefetch worker touches the object store only.
+  Running conversions outside the window would have *downgraded* them from
+  CUDA (0.166–0.9 s/page) to CPU (1.0–3.8 s/page) — rejected.
+- **Correctness never depends on the prefetch winning the race:** `take()` is
+  non-blocking; a byte set that has not landed falls back to a live read.
+  The worker logs store failures (a silent degrade to 100% live reads was the
+  verifier's observability finding) and a failed sha is simply not retried
+  this run.
+- **Registry-driven (verifier finding, fixed):** `batch.prefetch_documents`
+  lives in `AcquireBatchConfig`/`acquire.yaml`/loader validation/CLI wiring
+  like every sibling batch knob (default 4, 0 disables, negative rejected).
+- **Verifier-caught regression, reverted:** the wave-4b commit had replaced
+  the pre-existing call-order test's `counts["pages"] == 3` assertion with a
+  line-based duplicate (a `str.replace` with an unanchored pattern hit both
+  tests). Restored; the line-based assertion remains only in the T2 sizing
+  test, where the stage never runs and the counter genuinely does not exist.
+- **Wave-3 sizing note (HANDOVER §Wave 3) implemented:** the batch sizer now
+  reads pages across tier caches (T1 then T2) — a T2-cached scan is a
+  zero-page hit in its first cycle instead of being reconverted whole.
+- Thread-safety verdict (verifier stress scenarios): no blocker; a lost
+  prefetch after close is wasted work only, by design.
+
 ## Wave 3 — T2 parse cache (2026-11-21)
 
 - **Foundation first:** backlog items 3–4 presuppose the W10 branch, which had

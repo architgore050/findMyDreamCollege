@@ -632,6 +632,11 @@ class AcquireBatchConfig(ConfigModel):
     keep_server: bool = False
     #: /health readiness poll ceiling for `wait_ready` after a server start.
     poll_timeout_s: int = 600
+    #: Double buffering (wave v1-w4): while a cycle's extraction phase keeps
+    #: the GPU busy, this many next-batch documents' bytes are read off-thread
+    #: (object store only — never a converter or the model server). 0 disables
+    #: the prefetch worker; the acquire loop then reads live as before.
+    prefetch_documents: int = 4
 
 
 class AcquireCacheConfig(ConfigModel):
