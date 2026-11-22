@@ -337,16 +337,20 @@ def _rank_order(candidates: list[ShortlistRow], weights: dict[str, float]) -> li
 
 
 def _perturb(weights: dict[str, float], epsilon: float) -> list[dict[str, float]]:
-    """All ±ε sign combinations over the configured weights (deterministic)."""
+    """All ±ε sign combinations over the configured weights (deterministic).
+
+    ``epsilon`` is an ABSOLUTE perturbation in weight units (config/weights.yaml
+    uses a 0–100 scale, so the default 2.0 moves each weight by ±2). Relative
+    perturbation is useless here: the composite normalises by total weight, so
+    a uniform relative rescale cancels out and near-tie candidates never flip.
+    """
 
     names = sorted(weights)
     variants: list[dict[str, float]] = []
     for signs in itertools.product((1.0, -1.0), repeat=len(names)):
         variant = {}
         for name, sign in zip(names, signs, strict=True):
-            delta = epsilon * sign
-            new_weight = weights[name] * (1.0 + delta)
-            variant[name] = max(new_weight, 0.0)  # a weight never turns negative
+            variant[name] = max(weights[name] + epsilon * sign, 0.0)
         variants.append(variant)
     return variants
 
@@ -356,7 +360,7 @@ def run_cv_stability(
     weights: dict[str, float],
     *,
     k: int = 5,
-    epsilon: float = 0.1,
+    epsilon: float = 2.0,
     holdout_n: int = 3,
 ) -> dict[str, Any]:
     """Leave-N-out and ±ε weight-noise stability (design §2.1).

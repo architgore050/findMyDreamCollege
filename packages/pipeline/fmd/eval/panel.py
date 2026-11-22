@@ -117,6 +117,7 @@ class ProductRanking(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = 1
+    notes: str | None = None
     profiles: list[ProductRankingProfile]
 
 
@@ -165,15 +166,35 @@ def krippendorff_alpha(
 ) -> float | None:
     """Krippendorff's alpha over incomplete unit × rater values.
 
-    ``units`` is a list of rows (one per unit); ``None`` marks a missing
-    rating. Returns None when fewer than two pairable units exist — never 1.0
-    for an unmeasurable case.
+    Implements Krippendorff (2011), "Computing Krippendorff's
+    Alpha-Reliability", §C–D (any number of observers, missing data):
+
+    * coincidence matrix ``o_ck = Σ_u n_{u,c}·n_{u,k}/(m_u−1)`` for c≠k and
+      ``o_cc = Σ_u n_{u,c}·(n_{u,c}−1)/(m_u−1)`` (ordered pairs of distinct
+      ratings; each pairable unit contributes m_u(m_u−1)/(m_u−1) = m_u);
+    * margins n_c count only pairable units' values; n = Σ margins;
+    * ``D_o = Σ_{c≠k} o_ck·δ_ck / n`` and
+      ``D_e = Σ_{c≠k} n_c·n_k·δ_ck / (n(n−1))``; α = 1 − D_o/D_e;
+    * nominal δ ∈ {0,1}; ordinal δ = (Σ_{g=c..k} n_g − (n_c+n_k)/2)² over the
+      value ranks (standardisation is optional and does not affect α).
+
+    Verified against the paper's printed examples: the binary two-observer
+    case (α = 0.095) and the 4-observer/12-unit nominal case (α = 0.743) are
+    reproduced exactly by the committed tests.
+
+    Returns None when fewer than two pairable units exist — never 1.0 for an
+    unmeasurable case.
     """
 
-    values = sorted({v for unit in units for v in unit if v is not None})
+    pairable_rows = [[v for v in unit if v is not None] for unit in units]
+    pairable_rows = [row for row in pairable_rows if len(row) >= 2]
+    if len(pairable_rows) < 2:
+        return None
+    values = sorted({v for row in pairable_rows for v in row})
     if len(values) < 2:
         return None
-    counts = {v: sum(1 for unit in units for v2 in unit if v2 == v) for v in values}
+    # margins over pairable units only (the paper's n_c / n)
+    counts = {v: sum(1 for row in pairable_rows for v2 in row if v2 == v) for v in values}
     n = sum(counts.values())
     if n < 2:
         return None
@@ -183,43 +204,36 @@ def krippendorff_alpha(
             return 0.0
         if metric == "nominal":
             return 1.0
-        # Krippendorff's ordinal distance: squared cumulative frequency span.
-        lo, hi = sorted((a, b))
-        span = values.index(hi) - values.index(lo)
-        cum = sum(counts[v] for v in values[values.index(lo) : values.index(hi) + 1])
+        lo, hi = (a, b) if a <= b else (b, a)
+        cum = sum(
+            counts[v]
+            for v in values[values.index(lo) : values.index(hi) + 1]
+        )
         cum -= (counts[lo] + counts[hi]) / 2
-        # scale by the number of distinct steps so alpha is comparable across
-        # different rank-set sizes (Krippendorff divides by the span).
-        return (cum / max(span, 1)) ** 2
+        return cum**2
 
-    # observed disagreement: pairable units only (Krippendorff 2011, §"Computing")
-    pairable = 0
-    inner = 0.0
-    for unit in units:
-        rated = [v for v in unit if v is not None]
-        m = len(rated)
-        if m < 2:
-            continue
-        pairable += 1
-        # each ordered pair i != j, weighted by 1/(m_u - 1)
-        inner += sum(
-            distance(rated[i], rated[j])
-            for i in range(m)
-            for j in range(m)
-            if i != j
-        ) / (m - 1)
-    if pairable < 2:
-        return None
-    d_o = inner / pairable
-
-    # expected disagreement: all ordered pairs of distinct ratings
-    d_e = 0.0
+    # coincidence matrix
+    off_diagonal = 0.0
     for a in values:
         for b in values:
             if a == b:
                 continue
-            d_e += counts[a] * counts[b] * distance(a, b)
-    d_e /= n * (n - 1)
+            total = 0.0
+            for row in pairable_rows:
+                m = len(row)
+                n_a = sum(1 for v in row if v == a)
+                n_b = sum(1 for v in row if v == b)
+                total += n_a * n_b / (m - 1)
+            off_diagonal += total * distance(a, b)
+    d_o = off_diagonal / n
+
+    expected = 0.0
+    for a in values:
+        for b in values:
+            if a == b:
+                continue
+            expected += counts[a] * counts[b] * distance(a, b)
+    d_e = expected / (n * (n - 1))
     if d_e <= 0:
         return None
     return round(1.0 - d_o / d_e, 6)
@@ -341,7 +355,7 @@ def run_expert_panel(panel: PanelRatings, ranking: ProductRanking, *, k: int = 3
     ]
     icc = icc_two_way_single(complete) if complete else None
 
-    low, high = _bootstrap_interval(overlaps)
+    low, high, bootstrap_note = _bootstrap_interval(overlaps)
     return {
         "panel_id": panel.panel_id,
         "raters": [rater.model_dump() for rater in panel.raters],
@@ -350,8 +364,14 @@ def run_expert_panel(panel: PanelRatings, ranking: ProductRanking, *, k: int = 3
             "krippendorff_alpha_nominal": alpha_nominal,
             "krippendorff_alpha_ordinal": alpha_ordinal,
             "icc_two_way_single": icc,
+            "pairwise_kendall_tau_b_mean": _pairwise_rater_tau(panel),
             "n_complete_case_units": len(complete),
             "n_units": len(units),
+            "note": (
+                "alpha on rank values is deliberately harsh: it measures absolute "
+                "rank-position agreement, not order agreement; the pairwise tau "
+                "below is the order-agreement view"
+            ),
         },
         "effectiveness": {
             "metric": "mean top-3 overlap fraction (panel consensus vs product)",
@@ -362,6 +382,7 @@ def run_expert_panel(panel: PanelRatings, ranking: ProductRanking, *, k: int = 3
                 "resamples": BOOTSTRAP_RESAMPLES,
                 "seed": BOOTSTRAP_SEED,
                 "method": "percentile bootstrap over profiles (deterministic)",
+                "note": bootstrap_note,
             },
             "kendall_tau_b_mean": round(sum(taus) / len(taus), 6) if taus else None,
         },
@@ -372,12 +393,43 @@ def run_expert_panel(panel: PanelRatings, ranking: ProductRanking, *, k: int = 3
     }
 
 
-def _bootstrap_interval(values: list[float], *, resamples: int = BOOTSTRAP_RESAMPLES,
-                        seed: int = BOOTSTRAP_SEED, level: float = 0.95) -> tuple[float, float]:
-    """Deterministic percentile bootstrap over profile-level overlaps."""
+def _pairwise_rater_tau(panel: PanelRatings) -> float | None:
+    """Mean Kendall tau-b between every rater pair on shared institutions."""
 
-    if not values:
-        return None, None  # type: ignore[return-value]
+    rater_ids = [rater.rater_id for rater in panel.raters]
+    taus: list[float] = []
+    for i, left in enumerate(rater_ids):
+        for right in rater_ids[i + 1 :]:
+            for profile in panel.profiles:
+                left_rank = profile.ratings.get(left) or []
+                right_rank = profile.ratings.get(right) or []
+                shared = [name for name in left_rank if name in set(right_rank)]
+                if len(shared) < 2:
+                    continue
+                left_pos = {name: pos for pos, name in enumerate(left_rank, start=1)}
+                right_pos = {name: pos for pos, name in enumerate(right_rank, start=1)}
+                tau = kendall_tau_b(
+                    [left_pos[name] for name in shared],
+                    [right_pos[name] for name in shared],
+                )
+                if tau is not None:
+                    taus.append(tau)
+    return round(sum(taus) / len(taus), 6) if taus else None
+
+
+def _bootstrap_interval(
+    values: list[float], *, resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = BOOTSTRAP_SEED, level: float = 0.95,
+) -> tuple[float | None, float | None, str]:
+    """Deterministic percentile bootstrap over profile-level overlaps.
+
+    Returns ``(low, high, note)``; the interval is None with an honest note
+    when fewer than two profiles exist (a bootstrap over one value is a point,
+    and calling it a confidence interval would be a lie).
+    """
+
+    if len(values) < 2:
+        return None, None, "ci95 requires >= 2 profiles; n=1 gives a point, not an interval"
     rng = random.Random(seed)
     means: list[float] = []
     n = len(values)
@@ -388,7 +440,7 @@ def _bootstrap_interval(values: list[float], *, resamples: int = BOOTSTRAP_RESAM
     alpha = (1.0 - level) / 2
     low = means[max(0, int(alpha * resamples))]
     high = means[min(resamples - 1, int((1 - alpha) * resamples) - 1)]
-    return round(low, 6), round(high, 6)
+    return round(low, 6), round(high, 6), "percentile bounds over resample means"
 
 
 def render_panel_summary(case: dict[str, Any]) -> str:

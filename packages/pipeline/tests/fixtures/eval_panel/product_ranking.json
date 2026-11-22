@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "notes": "Fixture product ranking matching panel_ratings.yaml (synthetic profile; the product order deliberately differs from the panel consensus so tau < 1).",
+  "profiles": [
+    {
+      "profile_id": "fixture-mlt-shortlist-v1",
+      "ranking": [
+        "All India Institute of Medical Sciences, Delhi",
+        "Post Graduate Institute of Medical Education and Research",
+        "City Care Paramedical College, Hyderabad",
+        "Christian Medical College"
+      ]
+    }
+  ]
+}

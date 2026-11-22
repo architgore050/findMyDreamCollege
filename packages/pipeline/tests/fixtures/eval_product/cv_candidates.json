@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "profile_id": "fixture-cv-stability-v1",
+  "synthetic": true,
+  "notes": "Candidate set for the cv-stability stream (synthetic; sub-scores are fixture numbers, the composite is computed by the harness from config/weights.yaml). Institutions are synthetic; the point is stability arithmetic, not recommendations.",
+  "captured_at": "2026-11-22T00:00:00Z",
+  "scorer_version": "0.3.0",
+  "weights_version": "2026-11-18.1",
+  "rows": [
+    {"rank": 1, "institution_name": "Alpha Institute of Allied Health", "programme": "B.Sc. Medical Laboratory Technology", "sub_scores": {"outcomes": 55, "affordability_roi": 70, "clinical_training": 60, "academic_quality": 50, "student_life_safety": 65, "admission_realism": 60, "financing_feasibility": 60}},
+    {"rank": 2, "institution_name": "Beta College of Health Sciences", "programme": "B.Sc. Medical Laboratory Technology", "sub_scores": {"outcomes": 50, "affordability_roi": 60, "clinical_training": 72, "academic_quality": 55, "student_life_safety": 60, "admission_realism": 58, "financing_feasibility": 62}},
+    {"rank": 3, "institution_name": "Gamma School of Paramedical Studies", "programme": "B.Sc. Medical Laboratory Technology", "sub_scores": {"outcomes": 48, "affordability_roi": 65, "clinical_training": 55, "academic_quality": 52, "student_life_safety": 58, "admission_realism": 62, "financing_feasibility": 58}},
+    {"rank": 4, "institution_name": "Delta Allied Health Academy", "programme": "B.Sc. Medical Laboratory Technology", "sub_scores": {"outcomes": 45, "affordability_roi": 58, "clinical_training": 50, "academic_quality": 48, "student_life_safety": 55, "admission_realism": 55, "financing_feasibility": 56}},
+    {"rank": 5, "institution_name": "Epsilon Institute of Medical Technology", "programme": "B.Sc. Medical Laboratory Technology", "sub_scores": {"outcomes": 40, "affordability_roi": 55, "clinical_training": 48, "academic_quality": 46, "student_life_safety": 52, "admission_realism": 52, "financing_feasibility": 54}},
+    {"rank": 6, "institution_name": "Zeta College of Laboratory Sciences", "programme": "B.Sc. Medical Laboratory Technology", "sub_scores": {"outcomes": 38, "affordability_roi": 52, "clinical_training": 45, "academic_quality": 44, "student_life_safety": 50, "admission_realism": 50, "financing_feasibility": 52}},
+    {"rank": 7, "institution_name": "Theta School of Health Studies", "programme": "B.Sc. Medical Laboratory Technology", "sub_scores": {"outcomes": 35, "affordability_roi": 50, "clinical_training": 42, "academic_quality": 42, "student_life_safety": 48, "admission_realism": 48, "financing_feasibility": 50}},
+    {"rank": 8, "institution_name": "Iota Paramedical Training Centre", "programme": "B.Sc. Medical Laboratory Technology", "sub_scores": {"outcomes": 30, "affordability_roi": 48, "clinical_training": 40, "academic_quality": 40, "student_life_safety": 46, "admission_realism": 46, "financing_feasibility": 48}},
+    {"rank": 9, "institution_name": "Kappa Health Education Society", "programme": "B.Sc. Medical Laboratory Technology", "sub_scores": {"outcomes": 30, "affordability_roi": 48, "clinical_training": 40, "academic_quality": 40, "student_life_safety": 60, "admission_realism": 40, "financing_feasibility": 48}},
+    {"rank": 10, "institution_name": "Lambda Institute of Laboratory Practice", "programme": "B.Sc. Medical Laboratory Technology", "sub_scores": {"outcomes": 30, "affordability_roi": 48, "clinical_training": 40, "academic_quality": 40, "student_life_safety": 40, "admission_realism": 60, "financing_feasibility": 48}}
+  ]
+}

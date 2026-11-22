@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "profile_id": "canary-04-unknown",
+  "synthetic": true,
+  "notes": "Canary 4/5: research found too little citable evidence to score the shortlist; verdict unknown with named unknown_aspects (UNKNOWN carries content, invariant 5). Counts toward UNKNOWN coverage, never toward agreement.",
+  "profile": {
+    "target_field": "medical laboratory technology",
+    "target_intake_year": 2027,
+    "target_country": "IN",
+    "preferred_state": "Kerala"
+  },
+  "product_shortlist": [
+    {"rank": 1, "institution_name": "Malabar Allied Health Academy, Kozhikode", "programme": "B.Sc. Medical Laboratory Technology", "n_claims": 2, "n_sources": 1},
+    {"rank": 2, "institution_name": "Coastal Institute of Health Sciences", "programme": "B.Sc. Medical Laboratory Technology", "n_claims": 1, "n_sources": 1},
+    {"rank": 3, "institution_name": "Backwater Paramedical College", "programme": "B.Sc. Medical Laboratory Technology", "n_claims": 2, "n_sources": 1}
+  ],
+  "ingested_evidence_urls": [
+    "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html"
+  ],
+  "scripted_verdict": {
+    "profile_id": "canary-04-unknown",
+    "verdict": "unknown",
+    "rationale": "None of the three recommended institutions appears in any public ranking, accreditation list, or citable programme page found within the research budget; no source supports or refutes the order, so the verdict is unknown rather than guessed.",
+    "reference_top3": [],
+    "selected_programmes": [
+      {"institution_name": "Malabar Allied Health Academy, Kozhikode", "programme": "B.Sc. Medical Laboratory Technology", "evidence_tier": "none"},
+      {"institution_name": "Coastal Institute of Health Sciences", "programme": "B.Sc. Medical Laboratory Technology", "evidence_tier": "none"},
+      {"institution_name": "Backwater Paramedical College", "programme": "B.Sc. Medical Laboratory Technology", "evidence_tier": "none"}
+    ],
+    "evidence": [
+      {"url": "https://fixture.invalid/research/canary-04/state-list-search", "title": "Fixture: state allied-health list search result (offline canary)", "quote": "The searched institution names do not occur in the state list within the research budget.", "sha256": "ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66", "fetched_at": "2026-11-22T00:00:00Z", "source_kind": "fixture", "external": true}
+    ],
+    "unknown_aspects": [
+      "recognition status of all three recommended institutions",
+      "internship structure (hours/months) at each institution",
+      "whether a better-evidenced programme exists in the same state"
+    ],
+    "as_of": "2026-11-22"
+  },
+  "as_of": "2026-11-22"
+}

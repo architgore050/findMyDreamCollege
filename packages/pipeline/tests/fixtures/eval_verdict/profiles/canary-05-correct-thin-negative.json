@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "profile_id": "canary-05-correct-thin-negative",
+  "synthetic": true,
+  "notes": "Canary 5/5: verdict correct, and the agent examined a thin/no-evidence honest negative (a programme the product ranked but research could not support) without letting it into the reference. Demonstrates the rich+thin selection rule from 01-eval-designs §3.1.",
+  "profile": {
+    "target_field": "medical laboratory technology",
+    "target_intake_year": 2027,
+    "target_country": "IN",
+    "preferred_state": null
+  },
+  "product_shortlist": [
+    {"rank": 1, "institution_name": "Post Graduate Institute of Medical Education and Research", "programme": "B.Sc. Medical Laboratory Technology", "n_claims": 11, "n_sources": 3},
+    {"rank": 2, "institution_name": "All India Institute of Medical Sciences, Delhi", "programme": "B.Sc. Medical Laboratory Technology", "n_claims": 14, "n_sources": 4},
+    {"rank": 3, "institution_name": "Lakeview Institute of Paramedical Education", "programme": "B.Sc. Medical Laboratory Technology", "n_claims": 1, "n_sources": 1}
+  ],
+  "ingested_evidence_urls": [
+    "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+    "https://www.nirfindia.org/Rankings/2025/OverallRanking.html"
+  ],
+  "scripted_verdict": {
+    "profile_id": "canary-05-correct-thin-negative",
+    "rationale": "Both evidence-rich recommendations hold under independent research; the third product pick has no citable support and is excluded from the reference, which is why overlap with the product top-3 is 2 of 3 rather than 3 of 3.",
+    "verdict": "correct",
+    "reference_top3": [
+      "All India Institute of Medical Sciences, Delhi",
+      "Post Graduate Institute of Medical Education and Research",
+      "Christian Medical College"
+    ],
+    "selected_programmes": [
+      {"institution_name": "Post Graduate Institute of Medical Education and Research", "programme": "B.Sc. Medical Laboratory Technology", "evidence_tier": "rich"},
+      {"institution_name": "Lakeview Institute of Paramedical Education", "programme": "B.Sc. Medical Laboratory Technology", "evidence_tier": "none"}
+    ],
+    "evidence": [
+      {"url": "https://fixture.invalid/research/canary-05/pgimer-internship-record", "title": "Fixture: internship hours record (offline canary)", "quote": "The programme records 1800 internship hours across the final year.", "sha256": "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12", "fetched_at": "2026-11-22T00:00:00Z", "source_kind": "fixture", "external": true},
+      {"url": "https://fixture.invalid/research/canary-05/lakeview-no-record", "title": "Fixture: absent-record search for the honest negative (offline canary)", "quote": "No independent record of this institution was found in the searched lists.", "sha256": "cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34", "fetched_at": "2026-11-22T00:00:00Z", "source_kind": "fixture", "external": true},
+      {"url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html", "title": "NIRF 2025 Medical rank list", "quote": "Post Graduate Institute of Medical Education and Research ... Rank 2", "sha256": "dda9ee1bb9fef22ec4103b9c4dd870f78948ae0ac2f09c3c0446adc07cb78d04", "fetched_at": "2026-11-22T18:39:52Z", "source_kind": "ranking", "external": false}
+    ],
+    "unknown_aspects": [],
+    "as_of": "2026-11-22"
+  },
+  "as_of": "2026-11-22"
+}

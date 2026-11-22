@@ -348,8 +348,11 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument(
         "--epsilon",
         type=float,
-        default=0.1,
-        help="cv-stability: +-epsilon relative weight perturbation (default 0.1)",
+        default=2.0,
+        help=(
+            "cv-stability: +-epsilon ABSOLUTE weight perturbation in weight "
+            "units (config/weights.yaml uses a 0-100 scale; default 2.0)"
+        ),
     )
     eval_parser.add_argument(
         "--holdout-n",

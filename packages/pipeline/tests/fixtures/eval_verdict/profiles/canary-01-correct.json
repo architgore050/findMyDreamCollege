@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "profile_id": "canary-01-correct",
+  "synthetic": true,
+  "notes": "Canary 1/5: the product shortlist agrees with the reference built from citable research; verdict correct. Evidence pointers: one real ranking page (committed truth raw copy) + fixture-scoped sources (RFC-2606 .invalid hosts mark them as offline fixtures, not live citations).",
+  "profile": {
+    "target_field": "medical laboratory technology",
+    "target_intake_year": 2027,
+    "target_country": "IN",
+    "preferred_state": null
+  },
+  "product_shortlist": [
+    {"rank": 1, "institution_name": "All India Institute of Medical Sciences, Delhi", "programme": "B.Sc. Medical Laboratory Technology", "n_claims": 14, "n_sources": 4},
+    {"rank": 2, "institution_name": "Post Graduate Institute of Medical Education and Research", "programme": "B.Sc. Medical Laboratory Technology", "n_claims": 11, "n_sources": 3},
+    {"rank": 3, "institution_name": "Christian Medical College", "programme": "B.Sc. Medical Laboratory Technology", "n_claims": 9, "n_sources": 3}
+  ],
+  "ingested_evidence_urls": [
+    "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+    "https://www.nirfindia.org/Rankings/2025/OverallRanking.html"
+  ],
+  "scripted_verdict": {
+    "profile_id": "canary-01-correct",
+    "verdict": "correct",
+    "rationale": "The product's top-3 matches the reference built from the committed NIRF 2025 Medical table and two independently researched institution pages; no counter-evidence found for any recommended programme.",
+    "reference_top3": [
+      "All India Institute of Medical Sciences, Delhi",
+      "Post Graduate Institute of Medical Education and Research",
+      "Christian Medical College"
+    ],
+    "selected_programmes": [
+      {"institution_name": "All India Institute of Medical Sciences, Delhi", "programme": "B.Sc. Medical Laboratory Technology", "evidence_tier": "rich"},
+      {"institution_name": "Christian Medical College", "programme": "B.Sc. Medical Laboratory Technology", "evidence_tier": "rich"}
+    ],
+    "evidence": [
+      {"url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html", "title": "NIRF 2025 Medical rank list", "quote": "All India Institute of Medical Sciences, Delhi ... Rank 1", "sha256": "dda9ee1bb9fef22ec4103b9c4dd870f78948ae0ac2f09c3c0446adc07cb78d04", "fetched_at": "2026-11-22T18:39:52Z", "source_kind": "ranking", "external": false},
+      {"url": "https://fixture.invalid/research/canary-01/aiims-curriculum", "title": "Fixture: institutional curriculum page (offline canary)", "quote": "The B.Sc. Medical Laboratory Technology programme runs 4 years with a 12-month internship.", "sha256": "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11", "fetched_at": "2026-11-22T00:00:00Z", "source_kind": "fixture", "external": true},
+      {"url": "https://fixture.invalid/research/canary-01/cmc-allied-health", "title": "Fixture: allied-health programme page (offline canary)", "quote": "Admissions to allied health sciences are through the institution's own entrance process.", "sha256": "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22", "fetched_at": "2026-11-22T00:00:00Z", "source_kind": "fixture", "external": true}
+    ],
+    "unknown_aspects": [],
+    "as_of": "2026-11-22"
+  },
+  "as_of": "2026-11-22"
+}

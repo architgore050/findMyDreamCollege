@@ -1,0 +1,40 @@
+# Expert-panel fixture (SYNTHETIC — offline canary for the panel scoring kit).
+# A real panel records rater identity, expertise, conflict disclosure and date;
+# this fixture uses synthetic raters and institutions that do not exist.
+schema_version: 1
+panel_id: fixture-panel-2026-11
+synthetic: true
+notes: >-
+  Three raters rank their preference order for the fixture profile. Rater 3
+  omits one institution so the reliability metrics exercise missing ratings
+  (Krippendorff's alpha handles incomplete units; ICC uses complete cases).
+raters:
+  - rater_id: expert-1
+    expertise: "Retired MLT curriculum accreditation reviewer (synthetic)"
+    conflict_disclosure: "none"
+    rated_at: "2026-11-20"
+  - rater_id: expert-2
+    expertise: "Chief lab scientist, teaching hospital (synthetic)"
+    conflict_disclosure: "none"
+    rated_at: "2026-11-20"
+  - rater_id: expert-3
+    expertise: "Allied-health programme coordinator (synthetic)"
+    conflict_disclosure: "none"
+    rated_at: "2026-11-21"
+profiles:
+  - profile_id: fixture-mlt-shortlist-v1
+    ratings:
+      expert-1:
+        - "All India Institute of Medical Sciences, Delhi"
+        - "Christian Medical College"
+        - "Post Graduate Institute of Medical Education and Research"
+        - "City Care Paramedical College, Hyderabad"
+      expert-2:
+        - "All India Institute of Medical Sciences, Delhi"
+        - "Post Graduate Institute of Medical Education and Research"
+        - "Christian Medical College"
+        - "City Care Paramedical College, Hyderabad"
+      expert-3:
+        - "Christian Medical College"
+        - "All India Institute of Medical Sciences, Delhi"
+        - "Post Graduate Institute of Medical Education and Research"

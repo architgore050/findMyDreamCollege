@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "profile_id": "fixture-mlt-shortlist-v1",
+  "synthetic": true,
+  "notes": "Self-drift fixture pair (previous snapshot). Synthetic candidate set with sub-scores matching the seven configured weights; claims hashes are deterministic fixture strings, not real claim-store hashes.",
+  "captured_at": "2026-10-01T00:00:00Z",
+  "scorer_version": "0.3.0",
+  "weights_version": "2026-11-18.1",
+  "rows": [
+    {"rank": 1, "institution_name": "Alpha Institute of Allied Health", "programme": "B.Sc. Medical Laboratory Technology", "claims_hash": "hash-alpha-v1", "evidence_urls": ["https://fixture.invalid/evidence/alpha-curriculum"], "sub_scores": {"outcomes": 55, "affordability_roi": 70, "clinical_training": 60, "academic_quality": 50, "student_life_safety": 65, "admission_realism": 60, "financing_feasibility": 60}},
+    {"rank": 2, "institution_name": "Beta College of Health Sciences", "programme": "B.Sc. Medical Laboratory Technology", "claims_hash": "hash-beta-v1", "evidence_urls": ["https://fixture.invalid/evidence/beta-internship"], "sub_scores": {"outcomes": 50, "affordability_roi": 60, "clinical_training": 72, "academic_quality": 55, "student_life_safety": 60, "admission_realism": 58, "financing_feasibility": 62}},
+    {"rank": 3, "institution_name": "Gamma School of Paramedical Studies", "programme": "B.Sc. Medical Laboratory Technology", "claims_hash": "hash-gamma-v1", "evidence_urls": [], "sub_scores": {"outcomes": 48, "affordability_roi": 65, "clinical_training": 55, "academic_quality": 52, "student_life_safety": 58, "admission_realism": 62, "financing_feasibility": 58}},
+    {"rank": 4, "institution_name": "Delta Allied Health Academy", "programme": "B.Sc. Medical Laboratory Technology", "claims_hash": "hash-delta-v1", "evidence_urls": [], "sub_scores": {"outcomes": 45, "affordability_roi": 58, "clinical_training": 50, "academic_quality": 48, "student_life_safety": 55, "admission_realism": 55, "financing_feasibility": 56}},
+    {"rank": 5, "institution_name": "Epsilon Institute of Medical Technology", "programme": "B.Sc. Medical Laboratory Technology", "claims_hash": "hash-epsilon-v1", "evidence_urls": [], "sub_scores": {"outcomes": 40, "affordability_roi": 55, "clinical_training": 48, "academic_quality": 46, "student_life_safety": 52, "admission_realism": 52, "financing_feasibility": 54}}
+  ]
+}
