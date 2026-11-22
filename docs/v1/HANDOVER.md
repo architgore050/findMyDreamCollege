@@ -23,6 +23,55 @@ invariant findings live here so the next agent does not re-derive them.
   `export PATH=~/.local/bin:$PATH` (corepack shim). Postgres data:
   `/home/z/my-project/.tools/pgdata`.
 
+## Decisions taken autonomously (v1 build-out — the operator may revisit any)
+
+The user delegated decisions for the v1 build ("make whatever decision you
+want and mention that in the handover doc; the local agent can start the
+actual discussion"). Every decision below is revisable without touching the
+invariants in AGENTS.md.
+
+1. **PLAN #6 read as "contract-complete the four family lanes", not "add four
+   duplicate adapters".** fee/seat/placement/admission discovery was already
+   composed from fee_regulator + state_counselling (12 rows) +
+   institution_site across 14 registry entries (built in earlier waves).
+   Duplicating them would have meant four new adapters doing the same thing.
+   What acceptance (c) actually lacked — span-resolution tests — was added
+   (verifier: "honest and complete… no acceptance gap").
+2. **The four family lanes' real crawl stays LQ-2** (needs operator network +
+   politeness budget). The cloud never runs the crawl.
+3. **Wave 8 fixed a real render bug it found**: NextDeadlines rendered
+   `#undefined` for a deadline with no deciding claim. Fixed to "none
+   published", matching the exam table's own null handling.
+4. **/sources page has no dedicated render test** (accepted gap): it is a
+   server component with no computed numbers; its failure path is covered by
+   the ApiFailurePanel tests. If the final review disagrees, a Playwright
+   route test is the right tool, not a jsdom hack.
+5. **The Nav "Methodology" link has no unit test**: jsdom cannot provide
+   Next's router context; a one-line const entry is pinned by review, not a
+   router mock. Revisit if nav grows logic.
+6. **Methodology policy text (value_policy / dispute_path) lives in the API
+   handler as constants** — they describe behaviour (UNKNOWN-is-a-value,
+   never-rewritten), not numbers, and the tests assert their content. If the
+   policy text itself should become configurable, that is a config schema
+   decision for the operator.
+7. **Append-only correction convention**: an exclusion correction is appended
+   as `<id>@<date-of-correction>`; AppendOnlyViolation names this in its
+   message. The same convention is recommended for any future append-only
+   registry (claims already use supersession instead of edits).
+8. **Methodology dispute channel = GitHub issues on this repo** (real URL,
+   verified) + the /review console for operator-side supersede/reject. If the
+   tool is later sold to counselling firms, this is where a support channel
+   replaces the public tracker — a product decision, flagged here.
+9. **The semantic classification run (LQ-7) proposes; the cloud disposes.**
+   Admissions are refused unless the cited quote is verbatim in the fetched
+   sample and no second family is proposed. The model's own score is recorded
+   but never used to admit or refuse. Do not loosen this without revisiting
+   AGENTS.md invariant 4 (fabrication).
+10. **MLT scope is confirmed wired**: config/programmes.yaml carries the
+    India-v1 MLT vocabulary (B.Sc. MLT/MLS, BMLT, BMLS, DMLT, …) and the
+    ranking flow covers it; the sister's use case is the primary v1 target.
+    The MBBS/Agriculture rule-exclusions (W9 scope gate) do NOT exclude MLT.
+
 ## Wave 7 — scoring coverage diagnostics (2026-11-22)
 
 - `coverage-report` CLI (read-only): per in-scope programme, which of the 7

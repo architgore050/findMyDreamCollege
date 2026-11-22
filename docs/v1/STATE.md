@@ -181,6 +181,10 @@ risks).
 
 ## Merged to main (verified via GitHub API)
 
+- PR #10 (wave 9: generated methodology surface + append-only exclusion
+  registry), verifier verdict approve. **Cumulative: waves 1-9 all merged
+  (PRs #1-#10). Wave 10 = release v1.0.0-rc1.**
+
 - PR #7 (wave 7: per-programme scoring coverage diagnostics), verifier
   verdict approve. Cumulative: waves 1-5 and 7 merged (PRs #1-#7); remaining
   cloud work = waves 6, 8, 9, 10 per PLAN order.
@@ -206,6 +210,11 @@ risks).
 - Any model/GPU/real-crawl run — LQ-2..LQ-5.
 
 ## Next
+
+- Release v1.0.0-rc1 is tagged (see docs/v1/RELEASE-v1.0.0-rc1.md). The
+  operator runs LOCAL-QUEUE LQ-1…LQ-7 (docker/GPU/model/crawl) — the data
+  work that turns the built pipeline into ranked shortlists. After those
+  runs: re-check coverage via `coverage-report`, then decide rc → final.
 
 - Wave 6 (PLAN #6): fee / seat / placement / admission adapters in
   config/sources.yaml + fmd/adapters, fixtures + span-resolution tests.
