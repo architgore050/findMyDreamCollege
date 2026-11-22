@@ -683,7 +683,7 @@ class PipelineRunCreate(RowModel):
     """One stage execution in the SQL run ledger (migration 0003)."""
 
     run_id: str
-    stage: Literal["crawl", "extract", "score", "worker", "ingest"]
+    stage: Literal["crawl", "extract", "score", "worker", "ingest", "extract_batched"]
     started_at: datetime
     finished_at: datetime | None = None
     counts: dict[str, int] = Field(default_factory=dict)

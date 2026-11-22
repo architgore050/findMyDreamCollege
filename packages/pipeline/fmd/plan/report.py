@@ -127,6 +127,8 @@ def build_report(
     phase_b_margin: float,
     phase_a_min_score: float,
     phase_a_margin: float,
+    recurring_min: int | None = None,
+    table_min_rows: int | None = None,
     sample_for: Callable[[Mapping[str, Any]], str | None] | None = None,
 ) -> dict[str, Any]:
     """Bucket every evidence-role document; family-set rows are counted only.
@@ -164,6 +166,8 @@ def build_report(
             phase_b_margin=phase_b_margin,
             phase_a_min_score=phase_a_min_score,
             phase_a_margin=phase_a_margin,
+            recurring_min=recurring_min,
+            table_min_rows=table_min_rows,
         )
         if replayed is not None:
             bucket = "would_classify_with_text" if sample else "would_classify_from_url"

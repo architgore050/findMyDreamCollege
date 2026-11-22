@@ -737,7 +737,7 @@ class BatchedRunner:
         assert controller is not None
         cycle = RunSummary(
             run_id=self.orchestrator.run_id_factory(),
-            stage=f"extract_batched:{cycle_index}",
+            stage="extract_batched",
             started_at=utcnow(),
         )
         started = time.perf_counter()
