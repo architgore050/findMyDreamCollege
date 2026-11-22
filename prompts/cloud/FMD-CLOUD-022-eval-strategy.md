@@ -2,12 +2,20 @@
 
 ~~~~
 You are a one-shot cloud coding agent for project `fmd` (findMyDreamCollege). This wave is
-RESEARCH + PROPOSAL ONLY. You are not implementing anything. Do not edit code. Your job is to
-produce a well-evidenced answer to: **"how should this product be evaluated against external
-ground truth — and how do we get external ground truth that this pipeline cannot produce?"**
+**research + design only. No code, no execution, no PRs.** Your job is to produce:
 
-Base SHA: cdae03f71a
-Do not push. Chat reply is NOT read — the deliverables are the files this wave asks for.
+1. A catalog of "golden-dataset" evals (external ground truth about unis) — where they exist,
+   and which are usable here.
+2. A catalog of **evals that do NOT need a golden dataset at all** — novel product-quality evals
+   where a specialized research agent, done per profile/use case, produces a verdict of the form
+   "the product recommends the right thing for this profile" (e.g., "the best uni for B.Sc. MLT in
+   State X in this profile," or "the recommendation is likely wrong" with why). This is the core
+   of what we need — product evals, not pipeline evals.
+3. Integration sketches (where data lives, scoring rule, when it runs), but as *design sketches*.
+
+REPO: https://github.com/architgore050/findMyDreamCollege.git
+Base SHA: 66702b20b603bc36babbca76be359ae3a3a8209e. Do not push. Chat reply is NOT read —
+the deliverables are the files this wave asks for.
 
 READ FIRST
 - AGENTS.md
@@ -29,91 +37,93 @@ product" — one whose recommendations have been validated over years. Research:
 outcome datasets become "maturity"? (Probit/survey cohorts, longitudinal placement data, college
 outcome benchmarks.)
 
+YOUR JOB, EXACTLY
+- Research "how do evals work when there is no golden dataset?" — this is the main deliverable.
+  Examples to investigate and design around: cross-validation (leave-N-out), expert judgment
+  benchmarks (AHP, NAAC scores as evaluators of quality), "wisdom of the crowd" evals (LinkedIn,
+  resumes, course platforms), "role-model benchmarks" (the best students per profile, replayed),
+  self-eval/drift over time (what does it mean for the product to be right when the world changes),
+  time-asymmetric evals (an eval on N year-old data against profile year N+k, like a ladder of
+  rolling "did we get it right in the N years since?" questions).
+- Design "verdict evals": evals where the agent conducts *specialized research* for each profile
+  (e.g., profile: "B.Sc. MLT, plus 10th-grade intelligence, state X, year 2027") and produces a
+  decision: (a) the product is right ("these N programmes genuinely match", with evidence from the
+  dataset if any and from research otherwise), or (b) it's wrong ("a genuinely better uni exists —
+  here it is, with what it does differently"). The point: the product evals a *verdict product* —
+  so the eval productizes the eval.
+- Design fast and slow eval kinds. Fast = data-driven, repeatable, no new acquisition. Slow =
+  acquiring things we can't get yet (outcome data via consultancies, proprietary student data,
+  survey programs with opt-ins).
+- For every eval idea: data shape, scoring rule, honest coverage/gaps (sparse data, missing values,
+  intake-year mismatch, breadth of programme names), cost, time-to-run.
+- Feasibility/risk notes: circular-data traps, privacy, leapfrog risk (changing model over time),
+  staleness windows, how "maturity" is observed over time.
+
 SCOPE OF YOUR RESEARCH (be exhaustive; use the web tool)
-A. **Existing external ground-truth datasets for Indian university outcome evaluation**
-   1. Indian regulators and agencies: NIRF (rank lists, institutional accreditation, maybe outcome
-      data?); NCWEB (NIRF); MoHFW statistics; Ministry of Skills & Entrepreneurship; AICTE (accred.);
-      NAAC scores (colleges, district, profiles) — how does NAAC's methodology work, what data do they
-      measure vs rank?
-   2. Outcome/employment datasets: NSS/NARIVS? (NSS 2M 'Activities & Employment Status' — but it's an
-      unknown-era sample), EDU-GGP (MHRD DIET?), DIET2/ICAR for diabetic safety — no; focus: employment
-      status of graduates per degree per state (there are reports, e.g., NSS surveys by NSSIC). Also:
-      UIDAI (Skillsinfra?), NSF GIFS? (no), THE CAREER, LinkedIn 'Outlook Report'? (private), Google
-      Careers? (no), employment reports from seekers; ShastraOnline / Sulekha / iSpray — fringe.
-   3. Rankings that legitimately rank programmes: NIRF (billing: SSR/SCS methodologies), Careers360?
-      or 'IKEA'? (no) — better: Shiksha, Careers360 India (private, but has per-programme data + user
-      reviews — DOES THIS COUNT AS "PRIVATE FEEDBACK"?), CollegeDunia (private, similar), Shiksha data
-      feeds (API?), TheWorld University Rankings? (billing), Employment scores: newspaper HR
-      survey by Hindustan Times / DNA / The Hindu / Economic Times — historically published (across
-      years) — check archival access!
-   4. US/int'l outcome data we might use as a template for maturity signals: College Scorecard (NCES —
-      debt, grad rates), QILT (quondam of OECD — quality/job stability), NCCIIC? no; THE StEP —EEDb —
-      US methodologies: NCHEpie (niche?), ' bom ' GE - es? NO — be concrete and honest: dig into
-      NCES, QILT, HEA 'Employability measures'.
-   5. Maturity: how do products claim maturity (sources citing years of data, methodology papers,
-      statistical-power caveats)? What would we need (a) to produce — N samples, time series per
-      programme; (b) a "truth source" — self-eval of outcome claims vs exit surveys (self-consistency).
-B. **The two eval streams we need to propose**
-   - **Stream A (fast, data-driven).** From public datasets: design a benchmark — e.g., "given profile P
-     and location S, for two candidate programmes A and B (both accepted/intersected), which does the
-     dataset say students actually complete/later-employ?" — i.e., a *consistency score* between our
-     ranking and external outcome rankings over the same dataset. Requirements: (i) be honest: external
-     data likely has gaps — study gaps, say how to handle (sparse, missing-not-zero, date mismatch with
-     intake year, scope of programme breadth: compare full names not B.Sc.)
-     (ii) avoid circularity: split methods — use public data for eval of rankings, but still source claims
-     from our own pipeline? Hmm — think about what counts as ground truth vs what we generate.
-   - **Stream B (slow, proprietary data acquisition).** Research how to acquire real outcome data:
-     partnerships with consultancies (names, fee ranges, typical engagement: roadshows, white papers,
-     past services), NO-CAP — interview older batches of students via these sources?
-     Governance/ethics of student-outcome feedback (privacy, NDAs, GDPR, India Data Protection Authority
-     Bill 2024, encryption).
-   C. **Harness-ready design for both.** What data schema do they feed our pipeline? How to score and
-      report (precision@k, recall, interval overlap, "genuinely correct" = interval-overlap rule, not
-      point estimates). How to version and freeze ground-truth snapshots (immutable, time-stamped,
-      retractable).
-D. **An honest feasibility/risk report.** Circular-data traps (learning on what we extract vs using it
-    as truth), time-to-data, privacy, dark-funnel leakage of user IDs, A/B testing, the maturity of the
-    public data. Where the product is currently guaranteed correct by construction (registry-driven) —
-    how to validate there too.
+A. **Where we can find ground truth and how mature it is.**
+   - Indian: NIRF (rank lists, methodology), MoHFW statistics, MoSES, AICTE (accred.), NAAC scores
+     (colleges, district, profiles) — methodology?
+   - Outcome/employment data: NSS (NARIVS), MoHFW (DIET), LinkedIn (salaries/ LinkedIn 'Outlook' — private),
+     newspaper HR surveys (across years — archival!),shiksha, careerc 364 with historical data?
+   - Web + public: KHARCH of hiring events? "Batching"? Yes! Corporate recruitment data over years.
+   - Existing eval precedent papers on Indian uni evals (search: "Indian university ranking methodology",
+     "NAAC score study", "Employment generation Indian college papers").
+   - US/int'l: College Scorecard (NCES), QILT, THE, NCHEpie — NCES IPEDS methods, earnings vs graduates.
+   - Maturity: how do products claim maturity? (years of data, method papers, statistical-power caveats).
+B. **Design doc: "evals that don't need golden datasets."**
+   - Survey-driven: student-perceived outcomes as eval labels (opt-in, waves of students).
+   - NSS/MICRO employment status as eval labels for "where did our programme's students end up?"
+   - LinkedIn/CVs/SSDR studies as expert benchmarks.
+   - Cross-year calibration: v1 evals (2026 data), v2 evals (2028), etc.
+   - Behavior-oriented eval: what does a "success" mean — into median BSc.MLT of year Y+2? into
+     recognized programme? into job? ("placement outcomes" as the gold: placement_report claims).
+C. **Design doc: verdict-style evals.** — the "what would a research agent do for one profile" design:
+   - What "research" means per profile (deep dive on 1-3 unis with the most evidence, some with no evidence
+     — mark as honest negatives).
+   - How to produce a verdict with the product: "correct (X unis match), partially (Y unis match but Z
+     underperform), incorrect (A's top rec is B, and B is listed with...)" — careful to not let the model
+     invent facts; define an eval "product is correct iff for all profiles in a test set, the rec is in the
+     top-3 of a reference ranking built from the dataset used by the existing `fmd eval`?).
+D. **Harness sketch (integration plan, but as sketch):**
+   - How new truth data would live: new SQL tables, `data/golden/` layout, fixture format, `--fixture-path`
+     contract, versions (truth_version, scope, as_of, sha256 of the data).
+   - How the two eval kinds hook into `fmd eval` (CLI flags like `--eval-kind`, `--stream`, golden vs
+     proprietary streams).
+   - How to run them: cron/scheduler, thresholds, drift reports (drift vs previous stream run).
 
 DELIVERABLES (files in the repo, in the branch, commit + push to main):
-1. `docs/v1/eval/00-research-summary.md` — your findings, each source's URL, maturity, licensing, whether
-   it's usable for our product question (honest: most are not fit for purpose, with reasons).
-2. `docs/v1/eval/01-stream-a-fast-data-driven.md` — Stream A design: source(s), ground-truth table design,
-   the scoring rule (what "correct" means for our product), data availability analysis (years of data,
-   sample sizes), how it behaves on our current corpus (expected), data licensing + acquisition (read-only
-   public sources only; robots; rate limits; caching; costs).
-3. `docs/v1/eval/02-stream-b-slow-proprietary.md` — Stream B design: acquisition path to private data
-   (how to make deals, what to ask, alternatives to private data: self-collected via LinkedIn ("Google
-   Products"? "Mission"?), opt-in graduate surveys we could run ourselves — wait: we can only claim data we
-   legitimately acquire; the prompt should say: PROPOSE acquisition paths for third-party proprietary
-   outcome data (consultancies, AGROM?..), PLUS note that self-collected student feedback is impossible
-   under privacy norms without opt-in machinery — propose opt-in web survey framework + data minimization
-   + "harbor" for opt-out, and note FMD invariant 14 (no user-specific logic — these are scalars, OK)).
-4. `docs/v1/eval/03-integration-plan.md` — how the two streams hook into `fmd eval` (the CLI contract:
-   where truth data lives — new SQL tables, data/golden/ layout, `--fixture-path` contract), how scores are
-   compared, how A/B results are reported (small YAML-driven report with pass/fail thresholds), how
-   stream-B mode is flagged (`--mode data-driven|proprietary`), and how maturity is observed over time
-   (time series of score by stream).
-5. `prompts/cloud/FMD-CLOUD-022-eval-strategy.md`? No — that's this patch.
+1. `docs/v1/eval/00-research-summary.md` — findings: each external source's URL, maturity, licensing,
+   usability for our product question.
+2. `docs/v1/eval/01-eval-designs.md` — designs: (a) golden-dataset evals (the full taxonomy of current
+   kinds — dataset, score rule, honest gaps); (b) evals without golden datasets (survey/crowd/role-model/
+   self-eval kinds, as above, with data shapes + score rules); (c) verdict-style eval (the "research agent
+   per profile" design — what it does, how the verdict is produced and how to audit it); (d) integration
+   sketch (how streams plug into fmd eval).
+3. `docs/v1/eval/02-findings-viable.md`? — or fold into 01. Keep: "viable options summary — which streams
+   we'd build first, cost, and the riskiest assumption to verify before committing."
+4. A proposal prompt? No.
 
 Notes:
-- NO — "golder truth data of what university is actually the best option" — the agent should research
-  sources of "best options" literature: the web has things like NIRF PCI methodologies, ICAR (agri),
-  NAAC scores, MoHFW staffing in graduation (KVPY?), Google Search? (public).
-- Honesty and honesty is a MUST (AGENTS.md): an external dataset that is scraped-ad filtered or small
-  says so. Proposing no-SQL? No — extend Postgres: new tables `eval_truth` (referral hashes), schema
-  versioning; note that data-driven truth is data, so it should be as well-sourced as other claims
-  (URL, fetched_at, sha256).
-
-Formats: follow the repo's existing conventions: Data under data/ (parquet via duckdb? existing `data/golden/` has JSON), config-driven YAML, YAML/MD docs.
+- **The four invariants (AGENTS.md) are hard bounds on your evals, not just on the pipeline:**
+  1. No user-specific logic (no applicant marks/budget in evals).
+  2. Numbers computed, never model-emitted — for evals: "the score we report is computed by the
+     harness, not by the eval agent's claims" — the model is allowed to *verdict*, not *evidence*.
+  3. UNKNOWN is a value — the eval has to report when it doesn't know (coverage gaps) instead of
+     defaulting to 0/50.
+  4. Trust in the eval source itself (golden datasets need provenance: URL, fetched_at, sha256).
+  5. The B2/D19 guidance from `docs/v1/HANDOVER` — evals for an Outcome-focused product benefit most
+     from world-data evals before proprietary data; keep the B2/HANDOVER deferred-items vision aligned.
+- **Honesty:** say where an external dataset can't be used (e.g., proprietary, small N, US-only).
+   Say where proposed eval costs are wishes, not estimates — it should say "this needs a deals study:
+   how would we get data X?"
+- Formats: YAML/MD, follow repo conventions.
 
 RUN (all must pass; note in the report if the DB is unavailable, but it was available in CI for w9):
   - N/A: research + docs; but confirm offline tests green on main first (uv sync, ruff, pytest).
   - `uv run ruff check .`
   - `uv run pytest -q` (offline)
   - Doc: `ls docs/v1/eval/`; verify the new docs render (text only).
-  - Also confirm `git rev-parse HEAD` == the recorded base SHA.
+  - Also confirm `git rev-parse HEAD` == the recorded base SHA (66702b2).
 
 OUTPUT (repo root, UTC timestamp):
   fmd-patch-w11-eval-strategy-<UTC>-01.patch
@@ -124,15 +134,9 @@ OUTPUT (repo root, UTC timestamp):
 Patch: `git diff --binary --full-index --find-renames <base>...HEAD > <patch>`
 MANIFEST: format fmd-patch-v1, wave w11, workstream eval-strategy, base_sha as above,
   branch feature/<patch_id>, commit_message, summary, files_changed, tests_run (assert >= green
-  earlier results), evals {"result":"pass","notes":"see docs/v1/eval/00-research-summary.md"},
+  earlier results), evals {"result":"pass","notes":"see docs/v1/eval/01-eval-designs.md"},
   known_gaps, created_at, agent.
-findings.json must state: every external dataset considered and its blocker for Stream A or B;
-  the full acquisition-path options for Stream B (consultancies, surveys, NHA/exams);
-  the two streams as concretely designable (data shape, score rule, integration into fmd eval);
-  which public datasets are directly usable today and which need NDAs/agreements.
+findings.json must state: the full eval catalog (golden-dataset evals + no-golden-dataset evals +
+  verdict-style evals), the honest blockers for each (data availability, size, licensing, privacy),
+  the integration sketch summary, and what we should build first.
 ~~~~
-
-You (the operator) gave me three things this prompt must not contain:
-1. The framing "mature product" — the agent should *define* maturity itself; your position is just that a real product needs evidence from the outside, not generated inside.
-2. The "fast/slow" dichotomy — the agent should think from scratch about what makes evals fast vs slow, not absorb your categories.
-3. The "we will implement both" — propose; don't design both fully; the user decides which to build after seeing the research.
