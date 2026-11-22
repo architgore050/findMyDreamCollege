@@ -109,7 +109,7 @@ class Shortlist(BaseModel):
         if not self.rows:
             raise ValueError(f"{self.profile_id}: shortlist has no rows")
         ranks = [row.rank for row in self.rows]
-        if ranks != sorted(ranks) or ranks[0] != 1 or len(set(ranks)) != len(ranks):
+        if ranks != list(range(1, len(self.rows) + 1)):
             raise ValueError(f"{self.profile_id}: ranks must be a 1..N series without gaps")
         return self
 
