@@ -6,7 +6,7 @@ RESEARCH + PROPOSAL ONLY. You are not implementing anything. Do not edit code. Y
 produce a well-evidenced answer to: **"how should this product be evaluated against external
 ground truth — and how do we get external ground truth that this pipeline cannot produce?"**
 
-Base SHA: daf1d08b31
+Base SHA: cdae03f71a
 Do not push. Chat reply is NOT read — the deliverables are the files this wave asks for.
 
 READ FIRST
