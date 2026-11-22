@@ -25,6 +25,7 @@ Blocks: wave 1 verification, definition-of-done #1.
 
 ### LQ-2: real crawl + extraction + scoring pass (GPU + model + real network)
 Why local: **GPU (RTX 5080) + llama-server 26B-A4B weights + real egress.**
+(The family lanes this crawl exercises: fee_regulator, state_counselling x12, institution_sites — the fee/seat/placement/admission lanes of PLAN #6.)
 Command:
   cd packages/pipeline && set -a && . ../../.env && set +a
   export FMD_EXTRACT_PROVIDER=local FMD_SNAPSHOT_DIR=$HOME/fmd-snap2
