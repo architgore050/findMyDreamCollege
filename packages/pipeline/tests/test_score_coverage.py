@@ -166,7 +166,7 @@ def test_sub_score_ids_mirror_the_scorer_implementations() -> None:
     from fmd.score import coverage
     from fmd.score.sub_scores import IMPLEMENTATIONS
 
-    assert coverage.SUB_SCORE_IDS == tuple(IMPLEMENTATIONS)
+    assert tuple(IMPLEMENTATIONS) == coverage.SUB_SCORE_IDS
 
 
 def test_programme_coverage_reports_absent_sub_scores() -> None:
