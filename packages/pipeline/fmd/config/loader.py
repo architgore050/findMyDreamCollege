@@ -492,6 +492,11 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
             errors.append(
                 f"acquire.yaml: batch.poll_timeout_s must be > 0, got {batch.poll_timeout_s}"
             )
+        if batch.prefetch_documents < 0:
+            errors.append(
+                f"acquire.yaml: batch.prefetch_documents must be >= 0, "
+                f"got {batch.prefetch_documents}"
+            )
         if batch.server_script is not None and not str(batch.server_script).strip():
             errors.append(
                 "acquire.yaml: batch.server_script must be a path or unset (null); "
@@ -577,14 +582,11 @@ def _validate_cross_references(registry: Registry, errors: list[str]) -> None:
                 errors.append(f"{where}: scoring.kind=transform needs `transform`")
             elif transform not in weights.transforms:
                 errors.append(
-                    f"{where}: transform {transform!r} is not defined in "
-                    "weights.yaml:transforms"
+                    f"{where}: transform {transform!r} is not defined in weights.yaml:transforms"
                 )
     for alias, target in predicates.aliases.items():
         if alias in predicates.predicates:
-            errors.append(
-                f"predicates.yaml: alias {alias!r} collides with a canonical predicate"
-            )
+            errors.append(f"predicates.yaml: alias {alias!r} collides with a canonical predicate")
         if target not in predicates.predicates:
             errors.append(
                 f"predicates.yaml: alias {alias!r} points at unknown predicate {target!r}"

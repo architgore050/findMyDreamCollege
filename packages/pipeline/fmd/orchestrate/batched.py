@@ -35,6 +35,7 @@ says so in the summary (``server_control: degraded``) rather than failing.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import queue
 import signal
@@ -261,6 +262,9 @@ def take_batch(
     return batch
 
 
+logger = logging.getLogger(__name__)
+
+
 class PrefetchBuffer:
     """CPU-side double buffer (wave v1-w4): reads the *next* batch's snapshot
     bytes off the main thread while the current cycle's extraction phase keeps
@@ -274,9 +278,7 @@ class PrefetchBuffer:
     prefetch winning the race; only the wall clock does.
     """
 
-    def __init__(
-        self, *, store: Any, depth: int = 4, stop: threading.Event | None = None
-    ) -> None:
+    def __init__(self, *, store: Any, depth: int = 4, stop: threading.Event | None = None) -> None:
         self._store = store
         self._depth = max(int(depth), 1)
         self._stop = stop if stop is not None else threading.Event()
@@ -300,9 +302,7 @@ class PrefetchBuffer:
         for sha in fresh:
             self._queue.put(sha)
         if self._thread is None or not self._thread.is_alive():
-            self._thread = threading.Thread(
-                target=self._work, name="fmd-prefetch", daemon=True
-            )
+            self._thread = threading.Thread(target=self._work, name="fmd-prefetch", daemon=True)
             self._thread.start()
 
     def _work(self) -> None:
@@ -315,8 +315,13 @@ class PrefetchBuffer:
                 return
             try:
                 data = self._store.get(sha)
-            except Exception:
-                continue  # take() returns None ⇒ the acquire loop reads live
+            except Exception as exc:
+                # A prefetch miss is never a run failure — take() returns None
+                # and the acquire loop reads live — but it must not be silent:
+                # a persistently failing store otherwise degrades to 100% live
+                # reads with zero observability.
+                logger.warning("prefetch read failed for %s: %s", sha[:12], exc)
+                continue
             self._bytes[sha] = data
             self.reads.append(sha)
 
@@ -698,9 +703,7 @@ class BatchedRunner:
         the next window will plausibly convert (a bounded guess; a miss only
         costs a live read later).
         """
-        candidates = take_batch(
-            remaining, batch_pages=self.batch_pages, pages_for=self._pages_for
-        )
+        candidates = take_batch(remaining, batch_pages=self.batch_pages, pages_for=self._pages_for)
         shas = [
             item.snapshot.sha256
             for item in candidates
@@ -766,9 +769,7 @@ class BatchedRunner:
                     acquired.append(item)
                     continue
                 buffer = self._prefetch_buffer
-                data_for = (
-                    (lambda sha, b=buffer: b.take(sha)) if buffer is not None else None
-                )
+                data_for = (lambda sha, b=buffer: b.take(sha)) if buffer is not None else None
                 stage.run(
                     summary=cycle,
                     selected=[item.snapshot],

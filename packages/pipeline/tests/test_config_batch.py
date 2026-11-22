@@ -138,3 +138,19 @@ def test_batch_helper_reads_the_committed_block(config_dir: Path) -> None:
     # Guards the helpers above: a missing block would make every rejection test
     # pass for the wrong reason.
     assert _batch(config_dir)["pages"] == 100
+
+
+def test_prefetch_documents_is_loaded_and_validated(config_dir: Path) -> None:
+    """Wave v1-w4: the double-buffering knob is registry-driven like every
+    sibling batch knob — default 4, 0 disables, negative rejected."""
+    payload = _acquire(config_dir)
+    assert payload["batch"]["prefetch_documents"] == 4
+
+    payload["batch"]["prefetch_documents"] = 0
+    (config_dir / "acquire.yaml").write_text(yaml.safe_dump(payload, sort_keys=False))
+    registry = load_registry(config_dir, env={})
+    assert registry.acquire.batch.prefetch_documents == 0
+
+    payload["batch"]["prefetch_documents"] = -1
+    (config_dir / "acquire.yaml").write_text(yaml.safe_dump(payload, sort_keys=False))
+    assert "prefetch_documents" in _load_error(config_dir)

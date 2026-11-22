@@ -201,7 +201,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     worker_parser = subparsers.add_parser(
         "worker", help="long-running crawl -> extract -> score loop (WS-O glue)"
-    ) 
+    )
     worker_parser.add_argument(
         "--limit", type=int, default=None, help="maximum items per stage per tick"
     )
@@ -286,9 +286,7 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument(
         "--json", action="store_true", help="machine-readable output (default: table)"
     )
-    llm_ping = llm_sub.add_parser(
-        "ping", help="alias for `doctor` without --live"
-    )
+    llm_ping = llm_sub.add_parser("ping", help="alias for `doctor` without --live")
     llm_ping.add_argument("--json", action="store_true", help="machine-readable output")
 
     golden_parser = subparsers.add_parser(
@@ -657,6 +655,7 @@ def _batch_settings(args: argparse.Namespace) -> dict[str, Any]:
         "server_script": None,
         "keep_server": False,
         "poll_timeout_s": 600,
+        "prefetch_documents": 4,
     }
     if batch is not None:
         defaults.update(
@@ -666,6 +665,7 @@ def _batch_settings(args: argparse.Namespace) -> dict[str, Any]:
                 "server_script": batch.server_script,
                 "keep_server": bool(batch.keep_server),
                 "poll_timeout_s": int(batch.poll_timeout_s),
+                "prefetch_documents": int(batch.prefetch_documents),
             }
         )
     if getattr(args, "batch_pages", None) is not None:
@@ -691,6 +691,7 @@ def _cmd_extract_batched(args: argparse.Namespace) -> int:
             device=settings["device"],
             keep_server=settings["keep_server"],
             poll_timeout_s=settings["poll_timeout_s"],
+            prefetch_depth=settings["prefetch_documents"],
             server_script=settings["server_script"],
         )
         summary = runner.run(limit=args.limit, dry_run=args.dry_run)
@@ -1404,9 +1405,8 @@ def _cmd_programmes_list(args: argparse.Namespace) -> int:
             else f"seats {row.seats if row.seats is not None else '—'} (no claim)"
         )
         review = "review: " + ",".join(row.review_reasons) if row.review_reasons else "review: —"
-        scope = (
-            f"scope={row.scope_tier or '—'}:{row.scope_reason or '—'}"
-            + ("" if row.in_scope else " [OUT]")
+        scope = f"scope={row.scope_tier or '—'}:{row.scope_reason or '—'}" + (
+            "" if row.in_scope else " [OUT]"
         )
         print(
             f"  {row.id} | {names.get(row.institution_id)} ({row.institution_id}) | "
@@ -1593,8 +1593,7 @@ def _cmd_programmes_requalify(args: argparse.Namespace) -> int:
         if entry.action == "merge":
             print(
                 f"  {prefix}[merge] #{entry.programme_id} {entry.name!r} -> "
-                f"#{entry.merged_into}"
-                + (f" {entry.merged_rows}" if entry.merged_rows else "")
+                f"#{entry.merged_into}" + (f" {entry.merged_rows}" if entry.merged_rows else "")
             )
             continue
         if entry.action == "unchanged":
@@ -1642,9 +1641,7 @@ def _cmd_programmes_decide(args: argparse.Namespace) -> int:
         return 0
 
     verdict = "IN scope (equivalent)" if outcome.equivalent else "OUT of scope (not equivalent)"
-    print(
-        f"fmd programmes decide: programme {outcome.programme_id} {outcome.name!r} -> {verdict}"
-    )
+    print(f"fmd programmes decide: programme {outcome.programme_id} {outcome.name!r} -> {verdict}")
     if outcome.previous:
         previous = outcome.previous
         print(

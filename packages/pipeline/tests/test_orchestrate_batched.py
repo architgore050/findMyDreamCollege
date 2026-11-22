@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import signal
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -282,6 +281,7 @@ def test_controller_call_order_stop_acquire_start_wait_extract_then_stop(tmp_pat
     assert harness.lines and harness.lines[0].startswith("[batch] cycle=1")
     assert "device=cuda" in harness.lines[0]
     assert "pages=3" in harness.lines[0]
+    assert summary.counts["pages"] == 3
 
 
 def test_140_page_document_converts_in_full_and_extracts_in_same_cycle(tmp_path) -> None:
@@ -714,20 +714,14 @@ def test_sizing_reads_t2_cache_rows(tmp_path) -> None:
     is ever invoked for it."""
     registry = _registry()
     harness = BatchedHarness(tmp_path, registry, batch_pages=100)
-    _document, scan = harness.add_document(
-        "https://college.ac.in/scan.pdf", "scan-doc", 3
-    )
+    _document, scan = harness.add_document("https://college.ac.in/scan.pdf", "scan-doc", 3)
     del harness.t1_pages["scan-doc"]  # a live conversion would raise: must not run
     from dataclasses import replace as _replace
 
     from test_w10_support import report_doc
 
-    t2doc = _replace(
-        report_doc(), tier="T2", tool="rapidocr", tool_version="3.10.0"
-    )
-    harness.orchestrator._t2_parse_cache_instance = _StubT2Cache(
-        {scan.sha256: (3, t2doc)}
-    )
+    t2doc = _replace(report_doc(), tier="T2", tool="rapidocr", tool_version="3.10.0")
+    harness.orchestrator._t2_parse_cache_instance = _StubT2Cache({scan.sha256: (3, t2doc)})
 
     summary = harness.runner.run(limit=5)
 
@@ -817,9 +811,10 @@ def test_prefetch_reads_next_batch_bytes_during_the_gpu_window(tmp_path) -> None
     first_prefetched = next(
         i for i, (phase, sha) in enumerate(recording.reads) if sha == nxt.sha256
     )
-    assert first_prefetched < len(
-        [1 for e in harness.events[: second_stop + 1] if e == "stop"]
-    ) or recording.reads[first_prefetched][0] == "window-open"
+    assert (
+        first_prefetched < len([1 for e in harness.events[: second_stop + 1] if e == "stop"])
+        or recording.reads[first_prefetched][0] == "window-open"
+    )
     # And the acquire loop consumed the prefetched bytes: exactly ONE live read
     # of `next` happened inside a closed window — none.
     assert ("window-closed", nxt.sha256) not in recording.reads
@@ -848,9 +843,9 @@ def test_prefetch_failure_falls_back_to_live_read(tmp_path) -> None:
     assert summary.counts["extracted"] == 2
 
 
-def test_prefetch_buffer_take_and_close() -> None:
+def test_prefetch_buffer_take_and_close(tmp_path) -> None:
     """Unit: non-blocking take, unknown sha ⇒ None, close joins the worker."""
-    store = SnapshotStore(Path(tempfile.mkdtemp()) / "s")
+    store = SnapshotStore(tmp_path / "s")
     sha = store.put(b"%PDF-1.4\nprefetch-unit\n")
     buffer = PrefetchBuffer(store=store, depth=2)
     buffer.submit([sha, "f" * 64])
