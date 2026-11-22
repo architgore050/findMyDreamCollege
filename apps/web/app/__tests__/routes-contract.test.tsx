@@ -154,8 +154,50 @@ const rankingsPayload: RankingsPayload = {
         },
         evidence_tier: "partial",
         computed_at: "2026-11-16T09:00:00Z",
-        assumptions: [],
+        insights: null,
         gaming_flags: [],
+        assumptions: [],
+      },
+      composite_band: {
+        point: 68.25,
+        lo: 55,
+        hi: 80,
+        method: "weighted_composite",
+        bound: "comonotonic",
+      },
+      evidence_tier: "partial",
+      filters: {
+        order: ["credential_level", "recognition_status"],
+        counts: { pass: 2, fail: 0, unknown: 0 },
+        excluded: [],
+        unverified: [],
+        decisions: {
+          credential_level: {
+            filter_id: "credential_level",
+            result: "pass",
+            claim_id: 12,
+            reason: "degree credential",
+          },
+        },
+      },
+      excluded: false,
+      insights: {
+        selected: [
+          {
+            id: "salary",
+            predicate: "p25_first_year_salary",
+            text: "No p25 first-year salary claim resolves for this programme.",
+            coverage: ["salary"],
+            claim_ids: [],
+            kind: "evidence",
+            detail: {},
+          },
+        ],
+        mandatory: [],
+        coverage: 0.25,
+        covered_units: ["salary"],
+        uncovered_units: ["placement"],
+        stopped_reason: "evidence_exhausted",
       },
       rank: 1,
     },
@@ -303,6 +345,10 @@ describe("ShortlistClient (/shortlist)", () => {
     await waitFor(() =>
       expect(screen.getAllByText(/Medical Laboratory Technology/i).length).toBeGreaterThan(0),
     );
+    // the RANKED row, not the profile summary: the band text comes from the
+    // composite_band payload, and schema-validity is what makes this real
+    expect(container.textContent).toMatch(/weighted_composite/);
+    expect(container.textContent).not.toMatch(/invalid_response|Request failed/);
     expectCleanRender(container);
   });
 
