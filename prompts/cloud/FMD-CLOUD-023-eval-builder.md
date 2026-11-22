@@ -6,7 +6,7 @@ You are the one-shot cloud coding agent building the v1 **product evals**. Resea
 `02-findings-viable.md`, `findings.json`). This wave builds the evals as code + docs.
 
 REPO: https://github.com/architgore050/findMyDreamCollege.git
-BASE SHA: 54abde40138b8a27a3e0b1b0a92bc5d63c782821
+BASE SHA: 93d87d6f2ffbbff026ab57a65affceded6b8df8f
 Do not push until you open the main PR at the end; commit and push often.
 All output must be English-only.
 
