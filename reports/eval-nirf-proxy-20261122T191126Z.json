@@ -1,0 +1,60 @@
+{
+  "aggregate": {
+    "n_cases": 1
+  },
+  "cases": [
+    {
+      "best_available": {
+        "hit": null,
+        "product_top_institution": "city care paramedical college hyderabad",
+        "scored": false
+      },
+      "profile_id": "fixture-mlt-shortlist-v1",
+      "proxy_label": "institution-level proxy: NIRF publishes no paramedical/MLT category, so a rank says nothing about a specific B.Sc. MLT programme or its outcomes",
+      "rank_correlation": {
+        "kendall_tau_b": 0.333333,
+        "n_pairs": 3,
+        "spearman_rho": 0.5
+      },
+      "reference_order": [
+        "all india institute of medical sciences delhi",
+        "post graduate institute of medical education and research",
+        "christian medical college"
+      ],
+      "shortlist_rows": 5,
+      "top_k_overlap": {
+        "3": 1,
+        "5": 3
+      },
+      "top_k_overlap_fraction": {
+        "3": 0.333333,
+        "5": 1.0
+      },
+      "truth_entries": 50,
+      "unknown": {
+        "count": 2,
+        "fraction": 0.4,
+        "institutions": [
+          "city care paramedical college hyderabad",
+          "vidya institute of allied health sciences"
+        ]
+      }
+    }
+  ],
+  "eval_kind": "product",
+  "generated_at": "2026-11-22T19:11:26Z",
+  "ok": true,
+  "proxy_label": "institution-level proxy: NIRF publishes no paramedical/MLT category, so a rank says nothing about a specific B.Sc. MLT programme or its outcomes",
+  "schema_version": 1,
+  "stream": "nirf-proxy",
+  "truth": {
+    "as_of": "2025",
+    "entries": 50,
+    "fetched_at": "2026-11-22T18:40:14Z",
+    "scope": "institution",
+    "source_sha256": "dda9ee1bb9fef22ec4103b9c4dd870f78948ae0ac2f09c3c0446adc07cb78d04",
+    "source_url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+    "truth_kind": "nirf_ranking",
+    "truth_version": 1
+  }
+}

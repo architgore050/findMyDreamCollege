@@ -1,0 +1,57 @@
+{
+  "aggregate": {
+    "n_cases": 1
+  },
+  "cases": [
+    {
+      "epsilon": 2.0,
+      "k": 5,
+      "leave_n_out": [
+        {
+          "kendall_tau_b": 1.0,
+          "n": 1,
+          "n_survivors": 9
+        },
+        {
+          "kendall_tau_b": 1.0,
+          "n": 2,
+          "n_survivors": 8
+        },
+        {
+          "kendall_tau_b": 1.0,
+          "n": 3,
+          "n_survivors": 7
+        }
+      ],
+      "leave_n_out_note": "structurally 1.0: scores are additive per programme, so holding candidates out cannot reorder the survivors; the weight-noise metrics below carry the information",
+      "measures": "internal consistency only; not external correctness (design \u00a72.1)",
+      "n_candidates": 10,
+      "profile_id": "fixture-cv-stability-v1",
+      "weight_noise": {
+        "heldout_in_topk_rate": 1.0,
+        "kendall_tau_b_mean": 0.988889,
+        "kendall_tau_b_worst": 0.955556,
+        "n_variants": 128,
+        "top_k_survival_mean": 1.0,
+        "top_k_survival_worst": 1.0
+      },
+      "weights": {
+        "academic_quality": 10.0,
+        "admission_realism": 10.0,
+        "affordability_roi": 20.0,
+        "clinical_training": 15.0,
+        "financing_feasibility": 5.0,
+        "outcomes": 30.0,
+        "student_life_safety": 10.0
+      }
+    }
+  ],
+  "eval_kind": "product",
+  "generated_at": "2026-11-22T19:11:28Z",
+  "ok": true,
+  "proxy_label": null,
+  "schema_version": 1,
+  "stream": "cv-stability",
+  "truth": {},
+  "weights_version": "2026-11-18.1"
+}

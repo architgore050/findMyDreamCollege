@@ -1,0 +1,60 @@
+{
+  "aggregate": {
+    "n_cases": 1
+  },
+  "cases": [
+    {
+      "captured_at": {
+        "current": "2026-11-22T00:00:00Z",
+        "previous": "2026-10-01T00:00:00Z"
+      },
+      "changes": [
+        {
+          "change": "rank_move",
+          "claims_hash_curr": "hash-gamma-v2",
+          "claims_hash_prev": "hash-gamma-v1",
+          "explained_by": "claims_diff",
+          "from": 3,
+          "institution": "gamma school of paramedical studies",
+          "magnitude": 1,
+          "to": 2
+        },
+        {
+          "change": "rank_move",
+          "claims_hash_curr": "hash-beta-v1",
+          "claims_hash_prev": "hash-beta-v1",
+          "explained_by": null,
+          "from": 2,
+          "institution": "beta college of health sciences",
+          "magnitude": 1,
+          "to": 3
+        }
+      ],
+      "evidence_driven_fraction": 0.5,
+      "n_changes": 2,
+      "profile_id": "fixture-mlt-shortlist-v1",
+      "rank_changes": {
+        "count": 2,
+        "max_abs": 1,
+        "mean_abs": 1.0
+      },
+      "scorer_version": {
+        "current": "0.3.0",
+        "previous": "0.3.0"
+      },
+      "top10_churn": 0.0,
+      "unexplained_count": 1,
+      "weights_version": {
+        "current": "2026-11-18.1",
+        "previous": "2026-11-18.1"
+      }
+    }
+  ],
+  "eval_kind": "product",
+  "generated_at": "2026-11-22T19:11:27Z",
+  "ok": true,
+  "proxy_label": null,
+  "schema_version": 1,
+  "stream": "self-drift",
+  "truth": {}
+}

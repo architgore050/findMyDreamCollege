@@ -1,0 +1,79 @@
+{
+  "aggregate": {
+    "n_cases": 1
+  },
+  "cases": [
+    {
+      "audit_note": "panel measures agreement with the consulted experts; it cannot prove outcome correctness (panel-composition and selection bias, design \u00a72.2)",
+      "cases": [
+        {
+          "kendall_tau_b": 0.333333,
+          "n_raters": 3,
+          "panel_consensus_top3": [
+            "All India Institute of Medical Sciences, Delhi",
+            "Christian Medical College",
+            "Post Graduate Institute of Medical Education and Research"
+          ],
+          "product_top3": [
+            "All India Institute of Medical Sciences, Delhi",
+            "Post Graduate Institute of Medical Education and Research",
+            "City Care Paramedical College, Hyderabad"
+          ],
+          "profile_id": "fixture-mlt-shortlist-v1",
+          "top3_overlap": 2,
+          "top3_overlap_fraction": 0.6666666666666666
+        }
+      ],
+      "effectiveness": {
+        "bootstrap": {
+          "method": "percentile bootstrap over profiles (deterministic)",
+          "note": "ci95 requires >= 2 profiles; n=1 gives a point, not an interval",
+          "resamples": 1000,
+          "seed": 20261122
+        },
+        "ci95_high": null,
+        "ci95_low": null,
+        "kendall_tau_b_mean": 0.333333,
+        "mean": 0.666667,
+        "metric": "mean top-3 overlap fraction (panel consensus vs product)"
+      },
+      "inter_rater_reliability": {
+        "icc_two_way_single": 0.230769,
+        "krippendorff_alpha_nominal": 0.222222,
+        "krippendorff_alpha_ordinal": 0.604743,
+        "n_complete_case_units": 3,
+        "n_units": 4,
+        "note": "alpha on rank values is deliberately harsh: it measures absolute rank-position agreement, not order agreement; the pairwise tau below is the order-agreement view",
+        "pairwise_kendall_tau_b_mean": 0.222222
+      },
+      "panel_id": "fixture-panel-2026-11",
+      "raters": [
+        {
+          "conflict_disclosure": "none",
+          "expertise": "Retired MLT curriculum accreditation reviewer (synthetic)",
+          "rated_at": "2026-11-20",
+          "rater_id": "expert-1"
+        },
+        {
+          "conflict_disclosure": "none",
+          "expertise": "Chief lab scientist, teaching hospital (synthetic)",
+          "rated_at": "2026-11-20",
+          "rater_id": "expert-2"
+        },
+        {
+          "conflict_disclosure": "none",
+          "expertise": "Allied-health programme coordinator (synthetic)",
+          "rated_at": "2026-11-21",
+          "rater_id": "expert-3"
+        }
+      ]
+    }
+  ],
+  "eval_kind": "product",
+  "generated_at": "2026-11-22T19:11:28Z",
+  "ok": true,
+  "proxy_label": null,
+  "schema_version": 1,
+  "stream": "expert-panel",
+  "truth": {}
+}

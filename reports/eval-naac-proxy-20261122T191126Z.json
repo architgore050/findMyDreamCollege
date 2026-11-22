@@ -1,0 +1,59 @@
+{
+  "aggregate": {
+    "n_cases": 1
+  },
+  "cases": [
+    {
+      "best_available": {
+        "hit": null,
+        "product_top_institution": "city care paramedical college hyderabad",
+        "scored": false
+      },
+      "profile_id": "fixture-mlt-shortlist-v1",
+      "proxy_label": "institution-level proxy, medium maturity: NAAC grades are institutional, on a 5-year cycle, and are not programme-level outcome measures",
+      "rank_correlation": {
+        "kendall_tau_b": null,
+        "n_pairs": 0,
+        "spearman_rho": null
+      },
+      "reference_order": [],
+      "shortlist_rows": 5,
+      "top_k_overlap": {
+        "3": 0,
+        "5": 0
+      },
+      "top_k_overlap_fraction": {
+        "3": null,
+        "5": null
+      },
+      "truth_entries": 0,
+      "unknown": {
+        "count": 5,
+        "fraction": 1.0,
+        "institutions": [
+          "city care paramedical college hyderabad",
+          "all india institute of medical sciences delhi",
+          "vidya institute of allied health sciences",
+          "christian medical college",
+          "post graduate institute of medical education and research"
+        ]
+      }
+    }
+  ],
+  "eval_kind": "product",
+  "generated_at": "2026-11-22T19:11:27Z",
+  "ok": true,
+  "proxy_label": "institution-level proxy, medium maturity: NAAC grades are institutional, on a 5-year cycle, and are not programme-level outcome measures",
+  "schema_version": 1,
+  "stream": "naac-proxy",
+  "truth": {
+    "as_of": null,
+    "entries": 0,
+    "fetched_at": null,
+    "scope": "institution",
+    "source_sha256": null,
+    "source_url": "https://naac.gov.in/index.php/en/19-quick-links/62-accreditationresults",
+    "truth_kind": "naac_grades",
+    "truth_version": 0
+  }
+}
