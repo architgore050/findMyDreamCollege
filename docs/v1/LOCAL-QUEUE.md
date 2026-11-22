@@ -88,3 +88,28 @@ Expected: all commands exit 0; programmes > 0; claims > 0; provenance 1.0
 non-vacuous.
 Commit back: `reports/phase4-acceptance.md`.
 Blocks: acceptance-checklist "all PASS or explicitly BLOCKED" claim, release.
+
+### LQ-7: 26B semantic classification pass over `classify-report` residual (wave 5)
+Why local: **26B model** — GPU + model weights (~12.7 GB GGUF); the cloud has neither.
+The deterministic family chain and the admission contract are merged (PLAN #5); the model
+itself must run here to propose admissions for `below_floor`/`ambiguous`/`no_signal` rows.
+
+Command:
+```
+cd packages/pipeline && set -a && . ../../.env && set +a
+export FMD_EXTRACT_PROVIDER=local FMD_SNAPSHOT_DIR=$HOME/fmd-snap2
+scripts/serve_local.sh start && scripts/serve_local.sh probe
+uv run python -m fmd.cli classify-report --with-text --json-out /tmp/classify-report.json
+# Review the residual buckets in /tmp/classify-report.json.
+# Validate the plausible admissions you want to apply (verbatim quote from the
+# document's text sample, known family, no second family proposed) into a JSON
+# list of {"document_url", "family", "quote"} at /tmp/admissions.json.
+uv run python -m fmd.cli plan --admit-evidence /tmp/admissions.json
+```
+Expected: report lists `would_classify_with_text` / `below_floor` / `ambiguous` /
+`no_signal` per bucket; `plan --admit-evidence` applies every admitted document as
+`family_source=semantic` (`ambiguous` and `no_signal` are refused, never guessed).
+`scripts/serve_local.sh stop` at the end.
+Commit back: `reports/classify-report.json` + `/tmp/admissions.json` (review by operator);
+DB counts in `docs/v1/STATE.md` if updated.
+Blocks: wave-5 residual reduction, DoD #2/#7 "useful corpus" from real admitted rows.
