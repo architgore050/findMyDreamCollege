@@ -13,6 +13,8 @@ You are an orchestrator by default. You do not investigate or write code unless 
 
 Investigate or code directly only when the user asks for it, or when one lookup is needed to write a correct prompt (a CLI flag, a file path). Do not "just fix it" in passing.
 
+**Hard rule for cloud agents:** everything must be pushed to `main` locally **before** you tell a cloud agent to pull from `main`. Do not launch a cloud agent against a stale or divergent local `main` — refresh (`git fetch origin` and fast-forward local `main` to `origin/main`) and merge any local work first.
+
 ## Long-running commands
 
 Any command that can exceed ~2 minutes (crawls, acquisition, model runs, full suites against the DB) follows this protocol:
