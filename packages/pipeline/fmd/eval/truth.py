@@ -239,7 +239,9 @@ def load_truth_file(path: str | Path, *, root: Path | None = None) -> NirfTruthF
             problems.append("truth_version 0 forbids a source_sha256/fetched_at")
         if problems:
             raise TruthError(problems)
-        return NaacTruthFile(header=header, entries=[], source_sha256=None, raw_file=None, fetched_at=None)
+        return NaacTruthFile(
+            header=header, entries=[], source_sha256=None, raw_file=None, fetched_at=None
+        )
 
     if header.raw_file is None:
         problems.append("raw_file is required for an ingested truth table")
@@ -277,7 +279,7 @@ def load_truth_file(path: str | Path, *, root: Path | None = None) -> NirfTruthF
         ranks = [entry.rank for entry in entries]
         if not ranks:
             problems.append("nirf_ranking with no entries; ingest a page or mark version 0")
-        elif ranks[0] != 1 or any(b < a for a, b in zip(ranks, ranks[1:])):
+        elif ranks[0] != 1 or any(b < a for a, b in zip(ranks, ranks[1:], strict=False)):
             problems.append(f"ranks must be a non-decreasing series starting at 1: {ranks[:10]}...")
         if header.category is None or header.year is None:
             problems.append("nirf_ranking requires category and year in the header")
@@ -318,7 +320,9 @@ def load_truth_file(path: str | Path, *, root: Path | None = None) -> NirfTruthF
             fetched_at=header.fetched_at,
         )
 
-    raise TruthError([f"unknown truth_kind {header.truth_kind!r}; valid kinds: {VALID_TRUTH_KINDS}"])
+    raise TruthError(
+        [f"unknown truth_kind {header.truth_kind!r}; valid kinds: {VALID_TRUTH_KINDS}"]
+    )
 
 
 # --------------------------------------------------------------------------- metrics
@@ -351,7 +355,7 @@ def _pearson(x: list[float], y: list[float]) -> float:
     n = len(x)
     mean_x = sum(x) / n
     mean_y = sum(y) / n
-    cov = sum((a - mean_x) * (b - mean_y) for a, b in zip(x, y))
+    cov = sum((a - mean_x) * (b - mean_y) for a, b in zip(x, y, strict=True))
     var_x = sum((a - mean_x) ** 2 for a in x)
     var_y = sum((b - mean_y) ** 2 for b in y)
     if var_x <= 0 or var_y <= 0:

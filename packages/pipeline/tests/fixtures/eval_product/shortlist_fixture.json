@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "profile_id": "fixture-mlt-shortlist-v1",
+  "synthetic": true,
+  "notes": "Constructed offline canary shortlist (synthetic; no real user profile). Two named institutions come from the committed NIRF 2025 Medical truth table; the other three are deliberately unmatched so the stream exercises UNKNOWN handling. The order is deliberately NOT the truth order: top-3 overlap must be >= 1 and the product #1 has no truth entry, so best_available must report null, not a miss.",
+  "captured_at": "2026-11-22T00:00:00Z",
+  "rows": [
+    {"rank": 1, "institution_name": "City Care Paramedical College, Hyderabad", "programme": "B.Sc. Medical Laboratory Technology", "state": "Telangana"},
+    {"rank": 2, "institution_name": "All India Institute of Medical Sciences, Delhi", "programme": "B.Sc. Medical Laboratory Technology", "state": "Delhi"},
+    {"rank": 3, "institution_name": "Vidya Institute of Allied Health Sciences", "programme": "B.Sc. Medical Laboratory Technology", "state": "Karnataka"},
+    {"rank": 4, "institution_name": "Christian Medical College", "programme": "B.Sc. Medical Laboratory Technology", "state": "Tamil Nadu"},
+    {"rank": 5, "institution_name": "Post Graduate Institute of Medical Education and Research", "programme": "B.Sc. Medical Laboratory Technology", "state": "Chandigarh"}
+  ]
+}

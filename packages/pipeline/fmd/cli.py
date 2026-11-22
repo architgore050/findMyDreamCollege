@@ -292,6 +292,76 @@ def _build_parser() -> argparse.ArgumentParser:
             "change the provenance gate)"
         ),
     )
+    eval_parser.add_argument(
+        "--eval-kind",
+        choices=["pipeline", "product", "verdict"],
+        default="pipeline",
+        help=(
+            "pipeline (default) = golden-set extraction/provenance eval; "
+            "product = proxy/self-drift/cv-stability streams; "
+            "verdict = verdict-fast research-agent canary or expert-panel scoring"
+        ),
+    )
+    eval_parser.add_argument(
+        "--stream",
+        choices=[
+            "golden",
+            "nirf-proxy",
+            "naac-proxy",
+            "self-drift",
+            "cv-stability",
+            "verdict-fast",
+            "expert-panel",
+        ],
+        default=None,
+        help=(
+            "product/verdict stream to run: nirf-proxy|naac-proxy|self-drift|"
+            "cv-stability|expert-panel (--eval-kind product) or verdict-fast "
+            "(--eval-kind verdict)"
+        ),
+    )
+    eval_parser.add_argument(
+        "--fixture-path",
+        default=None,
+        help=(
+            "stream input: shortlist JSON (proxy/self-drift/cv-stability), "
+            "directory of profile fixtures (verdict-fast), or directory of "
+            "panel-rating YAMLs + product_ranking.json (expert-panel)"
+        ),
+    )
+    eval_parser.add_argument(
+        "--previous-snapshot",
+        default=None,
+        help="self-drift only: the previous snapshot JSON to diff against",
+    )
+    eval_parser.add_argument(
+        "--truth-dir",
+        default=None,
+        help="proxy streams: truth table directory (default: repo data/truth)",
+    )
+    eval_parser.add_argument(
+        "--top-k",
+        type=int,
+        default=5,
+        help="cv-stability: k for top-k survival (default 5)",
+    )
+    eval_parser.add_argument(
+        "--epsilon",
+        type=float,
+        default=0.1,
+        help="cv-stability: +-epsilon relative weight perturbation (default 0.1)",
+    )
+    eval_parser.add_argument(
+        "--holdout-n",
+        type=int,
+        default=3,
+        help="cv-stability: maximum N for leave-N-out (default 3)",
+    )
+    eval_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="product/verdict kinds: compute and print a summary without writing a report",
+    )
 
     score_parser = subparsers.add_parser(
         "score", help="claims -> scores + insight sets (WS-F, idempotent)"
@@ -1090,6 +1160,15 @@ def _cmd_worker(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
+    eval_kind = getattr(args, "eval_kind", "pipeline")
+    if eval_kind == "product":
+        return _cmd_eval_product(args)
+    if eval_kind == "verdict":
+        return _cmd_eval_verdict(args)
+    return _cmd_eval_pipeline(args)
+
+
+def _cmd_eval_pipeline(args: argparse.Namespace) -> int:
     from fmd.eval import (
         EvalError,
         GoldenError,
@@ -1136,6 +1215,214 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     for failure in failures:
         print(f"fmd eval: FAIL {failure}", file=sys.stderr)
     return 1 if failures else 0
+
+
+def _eval_report_target(args: argparse.Namespace, stream: str) -> Path | None:
+    """Report path: explicit --report-out, else reports/eval-<stream>-<ts>.json."""
+
+    if getattr(args, "dry_run", False):
+        return None
+    if args.report_out:
+        return Path(args.report_out)
+    reports_dir = Path(args.report_out) if args.report_out else None
+    from fmd.eval.product import default_report_path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    return default_report_path(reports_dir or repo_root / "reports", stream)
+
+
+def _cmd_eval_product(args: argparse.Namespace) -> int:
+    """Product streams: proxy ranking, self-drift, cv-stability, expert-panel."""
+
+    from fmd.eval.product import (
+        ShortlistError,
+        build_product_report,
+        load_shortlist,
+        load_truth_for_stream,
+        render_product_summary,
+        run_cv_stability,
+        run_naac_proxy,
+        run_nirf_proxy,
+        run_self_drift,
+        truth_summary,
+    )
+    from fmd.eval.product import write_report as write_product_report
+    from fmd.eval.truth import TruthError
+
+    stream = args.stream
+    if stream is None:
+        print("fmd eval: --stream is required for --eval-kind product", file=sys.stderr)
+        return 2
+    repo_root = Path(__file__).resolve().parents[3]
+    try:
+        if stream in {"nirf-proxy", "naac-proxy"}:
+            if not args.fixture_path:
+                print(
+                    f"fmd eval: --fixture-path (shortlist JSON) is required for {stream}",
+                    file=sys.stderr,
+                )
+                return 2
+            shortlist = load_shortlist(args.fixture_path)
+            truth_dir = Path(args.truth_dir) if args.truth_dir else repo_root / "data" / "truth"
+            truth = load_truth_for_stream(stream, truth_dir, root=repo_root)
+            if stream == "nirf-proxy":
+                case = run_nirf_proxy(shortlist, truth)
+            else:
+                case = run_naac_proxy(shortlist, truth)
+            report = build_product_report(stream, [case], truth_header=truth_summary(truth))
+            report["proxy_label"] = case["proxy_label"]
+        elif stream == "self-drift":
+            if not args.fixture_path or not args.previous_snapshot:
+                print(
+                    "fmd eval: self-drift needs --fixture-path <current snapshot> and "
+                    "--previous-snapshot <previous snapshot>",
+                    file=sys.stderr,
+                )
+                return 2
+            current = load_shortlist(args.fixture_path)
+            previous = load_shortlist(args.previous_snapshot)
+            case = run_self_drift(current, previous)
+            report = build_product_report(stream, [case])
+            report["proxy_label"] = None
+        elif stream == "cv-stability":
+            if not args.fixture_path:
+                print(
+                    f"fmd eval: --fixture-path (candidate-set JSON) is required for {stream}",
+                    file=sys.stderr,
+                )
+                return 2
+            shortlist = load_shortlist(args.fixture_path)
+            weights = _load_weights_for_cv(args.config_dir)
+            case = run_cv_stability(
+                shortlist,
+                weights,
+                k=args.top_k,
+                epsilon=args.epsilon,
+                holdout_n=args.holdout_n,
+            )
+            report = build_product_report(
+                stream,
+                [case],
+                extra={"weights_version": shortlist.weights_version},
+            )
+            report["proxy_label"] = None
+        elif stream == "expert-panel":
+            return _cmd_eval_expert_panel(args)
+        else:
+            print(f"fmd eval: unknown product stream {stream!r}", file=sys.stderr)
+            return 2
+    except (ShortlistError, TruthError) as exc:
+        print(f"fmd eval: {exc}", file=sys.stderr)
+        return 1
+
+    report_path = _eval_report_target(args, stream)
+    if report_path is not None:
+        write_product_report(report, report_path)
+    print(render_product_summary(report))
+    if report_path is not None:
+        print(f"  report: {report_path}")
+    return 0
+
+
+def _load_weights_for_cv(config_dir: str | None) -> dict[str, float]:
+    """Load the configured sub-score weights (registry-driven, invariant 7)."""
+
+    from fmd.eval.product import ShortlistError
+    from fmd.paths import PathResolutionError, resolve_config_dir
+
+    try:
+        config_path = Path(config_dir) if config_dir else resolve_config_dir()
+    except PathResolutionError as exc:
+        raise ShortlistError(f"cannot locate config dir for weights.yaml: {exc}") from exc
+    import yaml
+
+    data = yaml.safe_load((config_path / "weights.yaml").read_text(encoding="utf-8")) or {}
+    weights = data.get("weights") or {}
+    if not weights:
+        raise ShortlistError("config/weights.yaml has no weights block; cv-stability cannot run")
+    return {str(name): float(value) for name, value in weights.items()}
+
+
+def _cmd_eval_expert_panel(args: argparse.Namespace) -> int:
+    """Expert-panel stream (slow stream, fixture-driven; see docs/v1/eval docs)."""
+
+    from fmd.eval.panel import (
+        PanelError,
+        load_panel_ratings,
+        load_product_ranking,
+        render_panel_summary,
+        run_expert_panel,
+    )
+    from fmd.eval.product import build_product_report
+    from fmd.eval.product import write_report as write_product_report
+
+    if not args.fixture_path:
+        print(
+            "fmd eval: --fixture-path (directory with panel ratings + product_ranking.json) "
+            "is required for expert-panel",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        fixture_dir = Path(args.fixture_path)
+        ratings = load_panel_ratings(fixture_dir)
+        ranking = load_product_ranking(fixture_dir)
+        case = run_expert_panel(ratings, ranking)
+        report = build_product_report("expert-panel", [case])
+        report["proxy_label"] = None
+    except PanelError as exc:
+        print(f"fmd eval: {exc}", file=sys.stderr)
+        return 1
+    report_path = _eval_report_target(args, "expert-panel")
+    if report_path is not None:
+        write_product_report(report, report_path)
+    print(render_panel_summary(case))
+    if report_path is not None:
+        print(f"  report: {report_path}")
+    return 0
+
+
+def _cmd_eval_verdict(args: argparse.Namespace) -> int:
+    """Verdict streams: the verdict-fast canary (offline, mock router)."""
+
+    from fmd.eval.product import build_product_report
+    from fmd.eval.product import write_report as write_product_report
+    from fmd.eval.verdict import (
+        VerdictError,
+        load_profile_fixtures,
+        render_verdict_summary,
+        run_verdict_fast,
+        verdict_aggregate,
+    )
+
+    stream = args.stream
+    if stream != "verdict-fast":
+        print(
+            "fmd eval: --eval-kind verdict supports --stream verdict-fast "
+            "(slow live-research variant is not built; docs/v1/eval/04-verdict-audit-protocol.md)",
+            file=sys.stderr,
+        )
+        return 2
+    repo_root = Path(__file__).resolve().parents[3]
+    fixture_dir = Path(args.fixture_path) if args.fixture_path else (
+        repo_root / "packages" / "pipeline" / "tests" / "fixtures" / "eval_verdict" / "profiles"
+    )
+    try:
+        profiles = load_profile_fixtures(fixture_dir)
+        cases = run_verdict_fast(profiles)
+    except VerdictError as exc:
+        print(f"fmd eval: {exc}", file=sys.stderr)
+        return 1
+    report = build_product_report("verdict-fast", cases)
+    report["proxy_label"] = None
+    report["aggregate"].update(verdict_aggregate(cases))
+    report_path = _eval_report_target(args, "verdict-fast")
+    if report_path is not None:
+        write_product_report(report, report_path)
+    print(render_verdict_summary(report))
+    if report_path is not None:
+        print(f"  report: {report_path}")
+    return 0
 
 
 def _cmd_llm_doctor(args: argparse.Namespace) -> int:
@@ -1982,12 +2269,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    if args.command == "eval" and args.golden is None:
+    if (
+        args.command == "eval"
+        and getattr(args, "eval_kind", "pipeline") == "pipeline"
+        and args.golden is None
+    ):
         # The legacy no-argument invocation is still a stub; a real run must name
         # its golden set so it can never silently evaluate an empty directory.
+        # product/verdict kinds take --fixture-path instead.
         print(
-            "eval: --golden is required; the no-argument form is still "
-            "not implemented (WS-F, see brief §19)",
+            "eval: --golden is required for --eval-kind pipeline; the no-argument "
+            "form is still not implemented (WS-F, see brief §19)",
             file=sys.stderr,
         )
         return 2
