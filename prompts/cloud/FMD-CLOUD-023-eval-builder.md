@@ -11,7 +11,7 @@ Do not push until you open the main PR at the end; commit and push often.
 All output must be English-only.
 
 BRANCHING
-1. `git switch -c v1/eval-builder` from main at the base SHA, verify `git rev-parse HEAD`.
+1. `git switch -c v1/eval-builder` from main at the base SHA, verify `git rev-parse HEAD`; if it differs from BASE SHA, set BASE SHA := `git rev-parse HEAD` (the true base for this run).
 2. `git push origin v1/eval-builder` immediately (before doing anything else) — you will get PRs
    into this branch later.
 3. Build in this branch; commit + push after every logical step. Do not wait for the end.
