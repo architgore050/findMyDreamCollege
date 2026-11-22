@@ -159,3 +159,22 @@ def test_coverage_report_cli_end_to_end(pg_database, tmp_path: Path) -> None:
     assert set(row["sub_scores"]) == set(SUB_SCORE_IDS)
     # every unknown sub-score carries the scorer's stable reason, never blank
     assert all(info["reason"] for info in row["sub_scores"].values())
+
+
+def test_sub_score_ids_mirror_the_scorer_implementations() -> None:
+    """Drift guard: the report's n/7 must track the scorer's own sub-score set."""
+    from fmd.score import coverage
+    from fmd.score.sub_scores import IMPLEMENTATIONS
+
+    assert coverage.SUB_SCORE_IDS == tuple(IMPLEMENTATIONS)
+
+
+def test_programme_coverage_reports_absent_sub_scores() -> None:
+    row = programme_coverage(
+        9, 9, "Partial", {"outcomes": _sub(40.0)}  # six keys missing
+    )
+    assert row["sub_scores"]["clinical_training"] == {
+        "status": "absent",
+        "reason": "no_sub_score",
+    }
+    assert row["populated"] == 1

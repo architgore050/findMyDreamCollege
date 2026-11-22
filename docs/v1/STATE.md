@@ -31,6 +31,15 @@ risks).
 
 ## Done
 
+- **Wave 7 (PLAN #7) — scoring coverage diagnostics (branch
+  `v1/w7-coverage-diagnostics`).** Read-only `coverage-report` CLI: per
+  programme populated/unknown sub-scores with the scorer's reasons, feeding
+  claim ids, populated histogram and missing ranking. Pure module
+  (fmd/score/coverage.py); scoring path identical to the score command;
+  no weight changes; drift-guard test on the sub-score mirror.
+  Verifier: **approve**. Gates: ruff clean · pytest 1464 offline · DB-gated
+  1556 · eval provenance 1.0.
+
 - **Wave 5 (PLAN #5) — classification report + quoted-evidence semantic
   admissions (branch `v1/w5-classification-throughput`).**
   - Read-only `classify-report` CLI: replays the deterministic family chain
@@ -193,6 +202,11 @@ risks).
 - Any model/GPU/real-crawl run — LQ-2..LQ-5.
 
 ## Next
+
+- Wave 6 (PLAN #6): fee / seat / placement / admission adapters in
+  config/sources.yaml + fmd/adapters, fixtures + span-resolution tests.
+  Robots, per-domain rate limits, no auth/CAPTCHA bypass; queue the real
+  crawl (LQ-2). Then waves 8-10. LQ-7 (semantic pass) unchanged.
 
 - Wave 6 (PLAN #6): fee / seat / placement / admission adapters in
   config/sources.yaml + fmd/adapters, fixtures + span-resolution tests.
