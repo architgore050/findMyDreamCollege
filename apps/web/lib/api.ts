@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import {
   aliasReviewActionRequestSchema,
+  methodologyPayloadSchema,
   apiErrorSchema,
   apiMetaSchema,
   claimEvidencePageSchema,
@@ -399,6 +400,11 @@ export function apiHealth(options?: RequestOptions) {
 
 export function apiSources(options?: RequestOptions) {
   return request("/api/sources", sourcesPayloadSchema, options);
+}
+
+/** PLAN v1-w9: the trust surface, generated from `config/` by the API. */
+export function apiMethodology(options?: RequestOptions) {
+  return request("/api/methodology", methodologyPayloadSchema, options);
 }
 
 export function apiProgrammes(query: ProgrammeQuery = {}, options?: RequestOptions) {

@@ -555,6 +555,31 @@ export const sourceExclusionSchema = z.object({
 });
 export type SourceExclusion = z.infer<typeof sourceExclusionSchema>;
 
+export const methodologyPayloadSchema = z.object({
+  weights: z.record(z.string(), z.number()),
+  weights_sum: z.number(),
+  component_policy: z.object({
+    min_claims_for_score: z.number(),
+    min_claims_for_confidence: z.number(),
+    min_components_for_composite: z.number(),
+    single_claim_interval_half_width: z.number(),
+  }),
+  evidence_tiers: z.record(z.string(), z.unknown()),
+  predicates_version: z.string(),
+  predicates_count: z.number(),
+  predicate_aliases: z.number(),
+  sources: z.object({
+    total: z.number(),
+    enabled: z.number(),
+    by_trust: z.record(z.string(), z.number()),
+    enabled_by_trust: z.record(z.string(), z.number()),
+  }),
+  source_exclusions: z.array(sourceExclusionSchema),
+  value_policy: z.array(z.string()),
+  dispute_path: z.array(z.string()),
+});
+export type MethodologyPayload = z.infer<typeof methodologyPayloadSchema>;
+
 // --------------------------------------------------------------------------- response payloads
 
 export const healthSchema = z.object({
