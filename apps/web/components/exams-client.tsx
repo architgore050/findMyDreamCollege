@@ -115,7 +115,7 @@ function NextDeadlines({ deadlines }: { deadlines: NextExamDeadline[] }) {
                 <StatusBadge status={entry.status} />
               </td>
               <td className="num text-[11px]">
-                {entry.claim_id === null ? "none published" : `#${String(entry.claim_id)}`}
+                {entry.claim_id === null || entry.claim_id === undefined ? "none published" : `#${String(entry.claim_id)}`}
               </td>
             </tr>
           ))}
