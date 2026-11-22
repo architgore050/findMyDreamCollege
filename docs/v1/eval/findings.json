@@ -1,0 +1,137 @@
+{
+  "wave": "w11",
+  "workstream": "eval-strategy",
+  "base_sha": "66702b20b603bc36babbca76be359ae3a3a8209e",
+  "eval_catalog": {
+    "golden_dataset_evals": [
+      {
+        "id": "pipeline_extraction_provenance_drift",
+        "status": "existing",
+        "score_rule": "span P/R/F1, provenance coverage, drift",
+        "blockers": []
+      },
+      {
+        "id": "nirf_naac_proxy_ranking",
+        "status": "designed",
+        "score_rule": "top-k overlap, Spearman/Kendall vs product shortlist; UNKNOWN when no entry",
+        "blockers": [
+          "no paramedical category",
+          "voluntary participation",
+          "GO salary incomplete",
+          "1-2y lag"
+        ]
+      },
+      {
+        "id": "recognition_inventory_fidelity",
+        "status": "partial",
+        "score_rule": "P/R of recognised_institute and seat totals",
+        "blockers": [
+          "state coverage incomplete"
+        ]
+      },
+      {
+        "id": "placement_report_extraction",
+        "status": "designed_fragile",
+        "score_rule": "span accuracy + invariant-6 internship vs employment",
+        "blockers": [
+          "self-reported",
+          "sparse",
+          "gamed",
+          "small N"
+        ]
+      },
+      {
+        "id": "role_model_alumni",
+        "status": "designed_sparse",
+        "score_rule": "hit rate of role-model programme in product shortlist",
+        "blockers": [
+          "selection bias",
+          "privacy",
+          "ToS",
+          "tiny N"
+        ]
+      }
+    ],
+    "no_golden_dataset_evals": [
+      {
+        "id": "leave_n_out_stability",
+        "score_rule": "Kendall-tau under leave-N-out and weight noise",
+        "blockers": [
+          "internal consistency only"
+        ]
+      },
+      {
+        "id": "expert_judgment_panel",
+        "score_rule": "top-k overlap + inter-rater reliability",
+        "blockers": [
+          "cost",
+          "panel bias",
+          "small coverage"
+        ]
+      },
+      {
+        "id": "wisdom_of_crowd_reviews",
+        "score_rule": "correlation of product rank with review scores",
+        "blockers": [
+          "astroturfing",
+          "selection bias",
+          "ToS",
+          "sparse for MLT"
+        ]
+      },
+      {
+        "id": "self_drift_snapshots",
+        "score_rule": "rank change magnitude; % evidence-driven vs unexplained",
+        "blockers": [
+          "does not prove external correctness"
+        ]
+      },
+      {
+        "id": "time_asymmetric_ladder",
+        "score_rule": "predictive hit rate of top-k vs later outcomes",
+        "blockers": [
+          "requires waiting for outcomes",
+          "outcomes remain sparse"
+        ]
+      },
+      {
+        "id": "opt_in_survey_outcomes",
+        "score_rule": "programme-level rates vs product rank",
+        "blockers": [
+          "cold start",
+          "response bias",
+          "DPDP/privacy",
+          "acquisition cost"
+        ]
+      }
+    ],
+    "verdict_style_evals": [
+      {
+        "id": "verdict_research_agent_per_profile",
+        "description": "Specialised research agent produces audited correct|partially_correct|incorrect|unknown for each test profile; harness scores agreement and coverage",
+        "score_rule": "agreement rate; top-3 overlap with agent reference; coverage of UNKNOWN; full evidence audit",
+        "blockers": [
+          "circular-data risk if agent only reuses product claims",
+          "model leapfrog / style drift",
+          "cost per profile",
+          "inter-rater agreement with humans not yet measured"
+        ]
+      }
+    ]
+  },
+  "integration_sketch_summary": "Extend fmd eval with --eval-kind pipeline|product|verdict and --stream flags. Truth data under data/truth/ with truth_version, as_of, sha256. Fast streams (NIRF-proxy, self-drift) in CI/nightly; slow (verdict-deep, panels) quarterly. Scores always harness-computed; model may only emit structured verdict objects.",
+  "build_first": [
+    "NIRF/NAAC truth tables + proxy ranking metric",
+    "Versioned shortlist snapshots + self-drift stream",
+    "5-10 profile verdict-fast canary with human audit"
+  ],
+  "riskiest_assumptions": [
+    "NIRF/NAAC institution rank is a useful signal for MLT programme choice",
+    "Verdict agent can achieve acceptable inter-rater agreement with humans",
+    "A realistic acquisition path for true programme-level outcomes exists within 2-3 years"
+  ],
+  "honest_blockers_global": [
+    "No mature public programme-level employment/registration microdata for Indian B.Sc. MLT",
+    "Product evals must lean on proxies + audited verdicts + coverage honesty"
+  ]
+}
