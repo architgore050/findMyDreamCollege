@@ -26,6 +26,7 @@ ADAPTER_CLASSES: dict[str, tuple[str, str]] = {
     "institution_site": ("fmd.adapters.institution_site", "InstitutionSiteAdapter"),
     "naac": ("fmd.adapters.naac", "NaacAdapter"),
     "nabh": ("fmd.adapters.nabh", "NabhAdapter"),
+    "ncahp": ("fmd.adapters.ncahp", "NcahpAdapter"),
     "nirf": ("fmd.adapters.nirf", "NirfAdapter"),
     "pay_matrix": ("fmd.adapters.pay_matrix", "PayMatrixAdapter"),
     "state_council": ("fmd.adapters.state_council", "StateCouncilAdapter"),
