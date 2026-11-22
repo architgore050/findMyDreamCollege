@@ -258,3 +258,28 @@ def test_materialise_dry_run_does_not_create_rows(seeded, capsys) -> None:
     from fmd.db.repositories import ProgrammesRepo
 
     assert ProgrammesRepo(database).counts()["total"] == 0
+
+
+def test_dry_run_succeeds_with_an_unreachable_model_url(seeded, capsys, monkeypatch) -> None:
+    """A dry run must never dial the model: it reports what it would do.
+
+    The endpoint is a closed port, so any real router call would fail. Both
+    commands still exit 0 and print the scope tallies, with ``would_classify``
+    standing in for the semantic names the real run would send.
+    """
+    monkeypatch.setenv("FMD_LOCAL_LLM_URL", "http://127.0.0.1:9/v1")
+    database = seeded["database"]
+    base = ["--database-url", _dsn(database), "--config-dir", str(CONFIG_DIR)]
+
+    assert main([*base, "programmes", "materialise", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "dry-run scope: would_admit=1 would_reject=0" in out
+    assert "would_classify=0" in out
+    from fmd.db.repositories import ProgrammesRepo
+
+    assert ProgrammesRepo(database).counts()["total"] == 0
+
+    assert main([*base, "programmes", "requalify", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "dry-run scope: would_admit=" in out
+    assert "would_reject=" in out and "would_defer=" in out and "would_classify=" in out

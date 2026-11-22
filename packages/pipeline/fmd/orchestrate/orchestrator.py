@@ -32,6 +32,7 @@ from fmd.db.repositories import (
 )
 from fmd.fetch.ladder import FetchLadder
 from fmd.frontier.queue import Frontier
+from fmd.orchestrate.acquire import AcquisitionStage
 from fmd.orchestrate.adapters import build_adapter
 from fmd.orchestrate.crawl import DEFAULT_SOURCE_FAILURE_BUDGET, Crawler
 from fmd.orchestrate.extract import DEFAULT_TOOL_VERSION, Extractor, build_extract_router
@@ -78,6 +79,10 @@ class Orchestrator:
         score_persist: Callable[[Any, Any], Any] | None = None,
         planner: Any | None = None,
         sections: Any | None = None,
+        parse_cache: Any | None = None,
+        t2_parse_cache: Any | None = None,
+        t0: Any | None = None,
+        t1: Any | None = None,
     ) -> None:
         self.registry = registry
         self.database = database
@@ -86,6 +91,11 @@ class Orchestrator:
         self.run_id_factory = run_id_factory or (lambda: uuid.uuid4().hex)
         self.tool_version = tool_version
         self.max_source_failures = max_source_failures
+        self._parse_cache_instance = parse_cache
+        self._t2_parse_cache_instance = t2_parse_cache
+        # Injected tier callables (test seams), handed to the extract stage.
+        self.t0 = t0
+        self.t1 = t1
 
         self.store = store
         self.documents = (
@@ -151,6 +161,46 @@ class Orchestrator:
         if self.store is None:
             self.store = SnapshotStore(resolve_snapshot_dir())
         return self.store
+
+    def _parse_cache(self) -> Any | None:
+        """The persistent T1 parse cache (W10), or ``None`` without a store.
+
+        Shares the snapshot object store: parse payloads are content-addressed
+        objects beside the evidence bytes, looked up through the
+        ``document_parses`` table (migration 0011). Explicitly injected caches
+        win; a database-less orchestrator runs the legacy fused path.
+        """
+        if self._parse_cache_instance is not None:
+            return self._parse_cache_instance
+        if self.database is None:
+            return None
+        from fmd.acquire.parse_cache import ParseCache
+        from fmd.db.repositories import DocumentParsesRepo
+
+        self._parse_cache_instance = ParseCache(
+            DocumentParsesRepo(self.database), self._store()
+        )
+        return self._parse_cache_instance
+
+    def _t2_parse_cache(self) -> Any | None:
+        """The persistent T2 (in-process OCR) parse cache, or ``None``.
+
+        Same store, same table, tier-scoped keys (engine fingerprint inside).
+        ``None`` without a database or without a default constructor path —
+        an injected T2 cache wins; otherwise T2 caching follows the same
+        availability rule as T1.
+        """
+        if self._t2_parse_cache_instance is not None:
+            return self._t2_parse_cache_instance
+        if self.database is None:
+            return None
+        from fmd.acquire.parse_cache import ParseCache
+        from fmd.db.repositories import DocumentParsesRepo
+
+        self._t2_parse_cache_instance = ParseCache(
+            DocumentParsesRepo(self.database), self._store(), tier="T2"
+        )
+        return self._t2_parse_cache_instance
 
     def _default_ledger(self) -> RunLedger:
         # With Postgres available the run ledger is the ``pipeline_runs`` table;
@@ -327,10 +377,49 @@ class Orchestrator:
             return {}
 
     # ------------------------------------------------------------------- extract
-    def extract(self, limit: int | None = None, force: bool = False) -> RunSummary:
-        summary = self._summary("extract")
+    def extract(
+        self,
+        limit: int | None = None,
+        force: bool = False,
+        *,
+        from_cache: bool = False,
+        no_acquire: bool = False,
+        dry_run: bool = False,
+        record: bool = True,
+    ) -> RunSummary:
+        summary = self._summary("extract", dry_run=dry_run)
         if self.router is None:
             raise OrchestrationError("extract requires a model router")
+        parse_cache = self._parse_cache()
+        summary.metadata["parse_cache"] = parse_cache is not None
+        if dry_run:
+            # The plan: documents, known pages, expected cache hits. Reads the
+            # queue and the cache table; writes nothing and never touches the
+            # model URL (which may be unreachable by design in a dry run).
+            stage = AcquisitionStage(
+                snapshots=self.snapshots,
+                documents=self.documents,
+                store=self._store(),
+                parse_cache=parse_cache,
+                t2_parse_cache=self._t2_parse_cache(),
+                tool_version=self.tool_version,
+            )
+            items = stage.plan(limit=limit)
+            summary.bump("selected", len(items))
+            for item in items:
+                if item.cache_hit:
+                    summary.bump("cache_hits_expected")
+                    summary.bump("parsed")
+                else:
+                    summary.bump("to_convert")
+                summary.outcomes.append(
+                    {
+                        **item.as_dict(),
+                        "outcome": "cache_hit" if item.cache_hit else "would_convert",
+                    }
+                )
+            summary.metadata["mode"] = "dry_run"
+            return self._record(summary, dry_run=True) if record else summary.finish()
         # Evidence documents that Phase A deferred must reach text acquisition
         # before the extract queue is read. This is the only place the sample is
         # bought; the stage's cache makes a re-run idempotent.
@@ -343,6 +432,7 @@ class Orchestrator:
             text_sample_chars=self.registry.plan.phase_b.text_sample_chars,
         )
         stage.run(summary=summary, limit=limit)
+        allow_convert = not (from_cache or no_acquire)
         extractor = Extractor(
             snapshots=self.snapshots,
             documents=self.documents,
@@ -354,10 +444,18 @@ class Orchestrator:
             tool_version=self.tool_version,
             predicates=self.registry.predicates,
             sections=self.sections,
+            parse_cache=parse_cache,
+            t2_parse_cache=self._t2_parse_cache(),
+            t0=self.t0,
+            t1=self.t1,
+            allow_convert=allow_convert,
         )
         extractor.run(summary=summary, limit=limit, force=force)
         summary.metadata["tool_version"] = self.tool_version
         summary.metadata["force"] = force
+        summary.metadata["mode"] = (
+            "from_cache" if from_cache else ("no_acquire" if no_acquire else "live")
+        )
         attempted = summary.counts.get("extracted", 0) + summary.counts.get("abstained", 0)
         # Preserve failures already recorded per document (e.g. an acquisition
         # OOM): a run that also extracted something is still a failed run.
@@ -366,7 +464,45 @@ class Orchestrator:
             and summary.counts.get("extracted", 0) == 0
             and summary.counts.get("skipped", 0) == 0
         )
-        return self._record(summary, dry_run=False)
+        return self._record(summary, dry_run=False) if record else summary.finish()
+
+    # ------------------------------------------------------------------- acquire
+    def acquire(
+        self,
+        *,
+        limit: int | None = None,
+        pages: int | None = None,
+        device: str | None = None,
+        dry_run: bool = False,
+    ) -> RunSummary:
+        """The acquisition stage (W10): convert and cache, zero LLM calls.
+
+        Selection is the extractor's own queue in the extractor's own order;
+        the orchestrator's router is deliberately never handed to the stage.
+        ``pages`` is a page budget evaluated only at document boundaries — the
+        document that crosses it finishes in full, then acquisition stops.
+        """
+        summary = self._summary("acquire", dry_run=dry_run)
+        from fmd.acquire.tiers import AcquirePolicy
+        from fmd.orchestrate.acquire import AcquisitionStage
+
+        stage = AcquisitionStage(
+            snapshots=self.snapshots,
+            documents=self.documents,
+            store=self._store(),
+            parse_cache=self._parse_cache(),
+            t2_parse_cache=self._t2_parse_cache(),
+            policy=AcquirePolicy.load(acquire=self.registry.acquire),
+            tool_version=self.tool_version,
+            device=device,
+        )
+        stage.run(summary=summary, limit=limit, pages_budget=pages, dry_run=dry_run)
+        summary.metadata["zero_llm_calls"] = True
+        summary.failed = summary.failed or (
+            summary.counts.get("selected", 0) > 0
+            and summary.counts.get("parsed", 0) == 0
+        )
+        return self._record(summary, dry_run=dry_run)
 
     # --------------------------------------------------------------------- score
     def score(

@@ -18,7 +18,6 @@ from fmd.acquire.canonical import (
     TextBlock,
 )
 from fmd.acquire.guards import GuardTrip
-from fmd.acquire.tables import TableCellAssociation
 
 Granularity = Literal["glyph", "span", "block"]
 
@@ -38,7 +37,9 @@ class Table:
     rows: list[list[str]]
     page: int | None = None
     caption: str | None = None
-    cells: tuple[TableCellAssociation, ...] = ()
+    #: The numeric cell → column-header links (``CellHeaderLink``), as built by
+    #: ``associate_headers``; ``None``/absent for OCR tables without headers.
+    cells: tuple[Any, ...] = ()
     column_header_uncertain: bool = False
     confidence: float | None = None
 

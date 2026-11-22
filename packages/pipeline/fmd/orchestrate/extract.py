@@ -53,6 +53,31 @@ class ForcedExtractPipeline(ExtractPipeline):
         return False
 
 
+class CountingRouter:
+    """Delegating router wrapper that counts LLM calls for the run summary.
+
+    ``llm_calls`` in the extract summary counts every routed call of the run —
+    extraction, chunk windows and the verification pass alike. Everything else
+    (``models``, budgets, providers) delegates untouched, so the pipeline and
+    verifier cannot tell the difference.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.calls = 0
+
+    @property
+    def models(self) -> Any:
+        return self._inner.models
+
+    def call(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        return self._inner.call(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class Extractor:
     def __init__(
         self,
@@ -71,6 +96,11 @@ class Extractor:
         verify: bool = True,
         predicates: Any | None = None,
         sections: SectionsRepo | Any | None = None,
+        parse_cache: Any | None = None,
+        t2_parse_cache: Any | None = None,
+        t0: Any = None,
+        t1: Any | None = None,
+        allow_convert: bool = True,
     ) -> None:
         self.snapshots = snapshots
         self.documents = documents
@@ -87,6 +117,17 @@ class Extractor:
         self.predicates = predicates
         #: Section-tree repo (W8); ``None`` keeps the outline audit-only.
         self.sections = sections
+        #: Parse cache (W10). ``None`` keeps the fused inline-conversion path.
+        self.parse_cache = parse_cache
+        #: T2 parse cache (wave v1-w3); threaded into the pipeline.
+        self.t2_parse_cache = t2_parse_cache
+        #: Injected T0/T1 tier callables (test seams), passed to the pipeline.
+        self.t0 = t0
+        self.t1 = t1
+        #: ``False`` for ``--from-cache`` / ``--no-acquire``: a missing cached
+        #: parse is recorded (``missing_parse_cache``), never converted inline.
+        self.allow_convert = allow_convert
+        self._counting_router: CountingRouter | None = None
         self._verifier_ready = False
         self._verifier_cost = 0.0
         self._verifier_exhausted = False
@@ -96,14 +137,20 @@ class Extractor:
         cls = ForcedExtractPipeline if force else ExtractPipeline
         if self.pipeline_factory is not None:
             return self.pipeline_factory(cls)
+        router = self._counting_router if self._counting_router is not None else self.router
         return cls(
-            self.router,
+            router,
             snapshots=self.snapshots,
             extractions=self.extractions,
             claims=self.claims,
             store=self.store,
             tool_version=self.tool_version,
             sections=self.sections,
+            parse_cache=self.parse_cache,
+            t2_parse_cache=self.t2_parse_cache,
+            t0=self.t0,
+            t1=self.t1,
+            allow_convert=self.allow_convert,
         )
 
     def run(
@@ -112,11 +159,22 @@ class Extractor:
         summary: RunSummary,
         limit: int | None = None,
         force: bool = False,
+        selected: list[Any] | None = None,
     ) -> None:
         self._count_unplanned(summary)
-        pending = self.snapshots.list_extractable(
-            None if force else self.tool_version,
-            limit if limit is not None else 500,
+        if selected is not None:
+            # Batched mode (W10): the runner hands over exactly the snapshots
+            # of one page-batch; the queue is not re-read here.
+            pending = list(selected)
+        else:
+            pending = self.snapshots.list_extractable(
+                None if force else self.tool_version,
+                limit if limit is not None else 500,
+            )
+        # One counter for every routed call of this run (extraction, chunk
+        # windows, verification): the summary's ``llm_calls``.
+        self._counting_router = (
+            CountingRouter(self.router) if self.router is not None else None
         )
         pipeline = self._pipeline(force=force)
         verifier = self._get_verifier()
@@ -184,6 +242,26 @@ class Extractor:
                 continue
 
             if result.skipped:
+                acquire = getattr(result, "acquire", None)
+                reason = acquire.get("reason") if isinstance(acquire, dict) else None
+                if reason == "missing_parse_cache":
+                    # --from-cache / --no-acquire with no cached parse: the
+                    # document is recorded and the run continues. The exit rule
+                    # is unchanged — non-zero only when nothing at all was
+                    # extractable (abstained feeds that rule; extracted or
+                    # already-extracted documents clear it).
+                    summary.bump("missing_parse_cache")
+                    summary.bump("abstained")
+                    summary.outcomes.append(
+                        {
+                            "snapshot_id": snapshot.id,
+                            "document_id": snapshot.document_id,
+                            "url": getattr(document, "url", None),
+                            "outcome": "abstained",
+                            "reason": "missing_parse_cache",
+                        }
+                    )
+                    continue
                 summary.bump("skipped")
                 summary.outcomes.append(
                     {
@@ -200,6 +278,7 @@ class Extractor:
             summary.bump("extracted")
             summary.bump("claims", len(result.claims))
             summary.bump("rejected_claims", rejected)
+            acquire = self._record_acquire(summary, result)
             entry: dict[str, Any] = {
                 "snapshot_id": snapshot.id,
                 "document_id": snapshot.document_id,
@@ -211,6 +290,8 @@ class Extractor:
                 "claims": len(result.claims),
                 "rejected": rejected,
             }
+            if isinstance(acquire, dict):
+                entry["acquire"] = acquire
             chunking = getattr(result, "chunking", None)
             if isinstance(chunking, dict) and chunking.get("mode") == "chunked":
                 # W4: a long document was windowed. Surface the chunk outcome so
@@ -269,6 +350,36 @@ class Extractor:
                 "budget_exhausted": self._verifier_exhausted,
                 "error": self._verifier_error,
             }
+        if self._counting_router is not None:
+            summary.bump("llm_calls", self._counting_router.calls)
+            self._counting_router = None
+
+    # ------------------------------------------------------------------ provenance
+    @staticmethod
+    def _record_acquire(summary: RunSummary, result: Any) -> dict[str, Any] | None:
+        """Fold one document's parse provenance into the run summary (W10).
+
+        ``parsed`` counts every document that produced a usable parse this run
+        (cache hit or live conversion); ``cache_hits`` counts the lookups the
+        cache satisfied — zero converter invocations; ``pages_converted`` counts
+        pages actually converted live this run. Cached pages were counted when
+        their cycle converted them and never again.
+        """
+        info = getattr(result, "acquire", None)
+        if not isinstance(info, dict):
+            return None
+        if info.get("reason") == "missing_parse_cache":
+            return info
+        if info.get("cache_hit"):
+            summary.bump("cache_hits")
+            summary.bump("parsed")
+            return info
+        if info.get("mode") == "live":
+            summary.bump("parsed")
+            pages = info.get("pages")
+            if isinstance(pages, int) and pages > 0:
+                summary.bump("pages_converted", pages)
+        return info
 
     # ------------------------------------------------------------------ verification
     def _get_verifier(self) -> Any | None:
@@ -286,16 +397,17 @@ class Extractor:
         if self.verifier is not None:
             return self.verifier
         try:
+            router = self._counting_router if self._counting_router is not None else self.router
             if self.verifier_factory is not None:
-                self.verifier = self.verifier_factory(self.router)
+                self.verifier = self.verifier_factory(router)
             else:
-                models = getattr(self.router, "models", None)
+                models = getattr(router, "models", None)
                 if models is None or "verify" not in models.profiles:
                     return None
                 from fmd.verify import Verifier
 
                 self.verifier = Verifier(
-                    self.router,
+                    router,
                     claims=self.claims,
                     predicates=self.predicates,
                 )

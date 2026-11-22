@@ -47,9 +47,16 @@ def registry():
 class FakeRouter:
     """Counts provider calls; answers from a per-key table or a default."""
 
-    def __init__(self, answers: dict[str, dict] | None = None, default: dict | None = None):
+    def __init__(
+        self,
+        answers: dict[str, dict] | None = None,
+        default: dict | None = None,
+        *,
+        models: object | None = None,
+    ):
         self.answers = dict(answers or {})
         self.default = default
+        self.models = models
         self.calls: list[dict] = []
 
     def call(self, *, purpose, schema, system, user, input_ref):
@@ -121,7 +128,8 @@ def test_semantic_yes_admits_with_cited_evidence(registry) -> None:
                 "rationale": "laboratory medicine with clinical rotations",
                 "evidence": ["claim 12", "Laboratory Medicine"],
             }
-        }
+        },
+        models=registry.models,
     )
     store = FakeStore()
     taxonomy = Taxonomy(registry.programmes)
@@ -133,10 +141,18 @@ def test_semantic_yes_admits_with_cited_evidence(registry) -> None:
     assert decision.tier == "semantic"
     assert decision.reason == "semantic_equivalent"
     assert "claim 12" in decision.evidence
-    assert decision.model is None  # the router records the model, not the caller
+    # Audit provenance: the configured model id, prompt version and cache
+    # flag travel with the decision (a semantic admission must be explainable).
+    assert decision.model == "gemma-4-26b-a4b-gguf"
+    assert decision.prompt_version == "v1"
+    assert decision.cached is False
     # The decision is persisted for the next run.
     assert key in store.rows
     assert store.rows[key].decision == "in_scope"
+    assert store.rows[key].model == "gemma-4-26b-a4b-gguf"
+    assert store.rows[key].prompt_version == "v1"
+    assert store.rows[key].cached is False
+    assert store.rows[key].definition_version == registry.programmes.definition.version
     assert not router.calls[0]["purpose"].startswith("default")
 
 

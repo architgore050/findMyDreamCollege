@@ -149,8 +149,8 @@ countries:
 
 # Fallback for a country that is not declared above (or an institution with no
 # country at all). Ships empty on purpose; the decision is flagged
-# `country_taxonomy_missing` and the name goes to the semantic tier.
-default:
-  include_patterns: []
-  exclude_patterns: []
-  aliases: []
+# `country_taxonomy_missing` and the name goes to the semantic tier. An empty
+# block is the only way to declare "no rules": a declared-but-empty pattern
+# list is a config error (it is almost always a typo, and an empty include
+# would otherwise be indistinguishable from a deliberate stub).
+default: {}

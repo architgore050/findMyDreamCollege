@@ -82,6 +82,86 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="re-extract snapshots already processed at this tool version",
     )
+    # ---- W10 phase split: parse cache, stage flags, batched orchestrator ----
+    extract_parser.add_argument(
+        "--from-cache",
+        action="store_true",
+        help="extract only from cached parses; guaranteed to invoke no Docling "
+        "(a document without a cached parse is recorded missing_parse_cache)",
+    )
+    extract_parser.add_argument(
+        "--no-acquire",
+        action="store_true",
+        help="skip inline conversion; a document without a cached parse is "
+        "recorded missing_parse_cache and the run continues",
+    )
+    extract_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the plan (documents, known pages, expected cache hits), "
+        "write nothing, contact no model URL",
+    )
+    extract_parser.add_argument(
+        "--batched",
+        action="store_true",
+        help="batched orchestrator: per cycle stop server -> acquire one "
+        "page-batch on CUDA -> start server (/health ready) -> extract the "
+        "batch from cache; the server is stopped on every exit path unless "
+        "--keep-server",
+    )
+    extract_parser.add_argument(
+        "--batch-pages",
+        type=int,
+        default=None,
+        help="target converted pages per cycle (default: acquire.yaml batch.pages); "
+        "sizing is evaluated only at document boundaries and the document that "
+        "crosses the limit always finishes",
+    )
+    extract_parser.add_argument(
+        "--keep-server",
+        action="store_true",
+        help="leave the model server running after the batched run",
+    )
+    extract_parser.add_argument(
+        "--server-script",
+        default=None,
+        help="server-control script (start|stop|status|probe); default: "
+        "acquire.yaml batch.server_script",
+    )
+    extract_parser.add_argument(
+        "--device",
+        choices=["cpu", "cuda"],
+        default=None,
+        help="Docling device for acquisition (default: acquire.yaml batch.device "
+        "for --batched, else FMD_DOCLING_DEVICE/config)",
+    )
+
+    acquire_parser = subparsers.add_parser(
+        "acquire",
+        help="convert documents into cached parses (W10); makes zero LLM calls",
+    )
+    acquire_parser.add_argument(
+        "--limit", type=int, default=None, help="maximum documents to acquire"
+    )
+    acquire_parser.add_argument(
+        "--pages",
+        type=int,
+        default=None,
+        help="page budget: evaluated only at document boundaries — the document "
+        "that crosses it is converted in full, then acquisition stops",
+    )
+    acquire_parser.add_argument(
+        "--device",
+        choices=["cpu", "cuda"],
+        default=None,
+        help="Docling device for this run (overrides FMD_DOCLING_DEVICE/config)",
+    )
+    acquire_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the plan (documents, known pages, expected cache hits), "
+        "convert nothing, write nothing",
+    )
 
     plan_parser = subparsers.add_parser(
         "plan",
@@ -550,9 +630,85 @@ def _cmd_crawl(args: argparse.Namespace) -> int:
 
 
 def _cmd_extract(args: argparse.Namespace) -> int:
+    if args.batched:
+        return _cmd_extract_batched(args)
     orchestrator, database = _orchestrator(args)
     try:
-        summary = orchestrator.extract(limit=args.limit, force=args.force)
+        summary = orchestrator.extract(
+            limit=args.limit,
+            force=args.force,
+            from_cache=args.from_cache,
+            no_acquire=args.no_acquire,
+            dry_run=args.dry_run,
+        )
+    finally:
+        database.close()
+    print(summary.as_json())
+    return 1 if summary.failed else 0
+
+
+def _batch_settings(args: argparse.Namespace) -> dict[str, Any]:
+    """Batched-run settings: acquire.yaml ``batch`` block with CLI overrides."""
+    registry = load_registry(args.config_dir)
+    batch = getattr(registry.acquire, "batch", None)
+    defaults = {
+        "pages": 100,
+        "device": "cuda",
+        "server_script": None,
+        "keep_server": False,
+        "poll_timeout_s": 600,
+    }
+    if batch is not None:
+        defaults.update(
+            {
+                "pages": int(batch.pages),
+                "device": str(batch.device),
+                "server_script": batch.server_script,
+                "keep_server": bool(batch.keep_server),
+                "poll_timeout_s": int(batch.poll_timeout_s),
+            }
+        )
+    if getattr(args, "batch_pages", None) is not None:
+        defaults["pages"] = int(args.batch_pages)
+    if getattr(args, "device", None):
+        defaults["device"] = str(args.device)
+    if getattr(args, "keep_server", False):
+        defaults["keep_server"] = True
+    if getattr(args, "server_script", None):
+        defaults["server_script"] = str(args.server_script)
+    return defaults
+
+
+def _cmd_extract_batched(args: argparse.Namespace) -> int:
+    from fmd.orchestrate.batched import BatchedRunner
+
+    settings = _batch_settings(args)
+    orchestrator, database = _orchestrator(args)
+    try:
+        runner = BatchedRunner(
+            orchestrator=orchestrator,
+            batch_pages=settings["pages"],
+            device=settings["device"],
+            keep_server=settings["keep_server"],
+            poll_timeout_s=settings["poll_timeout_s"],
+            server_script=settings["server_script"],
+        )
+        summary = runner.run(limit=args.limit, dry_run=args.dry_run)
+    finally:
+        database.close()
+    print(summary.as_json())
+    return 1 if summary.failed else 0
+
+
+def _cmd_acquire(args: argparse.Namespace) -> int:
+    orchestrator, database = _orchestrator(args)
+    try:
+        summary = orchestrator.acquire(
+            limit=args.limit,
+            pages=args.pages,
+            device=args.device,
+            dry_run=args.dry_run,
+        )
     finally:
         database.close()
     print(summary.as_json())
@@ -1054,6 +1210,28 @@ def _programme_router(registry: Any, database: Any) -> Any | None:
         return None
 
 
+def _scope_tally(drafts: Any) -> dict[str, int]:
+    """Dry-run scope counts: what the rules could decide and what waits.
+
+    ``would_classify`` is the number of names no rule or manual decision
+    settled; with the classifier skipped in a dry run they are also
+    ``would_defer`` (uncertain → needs_review), never silently admitted.
+    """
+    tally = {"would_admit": 0, "would_reject": 0, "would_defer": 0, "would_classify": 0}
+    for draft in drafts or ():
+        reason = getattr(draft, "scope_reason", None) or ""
+        if reason == "semantic_unavailable_uncertain":
+            tally["would_classify"] += 1
+            tally["would_defer"] += 1
+        elif getattr(draft, "in_scope", False):
+            tally["would_admit"] += 1
+        elif getattr(draft, "needs_review", False):
+            tally["would_defer"] += 1
+        else:
+            tally["would_reject"] += 1
+    return tally
+
+
 def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
     from fmd.db.repositories import EntitiesRepo, ProgrammesRepo
     from fmd.ingest.materialise import materialise_from_database
@@ -1061,7 +1239,11 @@ def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
     registry = load_registry(args.config_dir)
     database = _database(args)
     try:
-        router = None if args.no_classifier else _programme_router(registry, database)
+        # Lazily build the router: a dry run never needs a model server, so it
+        # skips Tier 2 entirely and reports how many names *would* be
+        # classified instead of failing on an unreachable endpoint.
+        skip_classifier = args.no_classifier or args.dry_run
+        router = None if skip_classifier else _programme_router(registry, database)
         result = materialise_from_database(
             database,
             registry,
@@ -1088,6 +1270,8 @@ def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
         payload["institution_names"] = {str(key): value for key, value in institution_names.items()}
         payload["table"] = counts
         payload["scope"] = scope_counts
+        if args.dry_run:
+            payload["would_scope"] = _scope_tally(result.drafts)
         print(json.dumps(payload, indent=2, default=str))
         return 0
 
@@ -1096,8 +1280,14 @@ def _cmd_programmes_materialise(args: argparse.Namespace) -> int:
         f"fmd programmes materialise: claims={result.claims} rows={len(result.entries)} "
         f"{verb}={result.written} (create={result.created} update={result.updated} "
         f"unchanged={result.unchanged}) refused_aggregates={len(result.aggregates_refused)} "
-        f"classifier={'off' if args.no_classifier else 'on'}"
+        f"classifier={'off' if skip_classifier else 'on'}"
     )
+    if args.dry_run:
+        tally = _scope_tally(result.drafts)
+        print(
+            "dry-run scope: would_admit={would_admit} would_reject={would_reject} "
+            "would_defer={would_defer} would_classify={would_classify}".format(**tally)
+        )
     print(
         "scope: in={in_scope} out={out_of_scope} (rule={tier_rule} semantic={tier_semantic} "
         "manual={tier_manual}) review_queue={review_queue}".format(**scope_counts)
@@ -1361,7 +1551,10 @@ def _cmd_programmes_requalify(args: argparse.Namespace) -> int:
         programmes = ProgrammesRepo(database)
         entities = EntitiesRepo(database)
         mapping = _programme_mapping(registry, database)
-        router = None if args.no_classifier else _programme_router(registry, database)
+        # A dry run never needs the model: skip Tier 2 and report the names
+        # that would be classified instead of dialling a dead endpoint.
+        skip_classifier = args.no_classifier or args.dry_run
+        router = None if skip_classifier else _programme_router(registry, database)
         scoper = scoper_for_database(database, registry, mapping, router=router)
         result = requalify_programmes(
             programmes,
@@ -1385,8 +1578,14 @@ def _cmd_programmes_requalify(args: argparse.Namespace) -> int:
     print(
         f"fmd programmes requalify: rows={result.rows} {verb}={result.rescoped} "
         f"merged={result.merged} unchanged={result.unchanged} "
-        f"uncertain={result.uncertain} classifier={'off' if args.no_classifier else 'on'}"
+        f"uncertain={result.uncertain} classifier={'off' if skip_classifier else 'on'}"
     )
+    if args.dry_run:
+        print(
+            f"dry-run scope: would_admit={result.would_admit} "
+            f"would_reject={result.would_reject} would_defer={result.would_defer} "
+            f"would_classify={result.would_classify}"
+        )
     for note in result.notes:
         print(f"  note: {note}")
     for entry in result.entries:
@@ -1511,6 +1710,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_crawl(args)
         if args.command == "extract":
             return _cmd_extract(args)
+        if args.command == "acquire":
+            return _cmd_acquire(args)
         if args.command == "plan":
             return _cmd_plan(args)
         if args.command == "verify":

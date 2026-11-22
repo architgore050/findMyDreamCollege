@@ -34,10 +34,30 @@ Environment: `DATABASE_URL` (default compose port 5433), `API_BASE_URL`,
 `WEB_BASE_URL`, `API_PORT`, `WEB_PORT`. Exit code is non-zero **iff at least
 one check FAILED**; SKIPs are listed as known gaps in the final table.
 
+### Manifest completeness (2026-11-21, wave v1-w2)
+
+Every check id the script can record lives in the `EXPECTED_CHECKS` manifest
+(`scripts/acceptance.sh`), and two layers guarantee the verdict table carries
+a verdict for **all** of them on every run — no check can be silently omitted
+by a dependency branch or an early abort:
+
+1. dependency branches record honest SKIPs for the checks they gate
+   (e.g. pnpm absent ⇒ `web/lint`…`web/render /sources` all SKIP with the reason);
+2. a safety net before the verdict records a SKIP naming the harness bug for
+   any manifest id that reached no verdict (this net proved itself the day it
+   shipped: it caught `web/pnpm` never being recorded when pnpm *is* present).
+
+The `--json-out` report (CI mode, `format: fmd-acceptance-v1`) carries
+`totals`, `verdict` (`PASS`/`FAIL`), `manifest` (`expected`/`recorded`/
+`missing`/`complete`) and per-check `name`/`result`/`detail`. Pins:
+`packages/pipeline/tests/test_acceptance_manifest.py`. The inventory below is
+the human-readable grouping (19 rows = 32 check ids).
+
 ## 3. Check inventory
 
 | # | Check | Verdicts | Enforced invariant |
 |---|---|---|---|
+| 0 | `compose/smoke` | PASS (LIVE) / FAIL / SKIP | compose file parses; when the stack is up, the api container connects to db over the declared `fmd-net` network (the 2026-11-21 DNS-split fix) and a running web answers on its published port; offline pins: `tests/test_compose_wiring.py` |
 | 1 | `preflight/db-reachable` | PASS (LIVE) / SKIP | operator runnability |
 | 2 | `preflight/migrations` | PASS (LIVE) / FAIL / SKIP | `schema_migrations` count == `db/migrations/*.sql` count |
 | 3 | `preflight/registry-seeded` | PASS (LIVE) / FAIL / SKIP | sources & countries rows exist (`fmd migrate && fmd seed`) |

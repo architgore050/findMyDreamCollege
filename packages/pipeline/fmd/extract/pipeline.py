@@ -16,6 +16,7 @@ from typing import Any
 
 from fmd.acquire.canonical import outline_to_sections
 from fmd.acquire.outline import OutlineNode, SectionIndex, outline_summary
+from fmd.acquire.parse_cache import acquire_document
 from fmd.acquire.types import PageSpan
 from fmd.config import Registry, get_registry
 from fmd.config.models import ModelsConfig, ProviderConfig
@@ -52,7 +53,6 @@ from fmd.extract.pdf import (
     TierPolicy,
     TierUnavailable,
     VLMAdjudicator,
-    extract_document,
 )
 from fmd.extract.prompts import load_prompt, user_message
 from fmd.extract.schemas import FamilyDocument, UnknownFamily, schema_for
@@ -115,6 +115,11 @@ class ExtractResult:
     #: Chunk-path summary (``None`` on the single-pass path, which is unchanged).
     #: Shape documented in ``fmd/extract/chunking.py`` and runbook §9.
     chunking: dict[str, Any] | None = None
+    #: Parse provenance (W10 parse cache): ``mode`` (``cache``|``live``|
+    #: ``cache_only``), ``cache_hit``, ``pages``, and for misses the stable
+    #: ``reason`` (``no_cache_entry``, ``missing_parse_cache``, ...) plus
+    #: ``stored`` when the fresh parse was written to the cache.
+    acquire: dict[str, Any] | None = None
 
 
 class ExtractPipeline:
@@ -135,12 +140,34 @@ class ExtractPipeline:
         adjudicate: bool = False,
         adjudicator: VLMAdjudicator | None = None,
         sections: SectionsRepo | Any | None = None,
+        parse_cache: Any | None = None,
+        t2_parse_cache: Any | None = None,
+        t0: Any = None,
+        t1: Any = None,
+        t2: Any = None,
+        t2b: Any = None,
+        allow_convert: bool = True,
     ) -> None:
         self.router = router
         self.snapshots = snapshots
         self.extractions = extractions
         self.claims = claims
         self.store = store
+        #: Parse cache (W10). ``None`` keeps the legacy fused behaviour: every
+        #: run converts inline and nothing is cached.
+        self.parse_cache = parse_cache
+        #: T2 parse cache (wave v1-w3): consumed after the T1 lookup so a
+        #: stored OCR parse skips the OCR run; live T2 results store here.
+        self.t2_parse_cache = t2_parse_cache
+        #: Injected tier callables (test seams, passed straight through to the
+        #: tier dispatcher).
+        self.t0 = t0
+        self.t1 = t1
+        self.t2 = t2
+        self.t2b = t2b
+        #: ``False`` for ``extract --from-cache`` / ``--no-acquire``: a missing
+        #: cached parse is reported (``missing_parse_cache``), never converted.
+        self.allow_convert = allow_convert
         #: The section-tree repo (W8). ``None`` keeps the outline audit-only:
         #: it still rides in ``structure_json`` but is not persisted as rows.
         self.sections = sections
@@ -173,7 +200,31 @@ class ExtractPipeline:
             return ExtractResult(target=target, skipped=True)
 
         data = self.store.get(snapshot.sha256)
-        doc = extract_document(data, content_type=snapshot.content_type, policy=self.policy)
+        doc, provenance = acquire_document(
+            data,
+            content_type=snapshot.content_type,
+            policy=self.policy,
+            cache=self.parse_cache,
+            t2_cache=self.t2_parse_cache,
+            snapshot_sha256=snapshot.sha256,
+            t0=self.t0,
+            t1=self.t1,
+            t2=self.t2,
+            t2b=self.t2b,
+            allow_convert=self.allow_convert,
+        )
+        acquire_info = _acquire_info(provenance)
+        if doc is None:
+            # Cache-only mode with no cached parse (extract --from-cache /
+            # --no-acquire): record the stable reason and continue with the
+            # next document — Docling is never invoked on this path.
+            logger.info(
+                "snapshot %s has no cached parse (mode=%s); recorded %s",
+                snapshot.id,
+                acquire_info.get("mode"),
+                acquire_info.get("reason"),
+            )
+            return ExtractResult(target=target, skipped=True, acquire=acquire_info)
         if doc.is_empty:
             engine = doc.engine_meta or {}
             raise TierUnavailable(
@@ -193,6 +244,7 @@ class ExtractPipeline:
                 skipped=True,
                 needs_review=True,
                 review=doc.as_review_item(),
+                acquire=acquire_info,
             )
 
         schema = schema_for(target.family)
@@ -218,7 +270,8 @@ class ExtractPipeline:
                     "chunking in config/models.yaml:chunking"
                 )
             return self._run_chunked(
-                target, snapshot, doc, prompt, schema, purpose, model, observed_at, config, resume
+                target, snapshot, doc, prompt, schema, purpose, model, observed_at, config, resume,
+                acquire_info=acquire_info,
             )
 
         try:
@@ -305,6 +358,7 @@ class ExtractPipeline:
             rewrites=validation.rewrites,
             outcomes=validation.outcomes,
             adjudications=adjudications,
+            acquire=acquire_info,
         )
 
     def run_batch(self, targets: list[ExtractTarget]) -> list[ExtractResult]:
@@ -326,6 +380,8 @@ class ExtractPipeline:
         observed_at: datetime | None,
         config: ChunkingConfig,
         resume: ChunkResume | None,
+        *,
+        acquire_info: dict[str, Any] | None = None,
     ) -> ExtractResult:
         """The W4 chunk loop: one call per window, one extraction row per run.
 
@@ -578,6 +634,7 @@ class ExtractPipeline:
             outcomes=outcomes,
             adjudications=adjudications,
             chunking=chunk_summary,
+            acquire=acquire_info,
         )
 
     # ------------------------------------------------------------------ internals
@@ -918,6 +975,23 @@ def _apply_adjudications(claim: ClaimCreate, adjudications: list[dict[str, Any]]
             logger.warning("T3 adjudication rejected claim %s; halving confidence", key)
             return claim.model_copy(update={"confidence": claim.confidence * 0.5})
     return claim
+
+
+def _acquire_info(provenance: Any) -> dict[str, Any]:
+    """Normalised parse provenance for run summaries (W10 parse cache)."""
+    info = dict(provenance.as_dict())
+    reason = getattr(provenance, "reason", None)
+    if reason is not None:
+        info.setdefault("reason", reason)
+    if info.get("reason") == "missing_parse_cache":
+        info["mode"] = "cache_only"
+    info["cache_hit"] = info.get("mode") == "cache"
+    pages = getattr(provenance, "pages", None)
+    if pages is None:
+        pages = (getattr(provenance, "info", None) or {}).get("pages")
+    if pages is not None:
+        info["pages"] = int(pages)
+    return info
 
 
 def _page_range(doc: ExtractedDoc) -> str | None:

@@ -270,3 +270,64 @@ bbox:
   gate_tiers:
     - T0
     - T1
+
+# ---------------------------------------------------------------------------
+# Parse cache + batched acquisition (W10, 2026-11-21).
+#
+# Problem (measured on the operator host, runbook §6): extraction was one
+# fused loop — Docling T1 on CPU, then the LLM call — so the GPU idled during
+# every conversion (6 W, all cores at 100%) and re-running extraction
+# re-converted every document. Docling is 2–6× faster on CUDA (0.166 vs
+# 1.31 s/page on a 161-page report) but CUDA OOMs while the 26B LLM holds its
+# 64k KV cache (589 MiB free after the CUDA context; Docling needs
+# ~1.0–1.3 GiB). The fix is a persistent T1 parse cache plus a batched
+# orchestrator that stops the server, converts one page-batch on CUDA, then
+# restarts the server and extracts that batch from cache.
+#
+# Measured constants the defaults below are based on:
+#   CUDA conversion   0.166–0.9 s/page   (RT-DETR + TableFormer, server stopped)
+#   CPU conversion    1.0–3.8 s/page     (the fused-loop baseline)
+#   server restart    ~20–25 s           (scripts/serve_local.sh stop + start +
+#                                         /health ready at 64k context)
+#   break-even        ~20–25 pages/cycle — below that, the restart costs more
+#                     than the CUDA speedup saves; above it, batching wins.
+#   default 100 pages/cycle leaves ~4–5× margin over break-even.
+cache:
+  # Versioned parse payload schema (fmd/acquire/parse_cache.py). Bumping this
+  # invalidates every stored parse; the loader cross-checks it against
+  # PARSE_SCHEMA_VERSION so the two cannot drift apart silently.
+  # Cached tiers: T1 (Docling, born-digital) and T2 (in-process RapidOCR only,
+  # keys additionally pinned to the engine fingerprint — engine version + model
+  # ids; device excluded). HTTP OCR engines (qwen3vl/paddleocr) are never
+  # cached: their version is not locally pinnable, so a service-side model swap
+  # could not be detected. See 11-inference-runbook.md, "T2 parse cache".
+  schema_version: 1
+
+batch:
+  # Target converted pages per cycle. Sizing is evaluated only at document
+  # boundaries: accumulate completed documents until the converted page total
+  # reaches `pages`, then stop taking new documents. The document that crosses
+  # the limit is always finished — converted in full and extracted in the same
+  # cycle — and no further document starts. A document larger than `pages`
+  # runs alone. A document is never truncated, never dropped, never split
+  # across cycles, and never cached or extracted while incomplete.
+  pages: 100
+  # Docling device for the acquisition phase of each cycle. The batched
+  # runner stops the model server first (that is the whole point), so `cuda`
+  # is the measured default; FMD_DOCLING_DEVICE still overrides per shell,
+  # and `fmd extract --device cpu` overrides per invocation.
+  device: cuda
+  # Server-control script with the start|stop|status|probe contract
+  # (scripts/serve_local.sh). Relative paths resolve against the repository
+  # root. Unset, empty, or missing on the host ⇒ degraded mode: CPU
+  # acquisition + inline extraction, recorded in the run summary as
+  # server_control=degraded — the run still happens, honestly labelled.
+  # FMD_SERVER_CONTROL=off forces degraded mode for one run.
+  server_script: scripts/serve_local.sh
+  # Never leave the model server running on any exit path unless this is
+  # true: conversion failure, LLM failure and Ctrl-C all stop it (try/finally).
+  keep_server: false
+  # /health readiness poll ceiling after a server start. A start that is not
+  # ready within this budget aborts the cycle with a clear error and leaves
+  # the server stopped.
+  poll_timeout_s: 600

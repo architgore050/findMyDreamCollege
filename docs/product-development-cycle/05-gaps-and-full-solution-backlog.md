@@ -109,3 +109,9 @@ Everything v1 deliberately does **not** do, ordered by how much it blocks the or
 - Imputing placement data for programmes that publish nothing.
 - Treating internships as placements.
 - Hardcoding any applicant's country, budget, intake year, or exam list.
+
+## 8. Parse-cache scope (wave v1-w3, 2026-11-21)
+
+| ID | Gap | Why | Pri | Notes |
+|---|---|---|---|---|
+| G8.1 | T2 parse cache covers in-process RapidOCR only | qwen3vl/paddleocr engine versions are only knowable by asking the service; caching under an unpinned identity would alias a service-side model swap | P1 | Cache key pins {engine, engine_version, model_ids}; device excluded. To cache HTTP engines, `/extract` must report model identity first (backend change). Refusals recorded as `t2_engine_fingerprint_unavailable`. |
