@@ -112,6 +112,7 @@ def test_0003_applies_over_0001_and_0002_and_is_idempotent(schema_database, tmp_
         "0009_document_sections",
         "0010_programme_scoping",
         "0011_document_parses",
+        "0012_extract_batched_stage",
     ]
     assert run_migrations(schema_database) == []
     assert applied_migrations(schema_database) == {

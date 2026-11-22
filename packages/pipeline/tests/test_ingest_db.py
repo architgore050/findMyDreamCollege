@@ -83,6 +83,7 @@ def test_0004_adds_roles_and_the_institution_domain_queue(schema_database, tmp_p
         "0009_document_sections",
         "0010_programme_scoping",
         "0011_document_parses",
+        "0012_extract_batched_stage",
     ]
     assert run_migrations(schema_database) == []
 
