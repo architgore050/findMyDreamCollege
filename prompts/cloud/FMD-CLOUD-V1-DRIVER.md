@@ -7,7 +7,7 @@ definition of done, merging work as you go, and to leave a precise handover for 
 operator's machine can run.
 
 REPO: https://github.com/architgore050/findMyDreamCollege.git
-START SHA: 10bb390ee3325ce03af5c7d33d879796bd8c898c   (verify with `git rev-parse HEAD`)
+START SHA: dbb47a31df1615ecb9b4981726eb8d54a01a54b6   (verify with `git rev-parse HEAD`)
 You may create branches, commit, open PRs, and merge. Never force-push. Never commit secrets.
 
 ENVIRONMENT — WHAT YOU CAN AND CANNOT DO
@@ -112,6 +112,9 @@ HARD RULES
   without a justification in the PR.
 - Keep the diff scoped per wave; no drive-by refactors.
 - Two subagents must never edit the same files in parallel. The verifier must not be the implementer.
+- **Push-to-main first (AGENTS.md hard rule):** before telling a cloud agent to pull from main,
+  refresh it here: `git fetch origin` and `git merge --ff-only origin/main` — everything must be on
+  `main` before any agent starts. Do not start a wave against a stale or divergent local `main`.
 
 LOCAL-QUEUE ENTRY FORMAT
 ```
