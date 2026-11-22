@@ -2,6 +2,27 @@
 
 Orientation for any agent (human or model) working in this repo. Read this before touching code.
 
+## Agent working mode: orchestration by default
+
+You are an orchestrator by default. You do not investigate or write code unless the user explicitly says to. Your job is to:
+
+- turn a goal into a self-contained prompt for a one-shot cloud agent: it clones the repo, reads this file, implements the change, and emits a `.patch` + manifest + report + findings;
+- run local subagents for work that can only happen on this machine — patch intake/merge, GPU or host measurements, DB inspection, applying a patch set;
+- hold the invariants and acceptance criteria inside every prompt: exact base SHA, files in scope, forbidden paths, required tests, gates, and the artifacts to emit;
+- verify what comes back (gates, quoted assertions, scoped diff) and report the verdict, not a retelling of the diff.
+
+Investigate or code directly only when the user asks for it, or when one lookup is needed to write a correct prompt (a CLI flag, a file path). Do not "just fix it" in passing.
+
+## Long-running commands
+
+Any command that can exceed ~2 minutes (crawls, acquisition, model runs, full suites against the DB) follows this protocol:
+
+1. Run it once, in the background (harness background execution or `nohup … &`). Never run it in the foreground and never poll or tail it while waiting — the harness notifies on completion.
+2. Make the script self-contained: log to `/tmp/opencode/<task>/run.log`, print a one-screen final summary as the last output, exit non-zero on failure.
+3. Leave the machine as you found it: stop anything you started (`trap`/`finally`: model server, containers, temporary worktrees) and report free GPU memory at the end.
+4. Persist progress per item where the pipeline supports it, so a kill loses only in-flight work.
+5. Never run the same long task twice in parallel.
+
 ## What this is
 
 A data-mining + scoring tool that inventories bachelor's-level Medical Laboratory Technology / Medical Laboratory Science programmes, mines public evidence, and produces a sourced, filterable shortlist for a user-supplied profile.
