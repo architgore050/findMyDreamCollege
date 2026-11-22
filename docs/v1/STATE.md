@@ -172,6 +172,9 @@ risks).
 
 ## Merged to main (verified via GitHub API)
 
+- PR #6 (wave 5: classification report + quoted-evidence semantic admissions),
+  verifier verdict approve. Cumulative: waves 1-5 all merged.
+
 - PR #5 (wave 4: double-buffered batched runner + tier-aware sizing), merged
   as be0fcfa. Cumulative: waves 1-4 all merged; verifier-driven fixes applied
   pre-merge in every wave.
