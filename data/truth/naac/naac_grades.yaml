@@ -1,0 +1,22 @@
+# NAAC institutional grades — truth table for the naac-proxy product stream.
+#
+# INGESTION STATUS (2026-11-22): naac.gov.in was unreachable from the build
+# environment (repeated connection timeouts on https, matching the flakiness
+# recorded on the `naac_results` source in config/sources.yaml). No grades are
+# committed; none were invented. The loader treats entries: [] as an empty
+# truth table and the stream reports UNKNOWN everywhere, honestly.
+# The ingestion procedure is documented in README.md beside this file.
+schema_version: 1
+truth_kind: naac_grades
+truth_version: 0
+scope: institution
+as_of: null
+acquisition_status: not_ingested
+source_url: https://naac.gov.in/index.php/en/19-quick-links/62-accreditationresults
+source_sha256: null
+fetched_at: null
+notes: >-
+  Empty by design until a reachable fetch succeeds. NAAC grades are
+  institutional, on a 5-year accreditation cycle, and are a medium-maturity
+  expert-judgment proxy — never programme-level and never an outcome measure.
+entries: []
