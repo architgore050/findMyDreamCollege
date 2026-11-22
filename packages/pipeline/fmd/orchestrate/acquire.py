@@ -161,6 +161,7 @@ class AcquisitionStage:
         pages_budget: int | None = None,
         selected: list[Any] | None = None,
         dry_run: bool = False,
+        data_for: Any = None,
     ) -> None:
         restore = _set_device_env(self.device)
         try:
@@ -170,6 +171,7 @@ class AcquisitionStage:
                 pages_budget=pages_budget,
                 selected=selected,
                 dry_run=dry_run,
+                data_for=data_for,
             )
         finally:
             restore()
@@ -182,6 +184,7 @@ class AcquisitionStage:
         pages_budget: int | None,
         selected: list[Any] | None,
         dry_run: bool,
+        data_for: Any = None,
     ) -> None:
         items = self.plan(limit=limit, selected=selected)
         summary.bump("selected", len(items))
@@ -197,7 +200,7 @@ class AcquisitionStage:
             if dry_run:
                 self._record_plan(summary, item)
                 continue
-            outcome = self._acquire_one(item, summary)
+            outcome = self._acquire_one(item, summary, data_for=data_for)
             if outcome is None:
                 continue
             parsed += 1
@@ -224,8 +227,18 @@ class AcquisitionStage:
             }
         )
 
-    def _acquire_one(self, item: AcquisitionItem, summary: RunSummary) -> dict[str, Any] | None:
-        """Convert (or cache-hit) one snapshot; append exactly one outcome row."""
+    def _acquire_one(
+        self,
+        item: AcquisitionItem,
+        summary: RunSummary,
+        *,
+        data_for: Any = None,
+    ) -> dict[str, Any] | None:
+        """Convert (or cache-hit) one snapshot; append exactly one outcome row.
+
+        ``data_for(sha256)`` returns prefetched snapshot bytes (or None — the
+        caller then reads live); it is consulted only on the convert path.
+        """
         if item.cache_hit:
             # Lookup happens before conversion; a verified hit reconstructs
             # the parse and invokes no converter at all. T1 is consulted
@@ -255,15 +268,36 @@ class AcquisitionStage:
             summary.bump("converted")
             summary.bump("cache_misses")
             return self._convert(
-                item, summary, force_reason=(first_miss or {}).get("reason")
+                item,
+                summary,
+                force_reason=(first_miss or {}).get("reason"),
+                data=self._prefetched(data_for, item.sha256),
             )
-        return self._convert(item, summary)
+        return self._convert(item, summary, data=self._prefetched(data_for, item.sha256))
+
+    @staticmethod
+    def _prefetched(data_for: Any, sha256: str) -> bytes | None:
+        """Prefetched bytes for a snapshot, or None (read live in _convert)."""
+        if data_for is None:
+            return None
+        try:
+            return data_for(sha256)
+        except Exception:  # a broken prefetch must never fail the document
+            return None
 
     def _convert(
-        self, item: AcquisitionItem, summary: RunSummary, *, force_reason: str | None = None
+        self,
+        item: AcquisitionItem,
+        summary: RunSummary,
+        *,
+        force_reason: str | None = None,
+        data: bytes | None = None,
     ) -> dict[str, Any] | None:
         try:
-            data = self.store.get(item.sha256)
+            # ``data`` arrives prefetched (double-buffered runner): the bytes
+            # were read off-thread while the previous cycle's extraction ran.
+            # None ⇒ read live, exactly as before this seam existed.
+            data = data if data is not None else self.store.get(item.sha256)
         except SnapshotNotFound as exc:
             summary.bump("abstained")
             summary.outcomes.append(

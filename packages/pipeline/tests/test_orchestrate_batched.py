@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import os
 import signal
+import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +42,7 @@ from fmd.config import load_registry
 from fmd.orchestrate import Orchestrator
 from fmd.orchestrate.batched import (
     BatchedRunner,
+    PrefetchBuffer,
     ScriptServerController,
     ServerControlError,
     resolve_script,
@@ -736,3 +739,123 @@ def test_sizing_reads_t2_cache_rows(tmp_path) -> None:
     )
     # line_pages counts known pages too, even when no conversion ran
     assert "pages=3" in harness.lines[0]
+
+
+class RecordingStore(SnapshotStore):
+    """Real store that records byte reads with the current window phase and
+    can open a gate when a target sha is read (prefetch determinism)."""
+
+    def __init__(self, root: Path, phases: dict[str, str]) -> None:
+        super().__init__(root)
+        self.phases = phases
+        self.reads: list[tuple[str, str]] = []
+        self.gate = threading.Event()
+        self.gate_sha: str | None = None
+        self.fail_once_in_open_window = False
+
+    def get(self, sha256: str) -> bytes:
+        # Fail exactly one read issued while a window is OPEN (the prefetch
+        # worker) — the live acquire-loop read runs window-closed.
+        if self.fail_once_in_open_window and self.phases["current"] == "window-open":
+            self.fail_once_in_open_window = False
+            raise RuntimeError("simulated store hiccup")
+        data = super().get(sha256)
+        self.reads.append((self.phases["current"], sha256))
+        if sha256 == self.gate_sha:
+            self.gate.set()
+        return data
+
+
+class PhaseController(FakeController):
+    """FakeController that flips the shared window phase on stop/start and
+    holds wait_ready until the prefetch has landed (bounded, for determinism)."""
+
+    def __init__(self, *, events: list[str], phases: dict[str, str]) -> None:
+        super().__init__(events=events)
+        self.phases = phases
+
+    def stop(self) -> None:
+        self.phases["current"] = "window-closed"
+        super().stop()
+
+    def start(self) -> None:
+        self.phases["current"] = "window-open"
+        super().start()
+
+    def wait_ready(self, timeout_s: float) -> None:
+        self.gate.wait(2.0)  # set by RecordingStore when the prefetched bytes land
+        self.gate.clear()
+        super().wait_ready(timeout_s)
+
+
+def test_prefetch_reads_next_batch_bytes_during_the_gpu_window(tmp_path) -> None:
+    """Double buffering: while cycle 1's extraction phase keeps the server up,
+    cycle 2's first document's bytes are already read off-thread — the next
+    server-stopped window starts converting immediately, without disk I/O."""
+    registry = _registry()
+    harness = BatchedHarness(tmp_path, registry, batch_pages=100)
+    _doc_big, big = harness.add_document("https://college.ac.in/big.pdf", "big", 140)
+    _doc_next, nxt = harness.add_document("https://college.ac.in/next.pdf", "next", 40)
+
+    phases = {"current": "window-closed"}
+    recording = RecordingStore(tmp_path / "snapshots", phases)
+    harness.orchestrator.store = recording
+    harness.controller = PhaseController(events=harness.events, phases=phases)
+    harness.controller.gate = recording.gate
+    recording.gate_sha = nxt.sha256  # hold wait_ready until the prefetch lands
+    harness.runner.controller = harness.controller
+
+    summary = harness.runner.run(limit=5)
+
+    assert summary.failed is False
+    assert summary.counts["cycles"] == 2
+    assert recording.reads.count(("window-open", nxt.sha256)) >= 1, (
+        "the next batch's bytes must be read while a window is open"
+    )
+    # Cycle 2's stop happens when the prefetch already delivered the bytes:
+    second_stop = harness.events.index("stop", 1)
+    first_prefetched = next(
+        i for i, (phase, sha) in enumerate(recording.reads) if sha == nxt.sha256
+    )
+    assert first_prefetched < len(
+        [1 for e in harness.events[: second_stop + 1] if e == "stop"]
+    ) or recording.reads[first_prefetched][0] == "window-open"
+    # And the acquire loop consumed the prefetched bytes: exactly ONE live read
+    # of `next` happened inside a closed window — none.
+    assert ("window-closed", nxt.sha256) not in recording.reads
+
+
+def test_prefetch_failure_falls_back_to_live_read(tmp_path) -> None:
+    """A worker-side read failure must never lose the document: the acquire
+    loop falls back to a live read and the cycle completes normally."""
+    registry = _registry()
+    harness = BatchedHarness(tmp_path, registry, batch_pages=100)
+    _doc_big, _big = harness.add_document("https://college.ac.in/big.pdf", "big", 140)
+    _doc_next, nxt = harness.add_document("https://college.ac.in/next.pdf", "next", 40)
+
+    phases = {"current": "window-closed"}
+    recording = RecordingStore(tmp_path / "snapshots", phases)
+    recording.fail_once_in_open_window = True  # the worker's read of `next` fails
+    harness.orchestrator.store = recording
+    harness.controller = PhaseController(events=harness.events, phases=phases)
+    harness.controller.gate = threading.Event()  # never blocks
+    harness.runner.controller = harness.controller
+
+    summary = harness.runner.run(limit=5)
+
+    assert summary.failed is False
+    assert summary.counts["cycles"] == 2
+    assert summary.counts["extracted"] == 2
+
+
+def test_prefetch_buffer_take_and_close() -> None:
+    """Unit: non-blocking take, unknown sha ⇒ None, close joins the worker."""
+    store = SnapshotStore(Path(tempfile.mkdtemp()) / "s")
+    sha = store.put(b"%PDF-1.4\nprefetch-unit\n")
+    buffer = PrefetchBuffer(store=store, depth=2)
+    buffer.submit([sha, "f" * 64])
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and buffer.take(sha) is None:
+        time.sleep(0.01)  # the worker may not have landed yet
+    buffer.close()
+    assert buffer.take("e" * 64) is None

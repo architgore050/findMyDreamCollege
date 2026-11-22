@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -260,6 +261,77 @@ def take_batch(
     return batch
 
 
+class PrefetchBuffer:
+    """CPU-side double buffer (wave v1-w4): reads the *next* batch's snapshot
+    bytes off the main thread while the current cycle's extraction phase keeps
+    the GPU busy. The worker touches nothing but the object store — no
+    converter, no model server, no network — so the one-CUDA-consumer rule
+    (runbook §6) is untouched and every conversion still runs inside the
+    server-stopped window.
+
+    ``take`` is non-blocking: a byte set that has not landed yet simply falls
+    back to a live read in the acquire loop. Correctness never depends on the
+    prefetch winning the race; only the wall clock does.
+    """
+
+    def __init__(
+        self, *, store: Any, depth: int = 4, stop: threading.Event | None = None
+    ) -> None:
+        self._store = store
+        self._depth = max(int(depth), 1)
+        self._stop = stop if stop is not None else threading.Event()
+        self._queue: queue.Queue[str] = queue.Queue()
+        self._submitted: set[str] = set()
+        self._bytes: dict[str, bytes] = {}
+        self._thread: threading.Thread | None = None
+        #: Observable read order (sha256 of every byte set landed off-thread).
+        self.reads: list[str] = []
+
+    def submit(self, sha256s: list[str]) -> None:
+        """Queue byte reads for the given snapshots, skipping known ones."""
+        fresh: list[str] = []
+        for sha in sha256s[: self._depth]:
+            if sha in self._submitted:
+                continue
+            self._submitted.add(sha)
+            fresh.append(sha)
+        if not fresh:
+            return
+        for sha in fresh:
+            self._queue.put(sha)
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(
+                target=self._work, name="fmd-prefetch", daemon=True
+            )
+            self._thread.start()
+
+    def _work(self) -> None:
+        while not self._stop.is_set():
+            try:
+                sha = self._queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if sha is None:
+                return
+            try:
+                data = self._store.get(sha)
+            except Exception:
+                continue  # take() returns None ⇒ the acquire loop reads live
+            self._bytes[sha] = data
+            self.reads.append(sha)
+
+    def take(self, sha256: str) -> bytes | None:
+        """The prefetched bytes, or ``None`` when not ready (live read wins)."""
+        return self._bytes.pop(sha256, None)
+
+    def close(self) -> None:
+        """Stop the worker and join it; an interrupted run never leaks a thread."""
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5.0)
+
+
 class BatchedRunner:
     """Drives the stop → acquire → start → extract cycles."""
 
@@ -277,8 +349,15 @@ class BatchedRunner:
         line_sink: Any | None = None,
         t0: Any = None,
         t1: Any = None,
+        prefetch_depth: int = 4,
     ) -> None:
         self.orchestrator = orchestrator
+        #: Double buffering (wave v1-w4): while one cycle's extraction phase
+        #: keeps the GPU busy, this many next-batch documents' bytes are read
+        #: off-thread, so the next server-stopped window spends its seconds on
+        #: conversion, not on disk I/O.
+        self.prefetch_depth = max(int(prefetch_depth), 0)
+        self._prefetch_buffer: PrefetchBuffer | None = None
         self.batch_pages = max(int(batch_pages), 1)
         self.device = device
         self.keep_server = bool(keep_server)
@@ -319,6 +398,12 @@ class BatchedRunner:
         if getter is not None:
             return getter()
         return None
+
+    def _store_for_prefetch(self) -> Any:
+        store = self.orchestrator.store
+        if store is None:
+            store = self.orchestrator._store()
+        return store
 
     def _tier_caches(self) -> list[Any]:
         """The tier caches in lookup order (T1 first, then T2).
@@ -550,6 +635,11 @@ class BatchedRunner:
         controller = self.controller
         assert controller is not None
         stage = self._acquisition_stage()
+        self._prefetch_buffer = (
+            PrefetchBuffer(store=self._store_for_prefetch(), depth=self.prefetch_depth, stop=stop)
+            if self.prefetch_depth > 0
+            else None
+        )
         cycle_index = 0
         try:
             remaining = list(work)
@@ -568,6 +658,9 @@ class BatchedRunner:
                     break
         finally:
             restore_signal()
+            if self._prefetch_buffer is not None:
+                self._prefetch_buffer.close()
+                self._prefetch_buffer = None
             if not self.keep_server:
                 try:
                     controller.stop()
@@ -595,6 +688,25 @@ class BatchedRunner:
                 acquire=self.orchestrator.registry.acquire
             )
         return self._sizing_policy_instance
+
+    def _submit_prefetch(self, remaining: list[WorkItem], buffer: PrefetchBuffer) -> None:
+        """Candidates for the next cycle's acquire phase, read off-thread.
+
+        Only *uncached* documents need bytes: a cached parse goes straight to
+        the extract phase without touching the store. Batch sizing follows the
+        same boundary rule the live cycle applies, so the prefetch covers what
+        the next window will plausibly convert (a bounded guess; a miss only
+        costs a live read later).
+        """
+        candidates = take_batch(
+            remaining, batch_pages=self.batch_pages, pages_for=self._pages_for
+        )
+        shas = [
+            item.snapshot.sha256
+            for item in candidates
+            if self._pages_for(item.snapshot.sha256) is None
+        ]
+        buffer.submit(shas[: self.prefetch_depth])
 
     def _run_cycle(
         self,
@@ -653,7 +765,16 @@ class BatchedRunner:
                     line_pages += int(known)
                     acquired.append(item)
                     continue
-                stage.run(summary=cycle, selected=[item.snapshot], dry_run=False)
+                buffer = self._prefetch_buffer
+                data_for = (
+                    (lambda sha, b=buffer: b.take(sha)) if buffer is not None else None
+                )
+                stage.run(
+                    summary=cycle,
+                    selected=[item.snapshot],
+                    dry_run=False,
+                    data_for=data_for,
+                )
                 pages_after = self._pages_for(item.snapshot.sha256)
                 remaining.pop(0)
                 if pages_after is None:
@@ -668,6 +789,14 @@ class BatchedRunner:
             #    already ended the run: never start a server nobody will use.
             if not stop.is_set():
                 controller.start()
+                # 3b) double buffering: the GPU window is now open (the server
+                #     owns the card and the poll loop leaves the CPU idle) —
+                #     read the *next* batch's bytes off-thread so the next
+                #     server-stopped window spends its time converting, not
+                #     on disk I/O. The worker touches the object store only.
+                buffer = self._prefetch_buffer
+                if buffer is not None:
+                    self._submit_prefetch(remaining, buffer)
                 controller.wait_ready(self.poll_timeout_s)
             # 4) extract exactly the documents that acquired a parse this cycle
             #    (allow_convert=True: a payload that failed verification falls
