@@ -27,6 +27,10 @@ models/
 data/*
 !data/golden/
 !data/golden/**
+# curated eval truth tables (docs/v1/eval/03-truth-ingestion.md): committed
+# rank/grade tables + the raw page copies their sha256 provenance points at
+!data/truth/
+!data/truth/**
 snapshots/
 *.parquet
 *.warc

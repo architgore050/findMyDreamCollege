@@ -1,0 +1,919 @@
+# NIRF ranking truth file — ingested by scripts/eval/fetch_nirf_truth.py.
+# Institution-level proxy ONLY: NIRF publishes no paramedical/MLT category,
+# so a rank may never be attributed to a programme (invariant 3/6).
+schema_version: 1
+truth_kind: nirf_ranking
+truth_version: 1
+category: overall
+year: 2025
+scope: institution
+as_of: "2025"
+source_url: https://www.nirfindia.org/Rankings/2025/OverallRanking.html
+fetched_at: "2026-11-22T18:40:14Z"
+source_sha256: 822756ebe21e51c54ab65b1c26ebafc481973c11546e8a806a119ae40be8675c
+raw_file: data/truth/nirf/raw/2025_OverallRanking.html
+ingest_tool: scripts/eval/fetch_nirf_truth.py
+notes: >-
+  Rows parsed from the embedded DataTable of the ranking page. The raw HTML
+  is committed beside this file; source_sha256 hashes those exact bytes.
+entries:
+  - institution_id: IR-O-U-0456
+    institution_key: indian institute of technology madras
+    name: Indian Institute of Technology Madras
+    city: Chennai
+    state: Tamil Nadu
+    rank: 1
+    score: 87.31
+    params: {tlr: 90.58, rpc: 88.02, go: 87.01, oi: 63.34, pr: 100.0}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0456.pdf
+  - institution_id: IR-O-U-0220
+    institution_key: indian institute of science
+    name: Indian Institute of Science
+    city: Bengaluru
+    state: Karnataka
+    rank: 2
+    score: 85.0
+    params: {tlr: 86.47, rpc: 88.16, go: 83.69, oi: 60.29, pr: 98.41}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0220.pdf
+  - institution_id: IR-O-U-0306
+    institution_key: indian institute of technology bombay
+    name: Indian Institute of Technology Bombay
+    city: Mumbai
+    state: Maharashtra
+    rank: 3
+    score: 81.62
+    params: {tlr: 83.79, rpc: 83.05, go: 86.04, oi: 60.13, pr: 83.35}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0306.pdf
+  - institution_id: IR-O-I-1074
+    institution_key: indian institute of technology delhi
+    name: Indian Institute of Technology Delhi
+    city: New Delhi
+    state: Delhi
+    rank: 4
+    score: 80.67
+    params: {tlr: 80.52, rpc: 86.67, go: 74.71, oi: 63.54, pr: 92.23}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-I-1074.pdf
+  - institution_id: IR-O-I-1075
+    institution_key: indian institute of technology kanpur
+    name: Indian Institute of Technology Kanpur
+    city: Kanpur
+    state: Uttar Pradesh
+    rank: 5
+    score: 77.25
+    params: {tlr: 86.36, rpc: 72.12, go: 82.01, oi: 60.38, pr: 72.56}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-I-1075.pdf
+  - institution_id: IR-O-U-0573
+    institution_key: indian institute of technology kharagpur
+    name: Indian Institute of Technology Kharagpur
+    city: Kharagpur
+    state: West Bengal
+    rank: 6
+    score: 73.99
+    params: {tlr: 77.73, rpc: 71.21, go: 81.52, oi: 60.63, pr: 69.51}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0573.pdf
+  - institution_id: IR-O-U-0560
+    institution_key: indian institute of technology roorkee
+    name: Indian Institute of Technology Roorkee
+    city: Roorkee
+    state: Uttarakhand
+    rank: 7
+    score: 71.73
+    params: {tlr: 73.06, rpc: 72.05, go: 82.9, oi: 64.95, pr: 51.24}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0560.pdf
+  - institution_id: IR-O-N-15
+    institution_key: all india institute of medical sciences delhi
+    name: All India Institute of Medical Sciences, Delhi
+    city: New Delhi
+    state: Delhi
+    rank: 8
+    score: 70.57
+    params: {tlr: 75.64, rpc: 65.06, go: 68.65, oi: 70.92, pr: 75.4}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-N-15.pdf
+  - institution_id: IR-O-U-0109
+    institution_key: jawaharlal nehru university
+    name: Jawaharlal Nehru University
+    city: New Delhi
+    state: Delhi
+    rank: 9
+    score: 69.62
+    params: {tlr: 75.53, rpc: 45.59, go: 99.93, oi: 78.82, pr: 54.13}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0109.pdf
+  - institution_id: IR-O-U-0500
+    institution_key: banaras hindu university
+    name: Banaras Hindu University
+    city: Varanasi
+    state: Uttar Pradesh
+    rank: 10
+    score: 68.71
+    params: {tlr: 76.41, rpc: 51.17, go: 95.42, oi: 65.95, pr: 47.63}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0500.pdf
+  - institution_id: IR-O-U-0053
+    institution_key: indian institute of technology guwahati
+    name: Indian Institute of Technology Guwahati
+    city: Guwahati
+    state: Assam
+    rank: 11
+    score: 67.67
+    params: {tlr: 68.27, rpc: 67.16, go: 82.12, oi: 62.73, pr: 43.52}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0053.pdf
+  - institution_id: IR-O-U-0013
+    institution_key: indian institute of technology hyderabad
+    name: Indian Institute of Technology Hyderabad
+    city: Hyderabad
+    state: Telangana
+    rank: 12
+    score: 67.04
+    params: {tlr: 79.81, rpc: 56.77, go: 73.89, oi: 58.56, pr: 54.35}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0013.pdf
+  - institution_id: IR-O-U-0108
+    institution_key: jamia millia islamia
+    name: Jamia Millia Islamia
+    city: New Delhi
+    state: Delhi
+    rank: 13
+    score: 66.99
+    params: {tlr: 73.81, rpc: 50.03, go: 92.56, oi: 83.83, pr: 29.47}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0108.pdf
+  - institution_id: IR-O-U-0234
+    institution_key: manipal academy of higher education manipal
+    name: Manipal Academy of Higher Education-Manipal
+    city: Manipal
+    state: Karnataka
+    rank: 14
+    score: 66.86
+    params: {tlr: 79.44, rpc: 61.76, go: 78.52, oi: 67.71, pr: 20.28}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0234.pdf
+  - institution_id: IR-O-U-0120
+    institution_key: university of delhi
+    name: University of Delhi
+    city: Delhi
+    state: Delhi
+    rank: 15
+    score: 66.19
+    params: {tlr: 60.65, rpc: 58.51, go: 96.94, oi: 70.15, pr: 40.55}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0120.pdf
+  - institution_id: IR-O-U-0391
+    institution_key: birla institute of technology and science pilani
+    name: Birla Institute of Technology & Science -Pilani
+    city: Pilani
+    state: Rajasthan
+    rank: 16
+    score: 65.06
+    params: {tlr: 72.16, rpc: 63.27, go: 77.74, oi: 61.42, pr: 27.41}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0391.pdf
+  - institution_id: IR-O-U-0436
+    institution_key: amrita vishwa vidyapeetham
+    name: Amrita Vishwa Vidyapeetham
+    city: Coimbatore
+    state: Tamil Nadu
+    rank: 17
+    score: 64.97
+    params: {tlr: 76.85, rpc: 51.06, go: 81.91, oi: 71.42, pr: 30.67}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0436.pdf
+  - institution_id: IR-O-U-0575
+    institution_key: jadavpur university
+    name: Jadavpur University
+    city: Kolkata
+    state: West Bengal
+    rank: 18
+    score: 64.34
+    params: {tlr: 71.61, rpc: 52.19, go: 87.82, oi: 52.34, pr: 44.1}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0575.pdf
+  - institution_id: IR-O-U-0496
+    institution_key: aligarh muslim university
+    name: Aligarh Muslim University
+    city: Aligarh
+    state: Uttar Pradesh
+    rank: 19
+    score: 63.76
+    params: {tlr: 71.5, rpc: 48.04, go: 93.79, oi: 64.58, pr: 26.77}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0496.pdf
+  - institution_id: IR-O-U-0304
+    institution_key: homi bhabha national institute
+    name: Homi Bhabha National Institute
+    city: Mumbai
+    state: Maharashtra
+    rank: 20
+    score: 63.03
+    params: {tlr: 76.94, rpc: 54.16, go: 84.47, oi: 56.4, pr: 11.67}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0304.pdf
+  - institution_id: IR-O-U-0490
+    institution_key: vellore institute of technology
+    name: Vellore Institute of Technology
+    city: Vellore
+    state: Tamil Nadu
+    rank: 21
+    score: 62.88
+    params: {tlr: 60.55, rpc: 59.53, go: 83.42, oi: 60.61, pr: 41.16}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0490.pdf
+  - institution_id: IR-O-U-0473
+    institution_key: s r m institute of science and technology
+    name: S.R.M. Institute of Science and Technology
+    city: Chennai
+    state: Tamil Nadu
+    rank: 22
+    score: 62.87
+    params: {tlr: 70.31, rpc: 54.56, go: 82.47, oi: 68.94, pr: 20.28}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0473.pdf
+  - institution_id: IR-O-I-1441
+    institution_key: saveetha institute of medical and technical sciences
+    name: Saveetha Institute of Medical and Technical Sciences
+    city: Chennai
+    state: Tamil Nadu
+    rank: 23
+    score: 62.23
+    params: {tlr: 76.12, rpc: 56.28, go: 73.63, oi: 71.44, pr: 6.42}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-I-1441.pdf
+  - institution_id: IR-O-U-0101
+    institution_key: indian agricultural research institute
+    name: Indian Agricultural Research Institute
+    city: New Delhi
+    state: Delhi
+    rank: 24
+    score: 61.59
+    params: {tlr: 74.07, rpc: 46.15, go: 80.08, oi: 78.51, pr: 16.61}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0101.pdf
+  - institution_id: IR-O-U-0363
+    institution_key: siksha o anusandhan
+    name: Siksha `O` Anusandhan
+    city: Bhubaneswar
+    state: Odisha
+    rank: 25
+    score: 61.01
+    params: {tlr: 75.45, rpc: 42.48, go: 77.23, oi: 73.03, pr: 28.87}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0363.pdf
+  - institution_id: IR-O-U-0042
+    institution_key: university of hyderabad
+    name: University of Hyderabad
+    city: Hyderabad
+    state: Telangana
+    rank: 26
+    score: 60.32
+    params: {tlr: 73.24, rpc: 44.59, go: 78.52, oi: 63.01, pr: 29.68}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0042.pdf
+  - institution_id: IR-O-U-0273
+    institution_key: indian institute of technology indore
+    name: Indian Institute of Technology Indore
+    city: Indore
+    state: Madhya Pradesh
+    rank: 27
+    score: 60.13
+    params: {tlr: 70.95, rpc: 55.01, go: 70.76, oi: 64.23, pr: 17.69}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0273.pdf
+  - institution_id: IR-O-U-0356
+    institution_key: kalinga institute of industrial technology
+    name: Kalinga Institute of Industrial Technology
+    city: Bhubaneswar
+    state: Odisha
+    rank: 27
+    score: 60.13
+    params: {tlr: 74.01, rpc: 43.99, go: 80.53, oi: 77.74, pr: 8.46}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0356.pdf
+  - institution_id: IR-O-U-0439
+    institution_key: anna university
+    name: Anna University
+    city: Chennai
+    state: Tamil Nadu
+    rank: 29
+    score: 60.06
+    params: {tlr: 62.63, rpc: 54.88, go: 67.82, oi: 51.3, pr: 61.18}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0439.pdf
+  - institution_id: IR-O-U-0467
+    institution_key: national institute of technology tiruchirappalli
+    name: National Institute of Technology Tiruchirappalli
+    city: Tiruchirappalli
+    state: Tamil Nadu
+    rank: 30
+    score: 60.05
+    params: {tlr: 59.31, rpc: 50.4, go: 74.23, oi: 66.37, pr: 56.51}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0467.pdf
+  - institution_id: IR-O-U-0701
+    institution_key: indian institute of technology banaras hindu university varanasi
+    name: Indian Institute of Technology (Banaras Hindu University) Varanasi
+    city: Varanasi
+    state: Uttar Pradesh
+    rank: 31
+    score: 60.03
+    params: {tlr: 57.05, rpc: 57.79, go: 77.97, oi: 60.88, pr: 38.97}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0701.pdf
+  - institution_id: IR-O-U-0747
+    institution_key: chandigarh university
+    name: Chandigarh University
+    city: Mohali
+    state: Punjab
+    rank: 32
+    score: 59.55
+    params: {tlr: 65.11, rpc: 49.13, go: 78.05, oi: 74.25, pr: 22.48}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0747.pdf
+  - institution_id: IR-O-U-0079
+    institution_key: post graduate institute of medical education and research
+    name: Post Graduate Institute of Medical Education and Research
+    city: Chandigarh
+    state: Chandigarh
+    rank: 33
+    score: 59.15
+    params: {tlr: 73.74, rpc: 54.65, go: 55.7, oi: 68.41, pr: 26.56}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0079.pdf
+  - institution_id: IR-O-U-0357
+    institution_key: national institute of technology rourkela
+    name: National Institute of Technology Rourkela
+    city: Rourkela
+    state: Odisha
+    rank: 34
+    score: 58.55
+    params: {tlr: 64.87, rpc: 53.58, go: 76.96, oi: 60.45, pr: 15.78}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0357.pdf
+  - institution_id: IR-O-U-0205
+    institution_key: indian institute of technology indian school of mines
+    name: Indian Institute of Technology (Indian School of Mines)
+    city: Dhanbad
+    state: Jharkhand
+    rank: 35
+    score: 58.33
+    params: {tlr: 62.12, rpc: 55.35, go: 73.56, oi: 60.64, pr: 23.19}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0205.pdf
+  - institution_id: IR-O-U-0064
+    institution_key: indian institute of technology patna
+    name: Indian Institute of Technology Patna
+    city: Patna
+    state: Bihar
+    rank: 36
+    score: 57.63
+    params: {tlr: 69.77, rpc: 47.23, go: 72.43, oi: 64.12, pr: 16.34}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0064.pdf
+  - institution_id: IR-O-U-0497
+    institution_key: amity university
+    name: Amity University
+    city: Gautam Budh Nagar
+    state: Uttar Pradesh
+    rank: 37
+    score: 57.49
+    params: {tlr: 62.88, rpc: 55.83, go: 74.32, oi: 63.12, pr: 7.11}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0497.pdf
+  - institution_id: IR-O-U-0222
+    institution_key: jss academy of higher education and research
+    name: JSS Academy of Higher Education and Research
+    city: Mysuru
+    state: Karnataka
+    rank: 38
+    score: 57.43
+    params: {tlr: 76.72, rpc: 35.68, go: 71.51, oi: 79.49, pr: 14.64}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0222.pdf
+  - institution_id: IR-O-U-0139
+    institution_key: indian institute of technology gandhinagar
+    name: Indian Institute of Technology Gandhinagar
+    city: Gandhinagar
+    state: Gujarat
+    rank: 39
+    score: 57.01
+    params: {tlr: 73.24, rpc: 41.27, go: 69.35, oi: 67.92, pr: 20.03}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0139.pdf
+  - institution_id: IR-O-U-0329
+    institution_key: symbiosis international
+    name: Symbiosis International
+    city: Pune
+    state: Maharashtra
+    rank: 40
+    score: 56.86
+    params: {tlr: 73.49, rpc: 38.34, go: 72.97, oi: 64.0, pr: 23.19}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0329.pdf
+  - institution_id: IR-O-U-0006
+    institution_key: andhra university visakhapatnam
+    name: Andhra University, Visakhapatnam
+    city: Visakhapatnam
+    state: Andhra Pradesh
+    rank: 41
+    score: 56.62
+    params: {tlr: 75.27, rpc: 26.41, go: 86.6, oi: 73.86, pr: 14.07}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0006.pdf
+  - institution_id: IR-O-U-0260
+    institution_key: kerala university
+    name: Kerala University
+    city: Thiruvananthapuram
+    state: Kerala
+    rank: 42
+    score: 56.26
+    params: {tlr: 71.19, rpc: 29.64, go: 94.62, oi: 64.07, pr: 6.76}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0260.pdf
+  - institution_id: IR-O-U-0368
+    institution_key: jawaharlal institute of post graduate medical education and research
+    name: Jawaharlal Institute of Post Graduate Medical Education & Research
+    city: Puducherry
+    state: Pondicherry
+    rank: 43
+    score: 56.23
+    params: {tlr: 75.73, rpc: 33.76, go: 70.9, oi: 70.67, pr: 21.27}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0368.pdf
+  - institution_id: IR-O-I-1480
+    institution_key: thapar institute of engineering and technology deemed to be university
+    name: Thapar Institute of Engineering and Technology (Deemed-to-be-university)
+    city: Patiala
+    state: Punjab
+    rank: 44
+    score: 56.21
+    params: {tlr: 68.42, rpc: 45.12, go: 72.16, oi: 65.69, pr: 11.36}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-I-1480.pdf
+  - institution_id: IR-O-U-0263
+    institution_key: national institute of technology calicut
+    name: National Institute of Technology Calicut
+    city: Kozhikode
+    state: Kerala
+    rank: 45
+    score: 56.16
+    params: {tlr: 72.96, rpc: 36.05, go: 72.32, oi: 67.54, pr: 22.48}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0263.pdf
+  - institution_id: IR-O-U-0020
+    institution_key: koneru lakshmaiah education foundation university k l college of engineering
+    name: Koneru Lakshmaiah Education Foundation University (K L College of Engineering)
+    city: Vaddeswaram
+    state: Andhra Pradesh
+    rank: 46
+    score: 55.99
+    params: {tlr: 69.03, rpc: 45.33, go: 73.12, oi: 66.74, pr: 3.89}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0020.pdf
+  - institution_id: IR-O-U-0570
+    institution_key: calcutta university
+    name: Calcutta University
+    city: Kolkata
+    state: West Bengal
+    rank: 47
+    score: 55.91
+    params: {tlr: 64.81, rpc: 37.24, go: 88.18, oi: 51.81, pr: 24.79}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0570.pdf
+  - institution_id: IR-O-U-0458
+    institution_key: kalasalingam academy of research and education
+    name: Kalasalingam Academy of Research and Education
+    city: Krishnan Koil
+    state: Tamil Nadu
+    rank: 48
+    score: 55.68
+    params: {tlr: 70.43, rpc: 36.39, go: 74.68, oi: 76.54, pr: 10.42}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0458.pdf
+  - institution_id: IR-O-U-0379
+    institution_key: lovely professional university
+    name: Lovely Professional University
+    city: Phagwara
+    state: Punjab
+    rank: 49
+    score: 55.49
+    params: {tlr: 58.1, rpc: 49.4, go: 69.31, oi: 69.89, pr: 23.88}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0379.pdf
+  - institution_id: IR-O-U-0253
+    institution_key: cochin university of science and technology
+    name: Cochin University of Science and Technology
+    city: Cochin
+    state: Kerala
+    rank: 50
+    score: 55.38
+    params: {tlr: 72.74, rpc: 39.25, go: 75.69, oi: 58.95, pr: 7.45}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0253.pdf
+  - institution_id: IR-O-U-0476
+    institution_key: shanmugha arts science technology and research academy
+    name: Shanmugha Arts Science Technology & Research Academy
+    city: Thanjavur
+    state: Tamil Nadu
+    rank: 51
+    score: 55.32
+    params: {tlr: 71.76, rpc: 36.5, go: 74.04, oi: 71.78, pr: 8.46}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0476.pdf
+  - institution_id: IR-O-U-0052
+    institution_key: gauhati university
+    name: Gauhati University
+    city: Guwahati
+    state: Assam
+    rank: 52
+    score: 55.27
+    params: {tlr: 73.43, rpc: 26.49, go: 89.46, oi: 64.21, pr: 9.78}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0052.pdf
+  - institution_id: IR-O-U-0027
+    institution_key: osmania university
+    name: Osmania University
+    city: Hyderabad
+    state: Telangana
+    rank: 53
+    score: 55.24
+    params: {tlr: 75.88, rpc: 27.86, go: 86.93, oi: 57.17, pr: 10.1}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0027.pdf
+  - institution_id: IR-O-U-0237
+    institution_key: national institute of technology karnataka surathkal
+    name: National Institute of Technology Karnataka, Surathkal
+    city: Surathkal
+    state: Karnataka
+    rank: 54
+    score: 55.21
+    params: {tlr: 59.76, rpc: 44.19, go: 73.98, oi: 62.67, pr: 29.47}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0237.pdf
+  - institution_id: IR-O-U-0305
+    institution_key: indian institute of science education and research pune
+    name: Indian Institute of Science Education & Research Pune
+    city: Pune
+    state: Maharashtra
+    rank: 55
+    score: 54.9
+    params: {tlr: 69.0, rpc: 44.43, go: 60.39, oi: 64.23, pr: 23.65}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0305.pdf
+  - institution_id: IR-O-U-0378
+    institution_key: indian institute of technology ropar
+    name: Indian Institute of Technology Ropar
+    city: Rupnagar
+    state: Punjab
+    rank: 56
+    score: 54.76
+    params: {tlr: 65.95, rpc: 42.3, go: 70.37, oi: 63.66, pr: 18.48}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0378.pdf
+  - institution_id: IR-O-U-0078
+    institution_key: panjab university
+    name: Panjab University
+    city: Chandigarh
+    state: Chandigarh
+    rank: 57
+    score: 54.65
+    params: {tlr: 56.77, rpc: 41.58, go: 80.37, oi: 65.25, pr: 25.46}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0078.pdf
+  - institution_id: IR-O-U-0184
+    institution_key: indian institute of technology mandi
+    name: Indian Institute of Technology Mandi
+    city: Mandi
+    state: Himachal Pradesh
+    rank: 58
+    score: 54.52
+    params: {tlr: 69.11, rpc: 41.59, go: 65.15, oi: 69.0, pr: 13.78}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0184.pdf
+  - institution_id: IR-O-U-0196
+    institution_key: university of kashmir
+    name: University of Kashmir
+    city: Srinagar
+    state: Jammu and Kashmir
+    rank: 59
+    score: 54.31
+    params: {tlr: 74.05, rpc: 34.74, go: 79.88, oi: 50.9, pr: 6.07}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0196.pdf
+  - institution_id: IR-O-U-0236
+    institution_key: national institute of mental health and neuro sciences bangalore
+    name: National Institute of Mental Health & Neuro Sciences, Bangalore
+    city: Bengaluru
+    state: Karnataka
+    rank: 60
+    score: 54.28
+    params: {tlr: 72.77, rpc: 40.41, go: 66.64, oi: 56.46, pr: 13.48}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0236.pdf
+  - institution_id: IR-O-U-0448
+    institution_key: bharathidasan university
+    name: Bharathidasan University
+    city: Tiruchirappalli
+    state: Tamil Nadu
+    rank: 61
+    score: 53.82
+    params: {tlr: 61.36, rpc: 40.81, go: 83.97, oi: 51.54, pr: 12.28}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0448.pdf
+  - institution_id: IR-O-U-0098
+    institution_key: delhi technological university
+    name: Delhi Technological University
+    city: New Delhi
+    state: Delhi
+    rank: 62
+    score: 53.74
+    params: {tlr: 64.13, rpc: 41.43, go: 71.27, oi: 56.21, pr: 22.0}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0098.pdf
+  - institution_id: IR-O-U-0025
+    institution_key: national institute of technology warangal
+    name: National Institute of Technology Warangal
+    city: Warangal
+    state: Telangana
+    rank: 63
+    score: 53.23
+    params: {tlr: 58.72, rpc: 43.85, go: 72.82, oi: 55.83, pr: 23.19}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0025.pdf
+  - institution_id: IR-O-U-0564
+    institution_key: upes
+    name: UPES
+    city: Dehradun
+    state: Uttarakhand
+    rank: 64
+    score: 53.22
+    params: {tlr: 62.97, rpc: 45.6, go: 60.78, oi: 65.41, pr: 19.52}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0564.pdf
+  - institution_id: IR-O-U-0308
+    institution_key: institute of chemical technology
+    name: Institute of Chemical Technology
+    city: Mumbai
+    state: Maharashtra
+    rank: 64
+    score: 53.22
+    params: {tlr: 59.08, rpc: 47.2, go: 71.48, oi: 54.16, pr: 16.06}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0308.pdf
+  - institution_id: IR-O-U-0395
+    institution_key: indian institute of technology jodhpur
+    name: Indian Institute of Technology Jodhpur
+    city: Jodhpur
+    state: Rajasthan
+    rank: 66
+    score: 53.17
+    params: {tlr: 70.37, rpc: 39.2, go: 63.41, oi: 67.38, pr: 8.8}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0395.pdf
+  - institution_id: IR-O-U-0572
+    institution_key: indian institute of science education and research kolkata
+    name: Indian Institute of Science Education & Research Kolkata
+    city: Mohanpur
+    state: West Bengal
+    rank: 67
+    score: 53.04
+    params: {tlr: 67.56, rpc: 40.58, go: 68.46, oi: 52.39, pr: 16.61}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0572.pdf
+  - institution_id: IR-O-I-1357
+    institution_key: university of madras
+    name: University of Madras
+    city: Chennai
+    state: Tamil Nadu
+    rank: 68
+    score: 52.89
+    params: {tlr: 69.12, rpc: 35.08, go: 70.84, oi: 52.79, pr: 21.76}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-I-1357.pdf
+  - institution_id: IR-O-U-0498
+    institution_key: babasheb bhimrao ambedkar university
+    name: Babasheb Bhimrao Ambedkar University
+    city: Lucknow
+    state: Uttar Pradesh
+    rank: 69
+    score: 52.71
+    params: {tlr: 69.26, rpc: 23.93, go: 80.92, oi: 80.25, pr: 5.35}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0498.pdf
+  - institution_id: IR-O-U-0377
+    institution_key: indian institute of science education and research mohali
+    name: Indian Institute of Science Education & Research, Mohali
+    city: Mohali
+    state: Punjab
+    rank: 70
+    score: 52.68
+    params: {tlr: 62.9, rpc: 34.68, go: 72.82, oi: 71.14, pr: 17.42}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0377.pdf
+  - institution_id: IR-O-I-1110
+    institution_key: dr d y patil vidyapeeth
+    name: Dr. D. Y. Patil Vidyapeeth
+    city: Pune
+    state: Maharashtra
+    rank: 71
+    score: 52.67
+    params: {tlr: 74.43, rpc: 27.91, go: 65.77, oi: 62.66, pr: 25.46}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-I-1110.pdf
+  - institution_id: IR-O-U-0555
+    institution_key: graphic era university
+    name: Graphic Era University
+    city: Dehradun
+    state: Uttarakhand
+    rank: 72
+    score: 52.44
+    params: {tlr: 60.52, rpc: 41.01, go: 62.97, oi: 63.43, pr: 30.47}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0555.pdf
+  - institution_id: IR-O-U-0435
+    institution_key: alagappa university
+    name: Alagappa University
+    city: Karaikudi
+    state: Tamil Nadu
+    rank: 73
+    score: 52.27
+    params: {tlr: 64.62, rpc: 33.07, go: 73.27, oi: 55.96, pr: 27.2}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0435.pdf
+  - institution_id: IR-O-U-0107
+    institution_key: jamia hamdard
+    name: Jamia Hamdard
+    city: New Delhi
+    state: Delhi
+    rank: 74
+    score: 52.2
+    params: {tlr: 64.66, rpc: 34.02, go: 71.31, oi: 66.74, pr: 16.61}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0107.pdf
+  - institution_id: IR-O-U-0272
+    institution_key: indian institute of science education and research bhopal
+    name: Indian Institute of Science Education & Research Bhopal
+    city: Bhopal
+    state: Madhya Pradesh
+    rank: 75
+    score: 51.99
+    params: {tlr: 68.49, rpc: 33.71, go: 70.1, oi: 67.04, pr: 6.07}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0272.pdf
+  - institution_id: IR-O-U-0447
+    institution_key: bharathiar university
+    name: Bharathiar University
+    city: Coimbatore
+    state: Tamil Nadu
+    rank: 76
+    score: 51.96
+    params: {tlr: 57.6, rpc: 40.69, go: 76.94, oi: 52.76, pr: 17.96}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0447.pdf
+  - institution_id: IR-O-U-0410
+    institution_key: malaviya national institute of technology
+    name: Malaviya National Institute of Technology
+    city: Jaipur
+    state: Rajasthan
+    rank: 77
+    score: 51.88
+    params: {tlr: 58.82, rpc: 45.57, go: 69.93, oi: 60.75, pr: 4.99}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0410.pdf
+  - institution_id: IR-O-U-0691
+    institution_key: all india institute of medical sciences rishikesh
+    name: All India Institute of Medical Sciences Rishikesh
+    city: Rishikesh
+    state: Uttarakhand
+    rank: 78
+    score: 51.77
+    params: {tlr: 71.66, rpc: 34.73, go: 55.04, oi: 73.95, pr: 14.36}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0691.pdf
+  - institution_id: IR-O-U-0262
+    institution_key: mahatma gandhi university kottayam
+    name: Mahatma Gandhi University, Kottayam
+    city: Kottayam
+    state: Kerala
+    rank: 79
+    score: 51.73
+    params: {tlr: 71.2, rpc: 34.03, go: 71.68, oi: 54.33, pr: 3.89}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0262.pdf
+  - institution_id: IR-O-U-0355
+    institution_key: indian institute of technology bhubaneswar
+    name: Indian Institute of Technology Bhubaneswar
+    city: Bhubaneswar
+    state: Odisha
+    rank: 80
+    score: 51.16
+    params: {tlr: 59.3, rpc: 38.39, go: 68.29, oi: 61.88, pr: 20.03}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0355.pdf
+  - institution_id: IR-O-U-0381
+    institution_key: punjab agricultural university
+    name: Punjab Agricultural University
+    city: Ludhiana
+    state: Punjab
+    rank: 81
+    score: 51.03
+    params: {tlr: 72.79, rpc: 37.6, go: 60.95, oi: 50.75, pr: 6.42}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0381.pdf
+  - institution_id: IR-O-C-16604
+    institution_key: sri sivasubramaniya nadar college of engineering
+    name: Sri Sivasubramaniya Nadar College of Engineering
+    city: Kalavakkam
+    state: Tamil Nadu
+    rank: 82
+    score: 51.01
+    params: {tlr: 61.82, rpc: 40.52, go: 66.99, oi: 58.09, pr: 11.05}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-C-16604.pdf
+  - institution_id: IR-O-U-0523
+    institution_key: king george s medical university
+    name: King George`s Medical University
+    city: Lucknow
+    state: Uttar Pradesh
+    rank: 83
+    score: 50.94
+    params: {tlr: 75.27, rpc: 30.37, go: 62.46, oi: 60.52, pr: 7.11}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0523.pdf
+  - institution_id: IR-O-U-0295
+    institution_key: datta meghe institute of higher education and research
+    name: Datta Meghe Institute of Higher Education and Research
+    city: Wardha
+    state: Maharashtra
+    rank: 84
+    score: 50.92
+    params: {tlr: 68.47, rpc: 38.55, go: 61.69, oi: 64.26, pr: 0.41}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0295.pdf
+  - institution_id: IR-O-U-0642
+    institution_key: shiv nadar university
+    name: Shiv Nadar University
+    city: Gautam Buddha Nagar
+    state: Uttar Pradesh
+    rank: 85
+    score: 50.8
+    params: {tlr: 72.19, rpc: 26.47, go: 65.82, oi: 66.64, pr: 13.78}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0642.pdf
+  - institution_id: IR-O-U-0334
+    institution_key: visvesvaraya national institute of technology nagpur
+    name: Visvesvaraya National Institute of Technology, Nagpur
+    city: Nagpur
+    state: Maharashtra
+    rank: 86
+    score: 50.14
+    params: {tlr: 59.65, rpc: 37.73, go: 69.12, oi: 58.36, pr: 12.59}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0334.pdf
+  - institution_id: IR-O-U-0195
+    institution_key: university of jammu
+    name: University of Jammu
+    city: Jammu
+    state: Jammu and Kashmir
+    rank: 87
+    score: 50.11
+    params: {tlr: 71.09, rpc: 24.66, go: 78.84, oi: 52.57, pr: 3.52}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0195.pdf
+  - institution_id: IR-O-U-0485
+    institution_key: tamil nadu agricultural university
+    name: Tamil Nadu Agricultural University
+    city: Coimbatore
+    state: Tamil Nadu
+    rank: 88
+    score: 50.03
+    params: {tlr: 73.14, rpc: 19.42, go: 78.02, oi: 59.08, pr: 7.45}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0485.pdf
+  - institution_id: IR-O-U-0014
+    institution_key: international institute of information technology hyderabad
+    name: International Institute of Information Technology Hyderabad
+    city: Hyderabad
+    state: Telangana
+    rank: 89
+    score: 49.91
+    params: {tlr: 68.83, rpc: 34.96, go: 52.52, oi: 63.68, pr: 19.0}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0014.pdf
+  - institution_id: IR-O-U-0446
+    institution_key: bharath institute of higher education and research
+    name: Bharath Institute of Higher Education & Research
+    city: Chennai
+    state: Tamil Nadu
+    rank: 90
+    score: 49.85
+    params: {tlr: 71.35, rpc: 21.13, go: 70.62, oi: 71.43, pr: 8.46}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0446.pdf
+  - institution_id: IR-O-U-0323
+    institution_key: savitribai phule pune university
+    name: Savitribai Phule Pune University
+    city: Pune
+    state: Maharashtra
+    rank: 91
+    score: 49.83
+    params: {tlr: 51.46, rpc: 39.42, go: 79.4, oi: 50.16, pr: 16.61}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0323.pdf
+  - institution_id: IR-O-U-0318
+    institution_key: mumbai university
+    name: Mumbai University
+    city: Mumbai
+    state: Maharashtra
+    rank: 92
+    score: 49.8
+    params: {tlr: 64.43, rpc: 19.54, go: 88.25, oi: 58.88, pr: 10.73}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0318.pdf
+  - institution_id: IR-O-U-0474
+    institution_key: sathyabama institute of science and technology
+    name: Sathyabama Institute of Science and Technology
+    city: Chennai
+    state: Tamil Nadu
+    rank: 93
+    score: 49.79
+    params: {tlr: 61.34, rpc: 31.31, go: 68.96, oi: 72.96, pr: 9.13}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0474.pdf
+  - institution_id: IR-O-U-0200
+    institution_key: sher e kashmir university of agricultural science and technology of kashmir
+    name: Sher-e-Kashmir University of Agricultural Science and Technology of Kashmir
+    city: Srinagar
+    state: Jammu and Kashmir
+    rank: 94
+    score: 49.75
+    params: {tlr: 71.11, rpc: 26.15, go: 73.3, oi: 57.54, pr: 1.6}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0200.pdf
+  - institution_id: IR-O-N-10
+    institution_key: svkm s narsee monjee institute of management studies
+    name: SVKM`s Narsee Monjee Institute of Management Studies
+    city: Mumbai
+    state: Maharashtra
+    rank: 95
+    score: 49.66
+    params: {tlr: 72.53, rpc: 26.72, go: 65.25, oi: 64.41, pr: 3.89}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-N-10.pdf
+  - institution_id: IR-O-U-0217
+    institution_key: christ university
+    name: Christ University
+    city: Bengaluru
+    state: Karnataka
+    rank: 96
+    score: 49.65
+    params: {tlr: 56.19, rpc: 28.34, go: 65.44, oi: 74.23, pr: 37.84}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0217.pdf
+  - institution_id: IR-O-U-0055
+    institution_key: national institute of technology silchar
+    name: National Institute of Technology Silchar
+    city: Silchar
+    state: Assam
+    rank: 97
+    score: 49.51
+    params: {tlr: 53.21, rpc: 45.07, go: 70.76, oi: 54.17, pr: 4.63}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0055.pdf
+  - institution_id: IR-O-U-0749
+    institution_key: manipal university jaipur
+    name: Manipal University Jaipur
+    city: Jaipur
+    state: Rajasthan
+    rank: 98
+    score: 49.38
+    params: {tlr: 63.48, rpc: 33.8, go: 64.04, oi: 66.76, pr: 7.11}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0749.pdf
+  - institution_id: IR-O-U-0739
+    institution_key: madan mohan malaviya university of technology
+    name: Madan Mohan Malaviya University of Technology
+    city: Gorakhpur
+    state: Uttar Pradesh
+    rank: 99
+    score: 49.11
+    params: {tlr: 67.91, rpc: 18.82, go: 70.37, oi: 71.73, pr: 18.48}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0739.pdf
+  - institution_id: IR-O-U-0688
+    institution_key: all india institute of medical sciences bhubaneswar
+    name: All India Institute of Medical Sciences Bhubaneswar
+    city: Khordha
+    state: Odisha
+    rank: 100
+    score: 49.04
+    params: {tlr: 69.14, rpc: 25.45, go: 58.25, oi: 69.89, pr: 20.28}
+    source_pdf: https://www.nirfindia.org/nirfpdfcdn/2025/pdf/Overall/IR-O-U-0688.pdf
