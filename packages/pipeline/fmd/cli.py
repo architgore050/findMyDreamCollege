@@ -208,6 +208,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json-out", type=Path, default=None, help="write the full report JSON here"
     )
 
+    coverage_parser = subparsers.add_parser(
+        "coverage-report",
+        help=(
+            "read-only: per-programme scoring coverage — which of the 7 components "
+            "are populated and which claims feed them (wave v1-w7)"
+        ),
+    )
+    coverage_parser.add_argument(
+        "--limit", type=int, default=500, help="maximum in-scope programmes to diagnose"
+    )
+    coverage_parser.add_argument(
+        "--json-out", type=Path, default=None, help="write the full report JSON here"
+    )
+
     verify_parser = subparsers.add_parser(
         "verify",
         help="second pass: judge unverified claims against their source window",
@@ -942,6 +956,78 @@ def _cmd_plan_admit_evidence(args: argparse.Namespace) -> int:
             indent=2,
         )
     )
+    return 0
+
+
+def _cmd_coverage_report(args: argparse.Namespace, database: Any = None) -> int:
+    """Wave v1-w7: why is a programme 1/7? Read-only scoring diagnostics.
+
+    Runs the exact scoring computation per in-scope programme (same
+    evaluate_all → score_programme path the score command uses), reports which
+    sub-scores are populated vs unknown and which claims feed them — and
+    persists nothing. No weight changes, no model calls.
+    """
+    from fmd.db.repositories import ClaimsRepo, ProgrammeFilter, ProgrammesRepo
+    from fmd.filters import evaluate_all
+    from fmd.score import score_programme
+    from fmd.score.config import ScoringConfig
+    from fmd.score.coverage import build_coverage_report, programme_coverage, render_coverage
+
+    registry = load_registry(args.config_dir)
+    profile = _load_profile(getattr(args, "profile", None))
+    config = ScoringConfig.from_config(registry.weights, registry.predicates)
+    problems = config.validate()
+    if problems:
+        print(
+            "fmd coverage-report: invalid scoring config: " + "; ".join(problems), file=sys.stderr
+        )
+        return 1
+    # ``database`` is a testability seam: the CLI opens its own connection,
+    # tests pass the fixture's schema-scoped one. Closed only when opened here.
+    owned = database is None
+    database = database or _database(args)
+    try:
+        programmes = ProgrammesRepo(database)
+        claims = ClaimsRepo(database)
+        rows = programmes.list(ProgrammeFilter(limit=max(1, args.limit), offset=0))
+        scoped = [row for row in rows if getattr(row, "in_scope", True)]
+        report_rows: list[dict[str, Any]] = []
+        skipped_errors = 0
+        for programme in scoped:
+            try:
+                entity_claims = claims.list_for_entity(programme.institution_id)
+                view = programme.model_dump(mode="json")
+                view["claims"] = entity_claims
+                summary = evaluate_all(view, profile)
+                result = score_programme(
+                    programme.id,
+                    view,
+                    profile,
+                    entity_claims,
+                    config=config,
+                    cost_rules=registry.cost_rules,
+                    filter_decisions=list(summary.decisions.values()),
+                )
+                report_rows.append(
+                    programme_coverage(
+                        programme.id,
+                        programme.institution_id,
+                        str(getattr(programme, "name", "") or ""),
+                        result.sub_scores,
+                    )
+                )
+            except Exception:  # one bad programme must not abort the report
+                skipped_errors += 1
+                continue
+    finally:
+        if owned:
+            database.close()
+    report = build_coverage_report(report_rows)
+    report["skipped_errors"] = skipped_errors
+    print(render_coverage(report))
+    if args.json_out:
+        args.json_out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"report written: {args.json_out}")
     return 0
 
 
@@ -1923,6 +2009,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_plan(args)
         if args.command == "classify-report":
             return _cmd_classify_report(args)
+        if args.command == "coverage-report":
+            return _cmd_coverage_report(args)
         if args.command == "verify":
             return _cmd_verify(args)
         if args.command == "worker":

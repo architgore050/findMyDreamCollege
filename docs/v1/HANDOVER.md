@@ -23,6 +23,22 @@ invariant findings live here so the next agent does not re-derive them.
   `export PATH=~/.local/bin:$PATH` (corepack shim). Postgres data:
   `/home/z/my-project/.tools/pgdata`.
 
+## Wave 7 — scoring coverage diagnostics (2026-11-22)
+
+- `coverage-report` CLI (read-only): per in-scope programme, which of the 7
+  sub-scores carry a point estimate vs unknown (scorer's own stable reasons),
+  and the claim ids that fed every component — the same ids the provenance
+  API serves, so the operator can click from "1/7" to the evidence. The
+  histogram and per-sub-score missing ranking show where acquisition effort
+  moves coverage most. No weight changes (verifier: 372 insertions, 0
+  deletions of existing lines); the scoring path is byte-identical to the
+  score command's (evaluate_all → score_programme, same filters).
+- Sub-score ids are mirrored from the scorer's IMPLEMENTATIONS map with a
+  drift-guard test (the scorer itself defines them in code; the mirror exists
+  so the report's "n/7" stays honest).
+- Verifier verdict: **approve** (5 minor notes; the drift-guard and
+  absent-branch tests were added pre-merge).
+
 ## Wave 5 — classification throughput (2026-11-22)
 
 - **Interpretation of the brief:** the deterministic chain (registry > text >
