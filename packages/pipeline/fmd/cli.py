@@ -892,7 +892,7 @@ def _cmd_plan_admit_evidence(args: argparse.Namespace) -> int:
     ]
     database = _database(args)
     try:
-        stage = build_planning_pass(registry, database)
+        stage, _ledger = build_planning_pass(registry, database)
         documents = stage.documents
         sample_cache: dict[str, str] = {}
 
