@@ -31,6 +31,25 @@ risks).
 
 ## Done
 
+- **Wave 5 (PLAN #5) — classification report + quoted-evidence semantic
+  admissions (branch `v1/w5-classification-throughput`).**
+  - Read-only `classify-report` CLI: replays the deterministic family chain
+    per evidence document, buckets every missing_family row, names the
+    semantic queue (LQ-7). Store constructed only under `--with-text`.
+  - `fmd/plan/semantic.py`: admission contract (verbatim quote, known family,
+    ambiguity refuses all, digest recorded); `plan --admit-evidence` applies a
+    validated admissions file through the existing plan surface
+    (family_source=semantic, entity unresolved, plan_state=planned).
+  - `FamilySource` gains "semantic"; `DocumentsRepo.plan_evidence_rows`
+    (SELECT-only).
+  - Verifier: **approve**; non-blocking findings fixed pre-merge (threshold
+    threading recurring_min/table_min_rows + text_sample_chars, dead param,
+    tautology, admitted_detail audit output).
+  - Gates: ruff clean + formatted · pytest offline 1459 ✓ · DB-gated 1550 ✓ ·
+    eval provenance 1.0 ✓ · CLI smoke on dev DB (zero rows, well-formed) ✓.
+  - Residual: the semantic model run = LQ-7; quote-digest DB durability
+    deferred (HANDOVER wave-5).
+
 - **Wave 4 (PLAN #4) — double-buffered batched runner + tier-aware sizing
   (branch `v1/w4-double-buffer`).**
   - `PrefetchBuffer` (one worker, object store only): next batch's snapshot
@@ -171,6 +190,11 @@ risks).
 - Any model/GPU/real-crawl run — LQ-2..LQ-5.
 
 ## Next
+
+- Wave 6 (PLAN #6): fee / seat / placement / admission adapters in
+  config/sources.yaml + fmd/adapters, fixtures + span-resolution tests.
+  Honour robots, per-domain rate limits, no auth/CAPTCHA bypass; queue the
+  real crawl (LQ-2). Then waves 7-10 per PLAN order.
 
 - Wave 5 (PLAN #5): plan/classification throughput — deterministic family
   rules from URL/path/source signals first, semantic classifier second; every

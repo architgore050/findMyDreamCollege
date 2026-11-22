@@ -128,9 +128,13 @@ def test_replay_family_returns_signals_even_when_abstaining() -> None:
         phase_a_min_score=pa_min,
         phase_a_margin=pa_margin,
     )
-    assert reason is None or reason == "family_undetected" or score >= 0
+    # The fee URL carries fee-structure URL-token evidence: the replay either
+    # classifies it outright or reports the raw score with a stable reason.
     assert "structure_hints" in signals
-    assert score >= 0.0
+    assert score > 0.0
+    assert (family == "fee_structure") or (
+        reason in (None, "family_undetected", "below_min_score", "no_text_signal")
+    )
 
 
 def test_admission_contract_requires_verbatim_quote() -> None:
@@ -204,7 +208,6 @@ def test_apply_admissions_persists_defer_for_text_with_evidence_signals() -> Non
     outcome = apply_admissions(
         validated,
         documents=FakeDocuments(),
-        planner=object(),
         sample_for=lambda url: FEE_SAMPLE,
     )
     assert outcome["applied"] == 1 and outcome["missing_document"] == 0
@@ -245,9 +248,7 @@ def test_apply_admissions_persists_through_the_real_repo(pg_database) -> None:
         quote_sha256="a" * 64,
         score=0.9,
     )
-    outcome = apply_admissions(
-        [admission], documents=documents, planner=object(), sample_for=lambda url: FEE_SAMPLE
-    )
+    outcome = apply_admissions([admission], documents=documents, sample_for=lambda url: FEE_SAMPLE)
     assert outcome["applied"] == 1
     updated = documents.get_by_url(record.url)
     assert updated.extraction_family == "fee_structure"

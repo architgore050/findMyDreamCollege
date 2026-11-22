@@ -172,7 +172,6 @@ def apply_admissions(
     validated: Iterable[ValidatedAdmission],
     *,
     documents: Any,
-    planner: Any,
     sample_for: Any,
 ) -> dict[str, Any]:
     """Persist validated admissions through the existing plan surface.
@@ -180,7 +179,9 @@ def apply_admissions(
     The plan carries the family with ``family_source="semantic"`` and the
     quote digest in its signals; the entity is left unresolved (the document
     returns to the text queue as ``defer_for_text``) — admission is a family
-    decision, never an entity claim. Unknown URLs are skipped, counted.
+    decision, never an entity claim. Unknown URLs are skipped, counted. Note
+    (verifier wave v1-w5): ``signals`` live on the in-memory plan only — the
+    durable audit trail is the CLI's ``admitted_detail`` JSON.
     """
     applied = 0
     missing_document = 0

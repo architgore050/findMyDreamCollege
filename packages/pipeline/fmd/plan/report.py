@@ -46,6 +46,8 @@ def replay_family(
     phase_b_margin: float,
     phase_a_min_score: float,
     phase_a_margin: float,
+    recurring_min: int | None = None,
+    table_min_rows: int | None = None,
 ) -> tuple[str | None, float, str | None, dict[str, Any]]:
     """Replay the planner's phase-B family chain for one document.
 
@@ -69,6 +71,8 @@ def replay_family(
             rules=rules,
             min_score=phase_b_min_score,
             margin=phase_b_margin,
+            recurring_min=recurring_min,
+            table_min_rows=table_min_rows,
         )
         signals.update(detected)
         best_score = max(best_score, score)

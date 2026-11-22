@@ -23,6 +23,35 @@ invariant findings live here so the next agent does not re-derive them.
   `export PATH=~/.local/bin:$PATH` (corepack shim). Postgres data:
   `/home/z/my-project/.tools/pgdata`.
 
+## Wave 5 — classification throughput (2026-11-22)
+
+- **Interpretation of the brief:** the deterministic chain (registry > text >
+  URL tokens > filename shape) already exists and was NOT weakened. What was
+  missing is observability and the semantic tier's admission contract.
+  `classify-report` replays the exact chain per evidence document and buckets
+  every missing_family row (would_classify_with_text / would_classify_from_url
+  / below_floor / ambiguous / no_signal) — no writes, no model. The
+  below_floor+ambiguous+no_signal rows are the LQ-7 semantic queue.
+- **The semantic tier computes nothing semantic in the cloud:** it validates
+  model-proposed admissions against a fixed contract — known family, quote
+  verbatim in the fetched sample, no second family for the same document
+  (ambiguity refuses all), quote digest recorded. The model's own score is
+  carried for the ledger and never used to admit or refuse. The model run
+  itself is LQ-7 (operator's machine).
+- **Durable audit trail (verifier finding):** the quote digest lives on the
+  in-memory plan signals; the documents table has no signals column, so the
+  durable record is the CLI's `admitted_detail` JSON. If the operator wants
+  DB-level durability, that is a migration 0012+ decision — recorded here as
+  a deliberate deferral.
+- **Known limits (verifier):** `family_set_by_source` cannot split
+  registry vs reference (no family_source column — documented in report.py);
+  replay thresholds are threaded from plan.yaml, so tuning plan.yaml keeps
+  the report faithful.
+- Verifier verdict: **approve** (non-blocking findings fixed pre-merge:
+  recurring_min/table_min_rows/text_sample_chars threading, dead `planner`
+  parameter removed, tautological assertion strengthened, admitted_detail
+  audit output added).
+
 ## Wave 4 — double-buffered batched runner (2026-11-22)
 
 - **Interpretation of the brief:** "CPU work for the next batch" = the disk

@@ -825,7 +825,7 @@ def _cmd_classify_report(args: argparse.Namespace) -> int:
             except Exception:
                 sample_cache[key] = None
                 return None
-            sample = str(getattr(doc, "text", "") or "")[:4000]
+            sample = str(getattr(doc, "text", "") or "")[: planner.thresholds.text_sample_chars]
             sample_cache[key] = sample
             return sample
 
@@ -837,6 +837,8 @@ def _cmd_classify_report(args: argparse.Namespace) -> int:
             phase_b_margin=thresholds.phase_b_margin,
             phase_a_min_score=thresholds.phase_a_min_score,
             phase_a_margin=thresholds.phase_a_margin,
+            recurring_min=getattr(thresholds, "recurring_min", None),
+            table_min_rows=getattr(thresholds, "table_min_rows", None),
             sample_for=sample_for if args.with_text else None,
         )
     finally:
@@ -853,7 +855,6 @@ def _cmd_plan_admit_evidence(args: argparse.Namespace) -> int:
     from collections import Counter
 
     from fmd.orchestrate.plan import _cheap_text, build_planning_pass
-    from fmd.plan.planner import DocumentPlanner
     from fmd.plan.semantic import SemanticAdmission, apply_admissions, validate_admissions
 
     registry = load_registry(args.config_dir)
@@ -908,10 +909,7 @@ def _cmd_plan_admit_evidence(args: argparse.Namespace) -> int:
             if sample is not None:
                 samples[url] = sample
         validated, refused = validate_admissions(admissions, samples)
-        planner = DocumentPlanner(plan_config=getattr(registry, "plan", None))
-        outcome = apply_admissions(
-            validated, documents=documents, planner=planner, sample_for=sample_for
-        )
+        outcome = apply_admissions(validated, documents=documents, sample_for=sample_for)
     finally:
         database.close()
     print(
@@ -929,6 +927,16 @@ def _cmd_plan_admit_evidence(args: argparse.Namespace) -> int:
                         "reason": refusal.reason,
                     }
                     for refusal in refused[:100]
+                ],
+                # Audit trail for the admitted evidence (LQ-7 output): the
+                # quote digest is what makes the admission reproducible.
+                "admitted_detail": [
+                    {
+                        "document_url": admission.document_url,
+                        "family": admission.family,
+                        "quote_sha256": admission.quote_sha256,
+                    }
+                    for admission in validated[:200]
                 ],
             },
             indent=2,
