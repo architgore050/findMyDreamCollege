@@ -1257,15 +1257,16 @@ def _cmd_eval_product(args: argparse.Namespace) -> int:
         print("fmd eval: --stream is required for --eval-kind product", file=sys.stderr)
         return 2
     repo_root = Path(__file__).resolve().parents[3]
+
+    def _fixture_default(name: str) -> str:
+        """Committed offline canary input; --fixture-path overrides it."""
+
+        base = repo_root / "packages" / "pipeline" / "tests" / "fixtures" / "eval_product"
+        return str(Path(args.fixture_path) if args.fixture_path else base / name)
+
     try:
         if stream in {"nirf-proxy", "naac-proxy"}:
-            if not args.fixture_path:
-                print(
-                    f"fmd eval: --fixture-path (shortlist JSON) is required for {stream}",
-                    file=sys.stderr,
-                )
-                return 2
-            shortlist = load_shortlist(args.fixture_path)
+            shortlist = load_shortlist(_fixture_default("shortlist_fixture.json"))
             truth_dir = Path(args.truth_dir) if args.truth_dir else repo_root / "data" / "truth"
             truth = load_truth_for_stream(stream, truth_dir, root=repo_root)
             if stream == "nirf-proxy":
@@ -1275,26 +1276,35 @@ def _cmd_eval_product(args: argparse.Namespace) -> int:
             report = build_product_report(stream, [case], truth_header=truth_summary(truth))
             report["proxy_label"] = case["proxy_label"]
         elif stream == "self-drift":
-            if not args.fixture_path or not args.previous_snapshot:
+            if args.fixture_path and not args.previous_snapshot:
                 print(
-                    "fmd eval: self-drift needs --fixture-path <current snapshot> and "
-                    "--previous-snapshot <previous snapshot>",
+                    "fmd eval: self-drift needs --previous-snapshot when --fixture-path "
+                    "names the current snapshot",
                     file=sys.stderr,
                 )
                 return 2
-            current = load_shortlist(args.fixture_path)
-            previous = load_shortlist(args.previous_snapshot)
+            fixture_dir = (
+                Path(args.fixture_path)
+                if args.fixture_path and Path(args.fixture_path).is_dir()
+                else repo_root / "packages" / "pipeline" / "tests" / "fixtures" / "eval_product"
+            )
+            current_path = (
+                Path(args.fixture_path)
+                if args.fixture_path and Path(args.fixture_path).is_file()
+                else fixture_dir / "snapshot_current.json"
+            )
+            previous_path = (
+                Path(args.previous_snapshot)
+                if args.previous_snapshot
+                else fixture_dir / "snapshot_previous.json"
+            )
+            current = load_shortlist(current_path)
+            previous = load_shortlist(previous_path)
             case = run_self_drift(current, previous)
             report = build_product_report(stream, [case])
             report["proxy_label"] = None
         elif stream == "cv-stability":
-            if not args.fixture_path:
-                print(
-                    f"fmd eval: --fixture-path (candidate-set JSON) is required for {stream}",
-                    file=sys.stderr,
-                )
-                return 2
-            shortlist = load_shortlist(args.fixture_path)
+            shortlist = load_shortlist(_fixture_default("cv_candidates.json"))
             weights = _load_weights_for_cv(args.config_dir)
             case = run_cv_stability(
                 shortlist,
@@ -1359,15 +1369,13 @@ def _cmd_eval_expert_panel(args: argparse.Namespace) -> int:
     from fmd.eval.product import build_product_report
     from fmd.eval.product import write_report as write_product_report
 
-    if not args.fixture_path:
-        print(
-            "fmd eval: --fixture-path (directory with panel ratings + product_ranking.json) "
-            "is required for expert-panel",
-            file=sys.stderr,
-        )
-        return 2
+    repo_root = Path(__file__).resolve().parents[3]
+    fixture_dir = (
+        Path(args.fixture_path)
+        if args.fixture_path
+        else repo_root / "packages" / "pipeline" / "tests" / "fixtures" / "eval_panel"
+    )
     try:
-        fixture_dir = Path(args.fixture_path)
         ratings = load_panel_ratings(fixture_dir)
         ranking = load_product_ranking(fixture_dir)
         case = run_expert_panel(ratings, ranking)
