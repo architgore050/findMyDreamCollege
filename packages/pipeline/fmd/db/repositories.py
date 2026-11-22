@@ -1875,6 +1875,23 @@ class DocumentsRepo:
             counts[reason] = counts.get(reason, 0) + total
         return counts
 
+    def plan_evidence_rows(self, *, limit: int = 2000) -> list[dict[str, Any]]:
+        """Evidence-role documents with their plan columns, for diagnosis.
+
+        Wave v1-w5 (``classify-report``): the read-only inputs the family
+        report replays — no decisions are made or written here. Ordered by id
+        so a ``--limit`` cut is stable across runs.
+        """
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, url, role, plan_state, plan_reason, "
+                "extraction_family, entity_id, source_id "
+                "FROM documents WHERE role = 'evidence' OR role IS NULL "
+                "ORDER BY id LIMIT %s",
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def list_by_role(self, role: str, *, limit: int = 100, offset: int = 0) -> list[DocumentRecord]:
         """Documents of one role, oldest first (inventory ingest queue)."""
         with self.db.connection() as conn:
@@ -2422,9 +2439,7 @@ class SectionsRepo:
             ).fetchall()
         return [_section_node(row) for row in rows]
 
-    def breadcrumb(
-        self, document_id: int, char_start: int, char_end: int
-    ) -> dict[str, Any] | None:
+    def breadcrumb(self, document_id: int, char_start: int, char_end: int) -> dict[str, Any] | None:
         """Deepest section containing ``[char_start, char_end)`` + its chain.
 
         One indexed query: the anchor picks the narrowest containing node
@@ -3277,9 +3292,7 @@ class ProgrammesRepo:
                 "UPDATE cost_items SET programme_id = %s WHERE programme_id = %s",
                 (target_id, source_id),
             ).rowcount
-            deleted = conn.execute(
-                "DELETE FROM programmes WHERE id = %s", (source_id,)
-            ).rowcount
+            deleted = conn.execute("DELETE FROM programmes WHERE id = %s", (source_id,)).rowcount
         return {"cost_items_moved": int(cost_moved or 0), "rows_deleted": int(deleted or 0)}
 
 
