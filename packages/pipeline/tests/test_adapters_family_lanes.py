@@ -4,7 +4,7 @@ The discovery layer for these families is deliberately composed, not
 duplicated: ``fee_regulator`` (state fee-commission orders), ``state_counsel
 ling`` (seat matrices and admission notifications on counselling portals) and
 ``institution_site`` (fee/seat/prospectus/placement evidence types with
-administrative-fee vetoes) cover the four lanes across 15 registry entries.
+administrative-fee vetoes) cover the four lanes across 14 registry entries.
 What PLAN #6 acceptance demanded and the suite lacked is here:
 
 * every ``DocumentRef`` produced from a fixture listing resolves **verbatim**:
