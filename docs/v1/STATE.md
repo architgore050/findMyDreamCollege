@@ -181,6 +181,10 @@ risks).
 
 ## Merged to main (verified via GitHub API)
 
+- PR #7 (wave 7: per-programme scoring coverage diagnostics), verifier
+  verdict approve. Cumulative: waves 1-5 and 7 merged (PRs #1-#7); remaining
+  cloud work = waves 6, 8, 9, 10 per PLAN order.
+
 - PR #6 (wave 5: classification report + quoted-evidence semantic admissions),
   verifier verdict approve. Cumulative: waves 1-5 all merged.
 
