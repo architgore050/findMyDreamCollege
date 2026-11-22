@@ -60,10 +60,11 @@ windowing is safe (one CUDA consumer at a time).
 Command:
   set -a && . .env && set +a
   export FMD_SNAPSHOT_DIR=$HOME/fmd-snap2
-  uv run python -m fmd.cli acquire --batched --batch-size 8   # Docling+OCR inside the server-stopped GPU window
+  uv run python -m fmd.cli extract --batched --batch-pages 8   # Docling+OCR inside the server-stopped GPU window
 Expected: `nvidia-smi` shows never more than one CUDA consumer; run summary
 `ok:true`; no `docling_cuda_oom`.
-Commit back: run summary JSON + any timing constants adjusted from measurement.
+Commit back: run summary JSON (`--json`? check `fmd extract --help` for summary output; stdout JSON) +
+any timing constants adjusted from measurement.
 Blocks: wave 4 verification.
 
 ### LQ-5: T2 OCR real-engine cache validation (wave 3)
