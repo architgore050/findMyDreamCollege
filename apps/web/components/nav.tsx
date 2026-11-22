@@ -11,6 +11,7 @@ const links = [
   { href: "/exclusions", label: "Exclusions" },
   { href: "/review", label: "Review" },
   { href: "/sources", label: "Sources" },
+  { href: "/methodology", label: "Methodology" },
 ] as const;
 
 function isActive(pathname: string, href: string): boolean {

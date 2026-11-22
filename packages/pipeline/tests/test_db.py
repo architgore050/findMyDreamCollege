@@ -277,7 +277,7 @@ def test_source_registry_and_llm_audit_and_frontier(pg_database) -> None:
     )
     assert source.id == source_id
     assert sources.get(source_id) is not None
-    SourceExclusionsRepo(pg_database).upsert(
+    SourceExclusionsRepo(pg_database).append(
         SourceExclusionSeed(id=f"ex_{suffix}", name="Login wall", reason="auth required")
     )
 

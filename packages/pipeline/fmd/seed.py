@@ -84,7 +84,7 @@ def seed_database(database: Database, registry: Registry) -> dict[str, int]:
         counts["sources"] += 1
 
     for exclusion in registry.sources.exclusions:
-        exclusions_repo.upsert(
+        exclusions_repo.append(
             SourceExclusionSeed(id=exclusion.id, name=exclusion.name, reason=exclusion.reason)
         )
         counts["source_exclusions"] += 1

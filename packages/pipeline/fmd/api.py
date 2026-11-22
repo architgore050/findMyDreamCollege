@@ -288,6 +288,91 @@ def list_sources() -> dict[str, Any]:
     return _envelope({"items": items, "exclusions": exclusions})
 
 
+@app.get("/api/methodology")
+def methodology() -> JSONResponse:
+    """PLAN v1-w9 (a): the trust surface, generated from the registry.
+
+    Every number on this page is read from ``config/`` at request time —
+    weights, versions, evidence-tier policy, predicate counts, source counts
+    and the exclusion registry. Nothing is hand-copied: a change to
+    ``config/weights.yaml`` changes this page (and its envelope version)
+    without an edit here. The dispute path is documented in the payload so
+    the UI and the API agree on it.
+    """
+    registry = _registry()
+    if registry is None:
+        return _error(503, "registry_unavailable", "config registry is not loaded")
+    weights = registry.weights
+    sources = list(registry.sources.sources)
+    exclusions = [
+        {"id": item.id, "name": item.name, "reason": item.reason}
+        for item in registry.sources.exclusions
+    ]
+    by_trust: dict[str, int] = {}
+    enabled_by_trust: dict[str, int] = {}
+    for source in sources:
+        trust = str(getattr(source, "trust", "unknown"))
+        by_trust[trust] = by_trust.get(trust, 0) + 1
+        if getattr(source, "enabled", False):
+            enabled_by_trust[trust] = enabled_by_trust.get(trust, 0) + 1
+    payload = {
+        "methodology": {
+            "weights": {name: float(value) for name, value in weights.weights.items()},
+            "weights_sum": round(sum(float(v) for v in weights.weights.values()), 6),
+            "component_policy": {
+                "min_claims_for_score": weights.min_claims_for_score,
+                "min_claims_for_confidence": weights.min_claims_for_confidence,
+                "min_components_for_composite": weights.min_components_for_composite,
+                "single_claim_interval_half_width": weights.single_claim_interval_half_width,
+            },
+            "evidence_tiers": {
+                name: tier.model_dump(mode="json")
+                for name, tier in weights.evidence_tiers.items()
+            },
+            "predicates_version": registry.predicates.version,
+            "predicates_count": len(registry.predicates.predicates),
+            "predicate_aliases": len(registry.predicates.aliases),
+            "sources": {
+                "total": len(sources),
+                "enabled": sum(1 for s in sources if getattr(s, "enabled", False)),
+                "by_trust": by_trust,
+                "enabled_by_trust": enabled_by_trust,
+            },
+            "source_exclusions": exclusions,
+            "value_policy": [
+                "UNKNOWN is a value: a component with no usable claim is reported "
+                "UNKNOWN, never imputed, never rendered as zero.",
+                "Every published number carries the claim id that produced it; "
+                "click through to the claim to see the verbatim quote, its span "
+                "in the source document and the source file itself.",
+                "Evidence tiers (well_evidenced / partial / thin / insufficient) "
+                "are computed from n_claims and n_sources as configured in "
+                "config/weights.yaml — they are policy, not judgement calls.",
+                "Composite scores are published only when the configured minimum "
+                "of components is known; otherwise the interval is reported with "
+                "the unknown components listed.",
+                "Excluded sources are recorded, with reasons, in an append-only "
+                "registry: corrections are appended under a new id, history is "
+                "never rewritten.",
+            ],
+            "dispute_path": [
+                "Every rendered number links to the claim that produced it; the "
+                "claim page shows the verbatim quote, its character span, the "
+                "sha256 of the source snapshot and a link to the source document.",
+                "To dispute a number, follow that link to the source document and "
+                "compare it with the quote; then open an issue at "
+                "https://github.com/architgore050/findMyDreamCollege/issues with "
+                "the claim id — the claim is corrected or superseded (never "
+                "silently rewritten) and the correction carries its own "
+                "observed_at and evidence.",
+                "Operators can supersede or reject claims in the review console "
+                "(/review); superseded claims keep their history.",
+            ],
+        },
+    }
+    return _envelope(payload)
+
+
 @app.get("/api/programmes")
 def list_programmes(
     database: DatabaseDep,

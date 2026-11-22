@@ -907,21 +907,54 @@ class SourcesRepo:
         return [_source(row) for row in rows]
 
 
+class AppendOnlyViolation(RuntimeError):
+    """An append-only registry was asked to change an existing row.
+
+    Corrections are appended under a NEW id (``<id>@<date-of-correction>``);
+    rewriting history is the one thing a trust surface must never do.
+    """
+
+
 class SourceExclusionsRepo:
+    """The source-exclusion registry (PLAN v1-w9c): append-only.
+
+    ``append`` inserts a new exclusion, or accepts an identical re-seed as a
+    no-op. An attempt to CHANGE an existing row's name or reason raises
+    :class:`AppendOnlyViolation` — the correction must be appended under a new
+    id so the registry keeps its history.
+    """
+
     def __init__(self, database: Database) -> None:
         self.db = database
 
-    def upsert(self, seed: SourceExclusionSeed) -> None:
+    def append(self, seed: SourceExclusionSeed) -> str:
+        """Append one exclusion; returns ``"appended"`` or ``"unchanged"``."""
         with self.db.connection() as conn:
-            conn.execute(
+            inserted = conn.execute(
                 """
                 INSERT INTO source_exclusions (id, name, reason, updated_at)
                 VALUES (%s, %s, %s, now())
-                ON CONFLICT (id) DO UPDATE SET
-                    name = EXCLUDED.name, reason = EXCLUDED.reason, updated_at = now()
+                ON CONFLICT (id) DO NOTHING
+                RETURNING id
                 """,
                 (seed.id, seed.name, seed.reason),
+            ).fetchone()
+            if inserted is not None:
+                return "appended"
+            row = conn.execute(
+                "SELECT name, reason FROM source_exclusions WHERE id = %s", (seed.id,)
+            ).fetchone()
+        if row is None:  # pragma: no cover - conflict without a row is impossible
+            raise AppendOnlyViolation(
+                f"source exclusion {seed.id!r} conflicted but is missing"
             )
+        if row["name"] != seed.name or row["reason"] != seed.reason:
+            raise AppendOnlyViolation(
+                f"source exclusion {seed.id!r} already exists with a different "
+                f"name/reason; append a correction under a new id "
+                f"(for example {seed.id}@<date>) instead of rewriting it"
+            )
+        return "unchanged"
 
 
 class EntitiesRepo:
