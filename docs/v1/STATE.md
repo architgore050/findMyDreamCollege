@@ -153,6 +153,10 @@ risks).
 
 ## Merged to main (verified via GitHub API)
 
+- PR #5 (wave 4: double-buffered batched runner + tier-aware sizing), merged
+  as be0fcfa. Cumulative: waves 1-4 all merged; verifier-driven fixes applied
+  pre-merge in every wave.
+
 - PR #1 (wave 1 compose wiring), PR #2 (wave 2 acceptance manifest), PR #3
   (W10 foundation: T1 parse cache + batched acquire), PR #4 (wave 3 T2 parse
   cache, engine-pinned keys). Local main synced to 33eb59f.
@@ -168,8 +172,11 @@ risks).
 
 ## Next
 
-- Wave 4 (PLAN #4): resource-phased acquisition double buffering. The W10
-  batched runner (now on main) already time-shares server-stopped acquisition
-  and server-up extraction; wave 4 must overlap next-batch CPU prep with the
-  GPU window. Verifier for PR #3 mapped the exact symbols (orchestrate/batched.py
-  `_run_cycle`). Then waves 5-10 per PLAN order.
+- Wave 5 (PLAN #5): plan/classification throughput — deterministic family
+  rules from URL/path/source signals first, semantic classifier second; every
+  semantic admission still needs cited evidence; uncertain never admitted; a
+  dry-run report command shows rule-hit counts; any model run = LQ.
+  Then waves 6-10 per PLAN order. Sandbox notes: pgdata survives recycles but
+  loses its empty runtime dirs (recovery documented in
+  /home/z/my-project/scripts/start_pg.sh); local main must be re-cloned after
+  a recycle — state lives here, in the repo.
