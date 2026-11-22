@@ -35,7 +35,9 @@ from fmd.plan.rules import DEFAULT_RULES, PlanRules, detect_family, normalise, s
 PlanState = Literal[
     "planned", "linked", "needs_review", "abstained", "not_applicable", "defer_for_text"
 ]
-FamilySource = Literal["registry", "reference", "heuristic", "none"]
+# "semantic" (wave v1-w5): a model-proposed admission that survived the
+# quoted-evidence contract (fmd.plan.semantic); never set by the rules chain.
+FamilySource = Literal["registry", "reference", "heuristic", "none", "semantic"]
 Phase = Literal["a", "b"]
 
 #: Migration 0003's ``documents.plan_state`` is a closed set that predates the

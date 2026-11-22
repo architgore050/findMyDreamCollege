@@ -180,6 +180,33 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="compute every decision and print the counters, write nothing",
     )
+    plan_parser.add_argument(
+        "--admit-evidence",
+        type=Path,
+        default=None,
+        help=(
+            "apply a validated semantic-admissions file (JSON list of "
+            "{document_url, family, quote}) instead of planning: every admission "
+            "must cite a verbatim quote from the document's text sample; "
+            "ambiguous documents are refused, never guessed"
+        ),
+    )
+
+    report_parser = subparsers.add_parser(
+        "classify-report",
+        help="read-only: why each evidence document is missing a family (wave v1-w5)",
+    )
+    report_parser.add_argument(
+        "--limit", type=int, default=2000, help="maximum documents to diagnose"
+    )
+    report_parser.add_argument(
+        "--with-text",
+        action="store_true",
+        help="fetch the bounded T0 sample per document (CPU-only) and replay the text chain",
+    )
+    report_parser.add_argument(
+        "--json-out", type=Path, default=None, help="write the full report JSON here"
+    )
 
     verify_parser = subparsers.add_parser(
         "verify",
@@ -539,6 +566,14 @@ def _database(args: argparse.Namespace) -> Database:
     return Database(args.database_url)
 
 
+def resolve_snapshot_store() -> Any:
+    """The default snapshot store (FMD_SNAPSHOT_DIR / configured path)."""
+    from fmd.paths import resolve_snapshot_dir
+    from fmd.store import SnapshotStore
+
+    return SnapshotStore(resolve_snapshot_dir())
+
+
 def _cmd_migrate(args: argparse.Namespace) -> int:
     with _database(args) as database:
         applied = run_migrations(database)
@@ -719,6 +754,8 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
 def _cmd_plan(args: argparse.Namespace) -> int:
     from fmd.orchestrate.plan import run_planning_pass
 
+    if getattr(args, "admit_evidence", None) is not None:
+        return _cmd_plan_admit_evidence(args)
     registry = load_registry(args.config_dir)
     database = _database(args)
     try:
@@ -733,6 +770,179 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         database.close()
     print(summary.as_json())
     return 1 if summary.failed else 0
+
+
+def _cmd_classify_report(args: argparse.Namespace) -> int:
+    """Wave v1-w5: replay the deterministic family chain per evidence document.
+
+    Read-only. Buckets explain every missing_family row; below_floor /
+    ambiguous / no_signal rows are the semantic-tier queue (LOCAL-QUEUE LQ-7)
+    — this command never admits anything.
+    """
+    from fmd.db.repositories import DocumentsRepo, SnapshotsRepo, SourcesRepo
+    from fmd.orchestrate.plan import _cheap_text
+    from fmd.plan.planner import DocumentPlanner, declared_family
+    from fmd.plan.report import build_report, render_report
+
+    registry = load_registry(args.config_dir)
+    database = _database(args)
+    try:
+        planner = DocumentPlanner(plan_config=getattr(registry, "plan", None))
+        documents = DocumentsRepo(database)
+        sources_repo = SourcesRepo(database)
+        # The object store is only needed when the text chain is replayed:
+        # without --with-text the report never touches snapshot bytes (and no
+        # snapshot directory has to exist on the host).
+        store = resolve_snapshot_store() if args.with_text else None
+        snapshots = SnapshotsRepo(database) if store is not None else None
+        rows = documents.plan_evidence_rows(limit=args.limit)
+        sources_by_id = {str(getattr(source, "id", "")): source for source in sources_repo.list()}
+        enriched: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            source = sources_by_id.get(str(row.get("source_id") or ""))
+            record["declared_family"] = declared_family(source)
+            enriched.append(record)
+        sample_cache: dict[str, str | None] = {}
+
+        def sample_for(row: dict[str, Any]) -> str | None:
+            key = str(row["id"])
+            if key in sample_cache:
+                return sample_cache[key]
+            if store is None or snapshots is None:
+                sample_cache[key] = None
+                return None
+            snapshot = snapshots.latest_for_document(int(key))
+            if snapshot is None:
+                sample_cache[key] = None
+                return None
+            try:
+                doc = _cheap_text(
+                    store.get(snapshot.sha256),
+                    content_type=getattr(snapshot, "content_type", None),
+                    policy=None,
+                )
+            except Exception:
+                sample_cache[key] = None
+                return None
+            sample = str(getattr(doc, "text", "") or "")[: planner.thresholds.text_sample_chars]
+            sample_cache[key] = sample
+            return sample
+
+        thresholds = planner.thresholds
+        report = build_report(
+            enriched,
+            rules=planner.rules,
+            phase_b_min_score=thresholds.phase_b_min_score,
+            phase_b_margin=thresholds.phase_b_margin,
+            phase_a_min_score=thresholds.phase_a_min_score,
+            phase_a_margin=thresholds.phase_a_margin,
+            recurring_min=getattr(thresholds, "recurring_min", None),
+            table_min_rows=getattr(thresholds, "table_min_rows", None),
+            sample_for=sample_for if args.with_text else None,
+        )
+    finally:
+        database.close()
+    print(render_report(report))
+    if args.json_out:
+        args.json_out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"report written: {args.json_out}")
+    return 0
+
+
+def _cmd_plan_admit_evidence(args: argparse.Namespace) -> int:
+    """Apply a semantic-admissions file through the quoted-evidence contract."""
+    from collections import Counter
+
+    from fmd.orchestrate.plan import _cheap_text, build_planning_pass
+    from fmd.plan.semantic import SemanticAdmission, apply_admissions, validate_admissions
+
+    registry = load_registry(args.config_dir)
+    try:
+        payload = json.loads(Path(args.admit_evidence).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"fmd plan: cannot read admissions file: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(payload, list):
+        print("fmd plan: admissions file must be a JSON list", file=sys.stderr)
+        return 1
+    admissions = [
+        SemanticAdmission(
+            document_url=str(item.get("document_url") or ""),
+            family=str(item.get("family") or ""),
+            quote=str(item.get("quote") or ""),
+            score=(float(item["score"]) if item.get("score") is not None else None),
+        )
+        for item in payload
+        if isinstance(item, dict)
+    ]
+    database = _database(args)
+    try:
+        stage = build_planning_pass(registry, database)
+        documents = stage.documents
+        sample_cache: dict[str, str] = {}
+
+        def sample_for(url: str) -> str | None:
+            if url in sample_cache:
+                return sample_cache[url]
+            document = documents.get_by_url(url)
+            if document is None:
+                return None
+            snapshot = stage.snapshots.latest_for_document(int(document.id))
+            if snapshot is None:
+                return None
+            try:
+                doc = _cheap_text(
+                    stage.store.get(snapshot.sha256),
+                    content_type=getattr(snapshot, "content_type", None),
+                    policy=stage.policy,
+                )
+            except Exception:
+                return None
+            sample = str(getattr(doc, "text", "") or "")[: stage.text_sample_chars]
+            sample_cache[url] = sample
+            return sample
+
+        samples = {}
+        for url in {admission.document_url for admission in admissions}:
+            sample = sample_for(url)
+            if sample is not None:
+                samples[url] = sample
+        validated, refused = validate_admissions(admissions, samples)
+        outcome = apply_admissions(validated, documents=documents, sample_for=sample_for)
+    finally:
+        database.close()
+    print(
+        json.dumps(
+            {
+                "proposed": len(admissions),
+                "admitted": outcome["applied"],
+                "missing_document": outcome["missing_document"],
+                "refused": len(refused),
+                "refusal_reasons": dict(Counter(refusal.reason for refusal in refused)),
+                "refused_detail": [
+                    {
+                        "document_url": refusal.document_url,
+                        "family": refusal.family,
+                        "reason": refusal.reason,
+                    }
+                    for refusal in refused[:100]
+                ],
+                # Audit trail for the admitted evidence (LQ-7 output): the
+                # quote digest is what makes the admission reproducible.
+                "admitted_detail": [
+                    {
+                        "document_url": admission.document_url,
+                        "family": admission.family,
+                        "quote_sha256": admission.quote_sha256,
+                    }
+                    for admission in validated[:200]
+                ],
+            },
+            indent=2,
+        )
+    )
+    return 0
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
@@ -1711,6 +1921,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_acquire(args)
         if args.command == "plan":
             return _cmd_plan(args)
+        if args.command == "classify-report":
+            return _cmd_classify_report(args)
         if args.command == "verify":
             return _cmd_verify(args)
         if args.command == "worker":
