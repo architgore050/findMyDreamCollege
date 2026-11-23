@@ -38,6 +38,7 @@ A data-mining + scoring tool that inventories bachelor's-level Medical Laborator
 3. `docs/product-development-cycle/05-gaps-and-full-solution-backlog.md` — what is intentionally missing.
 4. `config/` — the registry. If behaviour is not driven by config, it is probably wrong.
 5. `docs/product-development-cycle/18-scrape-failures.md` — reading the scraping-failure log (what we lose to blocked/failed fetches).
+6. `docs/product-development-cycle/14-deferred-items.md` — deferred/future items (e.g. the prompt-injection prevention pass, §E); consult when starting new work.
 
 ## Invariants (a PR that violates one is rejected)
 

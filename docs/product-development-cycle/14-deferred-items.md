@@ -131,6 +131,19 @@ qualification frameworks. Do not infer equivalence from a name alone.
 | D15 | Scheduled crawling from registry cadence |
 | D16 | Embedding provider — see WS-EMBED decision (CPU bge-m3 vs GPU headroom) |
 
+## E. Future — per-profile prompt-injection pass (LLM)
+
+**Why it waits:** at current scale the admission contract already requires cited quotes and
+span resolution, so the injection surface is unmeasured and coding would be optimization, not
+necessity. Decide from data first (the scrape-failure log and the prompt-effectiveness stream).
+
+| ID | Item | Why it waits | Est. |
+|---|---|---|---|
+| D18 | **Per-admission LLM injection pass** — one LLM pass per admission/plan item, screening the
+  admission input (classification evidence + context sample) for injected instructions
+  (verdict: clean / injected_instruction / malformed_quote); quarantine or reject on finding.
+  Also screens plan prompts for instructive-looking quoted context. | Adds one LLM call per admission (cost/latency); measure via the quoting contract first | Small (guard module + guard prompts + tests) |
+
 ---
 
 ## Status snapshot at deferral (2026-11-18)
