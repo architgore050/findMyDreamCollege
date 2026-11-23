@@ -1,11 +1,16 @@
 """Product streams for ``fmd eval --eval-kind product`` (docs/v1/eval/01-eval-designs.md).
 
-Four offline, deterministic streams:
+Five offline, deterministic streams:
 
 * ``nirf-proxy`` / ``naac-proxy`` — rank a shortlist against the committed
   truth tables. NIRF is a weak institutional proxy (no paramedical category);
   NAAC CGPA is a medium-maturity institutional proxy. **Neither is a
   programme-level outcome measure**, and every report carries that label.
+* ``prompt-effectiveness`` — the product's own top-3 (the prompt-driven
+  shortlist order: admissions via LLM + plan ordering) against the two
+  data-baseline top-3s on the SAME shortlist. Agreement means the
+  prompt-driven product is aligned with the committed data baseline;
+  disagreement is measured, not hidden (docs/v1/eval/08-prompt-effectiveness.md).
 * ``self-drift`` — diff two versioned shortlist snapshots: rank-change
   magnitude, churn, and how many changes a claims diff or a version bump
   explains (mirrors ``fmd/eval/drift.py`` semantics at shortlist level).
@@ -217,6 +222,108 @@ def run_naac_proxy(
     shortlist: Shortlist, truth: NaacTruthFile, *, k_values: tuple[int, ...] = DEFAULT_K_VALUES
 ) -> dict[str, Any]:
     return run_proxy_stream(shortlist, truth, proxy_label=PROXY_LABEL_NAAC, k_values=k_values)
+
+
+# ------------------------------------------------------------------- prompt-effectiveness
+
+PROMPT_EFFECTIVENESS_RULE = (
+    "prompting_working = profiles whose max(top-3 overlap vs NIRF baseline, "
+    "top-3 overlap vs NAAC baseline) >= 2 is at least 80% of profiles "
+    "(docs/v1/eval/08-prompt-effectiveness.md; rule is fixed, threshold 0.8)"
+)
+
+
+def run_prompt_effectiveness(
+    shortlist: Shortlist,
+    nirf_truth: NirfTruthFile,
+    naac_truth: NaacTruthFile,
+) -> dict[str, Any]:
+    """Compare the product's own top-3 with the data-baseline top-3s (doc 08).
+
+    The product (a shortlist) is produced by the prompt-driven pipeline
+    (admissions via LLM + plan ordering); the data baselines (nirf-proxy,
+    naac-proxy) are pure committed truth tables. This stream answers "is
+    prompting working?" mechanically: how much of the product's top-3 the
+    baselines' top-3 (restricted to the same shortlist institutions)
+    reproduces. UNKNOWN stays a value (invariant 5): a product top pick with
+    no truth entry cannot match a baseline top-k and is counted in
+    ``product_top_unknown``, never coerced into a match.
+    """
+
+    product_order = shortlist.ordered_keys()
+    product_top3 = product_order[:3]
+    nirf_case = run_nirf_proxy(shortlist, nirf_truth)
+    naac_case = run_naac_proxy(shortlist, naac_truth)
+    nirf_proxy_top3 = nirf_case["reference_order"][:3]
+    naac_proxy_top3 = naac_case["reference_order"][:3]
+    overlap_nirf_top3 = top_k_overlap(product_top3, nirf_proxy_top3, 3)
+    overlap_naac_top3 = top_k_overlap(product_top3, naac_proxy_top3, 3)
+
+    nirf_by_key = nirf_truth.by_key()
+    naac_by_key = naac_truth.by_key()
+    product_top = product_top3[0] if product_top3 else None
+    product_top_in_nirf = bool(nirf_by_key.get(product_top))
+    product_top_in_naac = bool(naac_by_key.get(product_top))
+    product_top_unknown = (
+        product_top is None
+        or (product_top not in nirf_by_key and product_top not in naac_by_key)
+    )
+
+    return {
+        "profile_id": shortlist.profile_id,
+        "shortlist_rows": len(shortlist.rows),
+        "product_top3": product_top3,
+        "overlap_nirf_top3": overlap_nirf_top3,
+        "overlap_naac_top3": overlap_naac_top3,
+        "nirf_proxy_top3": nirf_proxy_top3,
+        "naac_proxy_top3": naac_proxy_top3,
+        "product_top_in_nirf": product_top_in_nirf,
+        "product_top_in_naac": product_top_in_naac,
+        "product_top_unknown": product_top_unknown,
+    }
+
+
+def prompt_effectiveness_aggregate(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    """Harness-computed aggregate over prompt-effectiveness cases (doc 08).
+
+    The rule is fixed: a profile counts when the product top-3 shares at
+    least 2 institutions with EITHER baseline's top-3, and prompting is
+    "working" when that holds for >= 80% of profiles.
+    """
+
+    total = len(cases)
+    if not total:
+        return {
+            "n_profiles": 0,
+            "mean_overlap_nirf": None,
+            "mean_overlap_naac": None,
+            "n_profiles_overlap_ge2": 0,
+            "prompting_working": False,
+            "product_top_unknown_frac": None,
+            "n_profiles_top_in_nirf": 0,
+            "n_profiles_top_in_naac": 0,
+        }
+    n_ge2 = sum(
+        1
+        for case in cases
+        if max(case["overlap_nirf_top3"], case["overlap_naac_top3"]) >= 2
+    )
+    return {
+        "n_profiles": total,
+        "mean_overlap_nirf": round(
+            sum(case["overlap_nirf_top3"] for case in cases) / total, 6
+        ),
+        "mean_overlap_naac": round(
+            sum(case["overlap_naac_top3"] for case in cases) / total, 6
+        ),
+        "n_profiles_overlap_ge2": n_ge2,
+        "prompting_working": n_ge2 / total >= 0.8,
+        "product_top_unknown_frac": round(
+            sum(1 for case in cases if case["product_top_unknown"]) / total, 6
+        ),
+        "n_profiles_top_in_nirf": sum(1 for case in cases if case["product_top_in_nirf"]),
+        "n_profiles_top_in_naac": sum(1 for case in cases if case["product_top_in_naac"]),
+    }
 
 
 # --------------------------------------------------------------------------- self-drift
@@ -541,6 +648,32 @@ def render_product_summary(report: dict[str, Any]) -> str:
                     uf=case.get("unknown", {}).get("fraction"),
                 )
             )
+        elif stream == "prompt-effectiveness":
+            aggregate = report.get("aggregate") or {}
+            lines.append(
+                "  prompting_working {pw}: max top3 overlap >= 2 in {ge2}/{n} profiles, "
+                "mean_overlap_nirf {mn} mean_overlap_naac {ma} unknown_top {uf}".format(
+                    pw=aggregate.get("prompting_working"),
+                    ge2=aggregate.get("n_profiles_overlap_ge2"),
+                    n=aggregate.get("n_profiles"),
+                    mn=aggregate.get("mean_overlap_nirf"),
+                    ma=aggregate.get("mean_overlap_naac"),
+                    uf=aggregate.get("product_top_unknown_frac"),
+                )
+            )
+            for case in report.get("cases") or []:
+                product_top3 = case.get("product_top3") or []
+                lines.append(
+                    "  {profile}: product_top {pt} overlap_nirf {on} overlap_naac {oa} "
+                    "nirf_proxy_top3 {nt} naac_proxy_top3 {nat}".format(
+                        profile=case.get("profile_id"),
+                        pt=product_top3[0] if product_top3 else None,
+                        on=case.get("overlap_nirf_top3"),
+                        oa=case.get("overlap_naac_top3"),
+                        nt=case.get("nirf_proxy_top3"),
+                        nat=case.get("naac_proxy_top3"),
+                    )
+                )
         elif stream == "self-drift":
             lines.append(
                 "  {profile}: changes {n} rank_max {mx} churn {churn} "
@@ -573,6 +706,7 @@ __all__ = [
     "DEFAULT_K_VALUES",
     "PROXY_LABEL_NAAC",
     "PROXY_LABEL_NIRF",
+    "PROMPT_EFFECTIVENESS_RULE",
     "Shortlist",
     "ShortlistError",
     "ShortlistRow",
@@ -580,10 +714,12 @@ __all__ = [
     "default_report_path",
     "load_shortlist",
     "load_truth_for_stream",
+    "prompt_effectiveness_aggregate",
     "render_product_summary",
     "run_cv_stability",
     "run_naac_proxy",
     "run_nirf_proxy",
+    "run_prompt_effectiveness",
     "run_proxy_stream",
     "run_self_drift",
     "truth_summary",

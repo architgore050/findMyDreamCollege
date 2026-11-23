@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "profile_id": "fixture-mlt-prompt-effectiveness-v1",
+  "synthetic": true,
+  "notes": "Constructed offline canary shortlist for the prompt-effectiveness stream (synthetic; no real user profile). Rows 1-2 are the NIRF 2025 Medical truth table's top two institutions in truth order (AIMS rank 1, PGIMER rank 2); row 3 is deliberately in NEITHER committed truth table, so the UNKNOWN path is exercised. Hand-computed expectations (verified against the truth by_key()/ranked_keys() before commit): product top-3 = [aims, pgimer, city]; NIRF baseline top-3 restricted to this shortlist = [aims, pgimer]; NAAC truth is empty so its baseline top-3 is empty; overlap_nirf_top3 = 2, overlap_naac_top3 = 0; the product #1 is in NIRF and not in NAAC.",
+  "captured_at": "2026-11-23T00:00:00Z",
+  "rows": [
+    {"rank": 1, "institution_name": "All India Institute of Medical Sciences, Delhi", "programme": "B.Sc. Medical Laboratory Technology", "state": "Delhi"},
+    {"rank": 2, "institution_name": "Post Graduate Institute of Medical Education and Research", "programme": "B.Sc. Medical Laboratory Technology", "state": "Chandigarh"},
+    {"rank": 3, "institution_name": "City Care Paramedical College, Hyderabad", "programme": "B.Sc. Medical Laboratory Technology", "state": "Telangana"}
+  ]
+}
