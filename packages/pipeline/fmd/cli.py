@@ -567,6 +567,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="machine-readable output (default: table)"
     )
 
+    # Scrape-failure log (append-only evidence): which institutions the scraper
+    # lost out on, and why. Storage + taxonomy: docs/product-development-cycle/18.
+    fails_parser = subparsers.add_parser(
+        "failures",
+        help="aggregate the append-only scrape-failure log by institution",
+        description=(
+            "Summarise <repo>/data/scrape-failures/failures-*.jsonl (or"
+            " $FMD_SCRAPE_FAILURES_DIR): which institutions lost fetches and"
+            " why (robots blocks, 404/410 gone pages, transport errors,"
+            " all_tiers_blocked)."
+        ),
+    )
+    fails_parser.add_argument(
+        "--since",
+        default=None,
+        help="only failures at/after this ISO8601 UTC timestamp",
+    )
+    fails_parser.add_argument(
+        "--top",
+        type=int,
+        default=10,
+        help="maximum institutions listed (default: 10)",
+    )
+    fails_parser.add_argument(
+        "--json", action="store_true", help="machine-readable output (default: table)"
+    )
+
     programmes_parser = subparsers.add_parser(
         "programmes",
         help="materialise / list / inspect / requalify / decide scoped programme rows",
@@ -1200,6 +1227,37 @@ def _cmd_worker(args: argparse.Namespace) -> int:
     finally:
         database.close()
     return 1 if any(summary.failed for summary in summaries) else 0
+
+
+def _cmd_failures(args: argparse.Namespace) -> int:
+    """`fmd failures`: aggregate the scrape-failure log BY INSTITUTION.
+
+    The institution is the thing we lose — the table shows which good
+    universities the scraper lost out on and why (docs §scrape-failures).
+    """
+    from fmd.fetch.failure_log import aggregate, read_failures
+
+    failures = read_failures(since=args.since)
+    agg = aggregate(failures, top_n=args.top)
+    if args.json:
+        print(json.dumps(agg, indent=2))
+        return 0
+
+    rows: list[tuple[str, dict]] = [
+        (name, entry) for name, entry in agg["by_institution"].items()
+    ]
+    unresolved = agg["unresolved"]
+    if unresolved["n"] > 0:
+        rows.append(("(unresolved)", unresolved))
+    rows.sort(key=lambda row: (-row[1]["n"], row[0]))
+
+    print(f"scrape failures: total={agg['total']} since={args.since or 'all'}")
+    for name, entry in rows:
+        kinds = ", ".join(f"{kind}:{count}" for kind, count in entry["kinds"].items())
+        sample = ", ".join(entry.get("sample_urls", []))
+        suffix = f"   sample: {sample}" if sample else ""
+        print(f"{name}   {entry['n']}   kinds: {kinds}{suffix}")
+    return 0
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
@@ -2589,6 +2647,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_verify(args)
         if args.command == "worker":
             return _cmd_worker(args)
+        if args.command == "failures":
+            return _cmd_failures(args)
         if args.command == "eval":
             return _cmd_eval(args)
         if args.command == "llm":
