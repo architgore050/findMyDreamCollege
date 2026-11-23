@@ -31,6 +31,10 @@ data/*
 # rank/grade tables + the raw page copies their sha256 provenance points at
 !data/truth/
 !data/truth/**
+# scrape-failure log (docs/product-development-cycle/18-scrape-failures.md):
+# append-only evidence of what the scraper lost to blocked/failed fetches
+!data/scrape-failures/
+!data/scrape-failures/**
 snapshots/
 *.parquet
 *.warc
