@@ -125,7 +125,7 @@ class Orchestrator:
                 raise OrchestrationError("crawl requires a database or an injected frontier")
             frontier = Frontier.from_database(database)
         self.frontier = frontier
-        self.fetcher = fetcher if fetcher is not None else FetchLadder()
+        self.fetcher = fetcher if fetcher is not None else FetchLadder(stage="crawl")
         self.adapter_factory = adapter_factory or (
             lambda source: build_adapter(
                 source,

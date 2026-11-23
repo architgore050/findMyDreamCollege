@@ -21,6 +21,13 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from urllib.parse import urlencode
 
+from fmd.fetch.failure_log import (
+    FetchFailure,
+    failure_kind_for,
+    institution_hint,
+    is_failure,
+    record_failure,
+)
 from fmd.fetch.politeness import (
     PolitenessManager,
     SystemClock,
@@ -588,6 +595,7 @@ class FetchLadder:
         clock: SystemClock | None = None,
         sleeper: Callable[[float], None] | None = None,
         guard: NetworkGuard | None = None,
+        stage: str | None = None,
     ) -> None:
         self.fetchers = list(fetchers) if fetchers is not None else default_fetchers()
         self.clock = clock or SystemClock()
@@ -601,6 +609,9 @@ class FetchLadder:
         # `Disallow: /` policy. Sharing the instances keeps one client pool.
         self.robots = robots or RobotsCache(clock=self.clock, fetchers=self.fetchers)
         self.sleeper = sleeper or time.sleep
+        # Recorded on every scrape-failure log entry so `fmd failures` can
+        # attribute losses to the pipeline stage that asked for the URL.
+        self.stage = stage
 
     # ------------------------------------------------------------------- helpers
     def _elapsed_ms(self, start: float) -> float:
@@ -639,11 +650,83 @@ class FetchLadder:
         last_modified: str | None = None,
         referer: str | None = None,
     ) -> FetchResult:
+        """One URL through the ladder, with any failure appended to the log.
+
+        This wrapper is the *single* logging exit (:mod:`fmd.fetch.failure_log`):
+        every failure outcome of :meth:`_fetch_impl` — transport exceptions,
+        ``robots_disallowed``, ``domain_quarantined``, ``unsupported_replay``,
+        404/410/4xx/5xx, ``all_tiers_blocked`` — is recorded best-effort, and a
+        stage-level exception (no result to inspect) is recorded too, then
+        re-raised unchanged. Logging never breaks the fetch path.
+        """
         request = (
             url
             if isinstance(url, FetchRequest)
             else FetchRequest(url=url, etag=etag, last_modified=last_modified, referer=referer)
         )
+        start = self.clock.monotonic()
+        try:
+            result = self._fetch_impl(request)
+        except Exception as exc:  # stage-level exit: no result to inspect
+            self._record_failure_if_any(None, request.url, start, exception=exc)
+            raise
+        self._record_failure_if_any(result, request.url, start)
+        return result
+
+    def _record_failure_if_any(
+        self,
+        result: FetchResult | None,
+        url: str,
+        start: float,
+        *,
+        exception: Exception | None = None,
+    ) -> None:
+        """Append one scrape-failure record if this fetch was a failure.
+
+        Best-effort by contract: any error here is swallowed so the fetch path
+        can never break on logging.
+        """
+        try:
+            if result is None:
+                if exception is None:
+                    return
+                record_failure(
+                    FetchFailure(
+                        ts=utcnow(),
+                        url=url,
+                        status=0,
+                        error=str(exception),
+                        kind=type(exception).__name__,
+                        tier="none",
+                        method="GET",
+                        elapsed_ms=self._elapsed_ms(start),
+                        institution=institution_hint(url),
+                        stage=self.stage,
+                    )
+                )
+                return
+            if not is_failure(result):
+                return
+            record_failure(
+                FetchFailure(
+                    ts=utcnow(),
+                    url=url,
+                    final_url=result.final_url,
+                    status=result.status,
+                    error=result.error,
+                    kind=failure_kind_for(result),
+                    tier=result.fetcher_tier,
+                    robots_reason=(result.robots.reason if result.robots else None),
+                    method=result.method or "GET",
+                    elapsed_ms=result.elapsed_ms or self._elapsed_ms(start),
+                    institution=institution_hint(url),
+                    stage=self.stage,
+                )
+            )
+        except Exception:  # noqa: BLE001 - logging must never break the fetch path
+            return
+
+    def _fetch_impl(self, request: FetchRequest) -> FetchResult:
         url = request.url
         method = _method(request)
         self.guard.check()
