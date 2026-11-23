@@ -15,6 +15,18 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_DIR = REPO_ROOT / "config"
 
 
+@pytest.fixture(autouse=True)
+def _scrape_failures_to_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect the scrape-failure log to a tmp dir for every test.
+
+    The log's default directory is committed (`<repo>/data/scrape-failures`);
+    without this fixture any ladder-driven test failure would append test noise
+    to the evidence log. Tests that need a specific directory set
+    ``FMD_SCRAPE_FAILURES_DIR`` themselves (monkeypatch overrides this fixture).
+    """
+    monkeypatch.setenv("FMD_SCRAPE_FAILURES_DIR", str(tmp_path / "scrape-failures"))
+
+
 @pytest.fixture
 def config_dir(tmp_path: Path) -> Path:
     """A mutable copy of the committed registry (never edit config/ in tests)."""
