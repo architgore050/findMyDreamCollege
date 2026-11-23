@@ -114,3 +114,38 @@ Expected: report lists `would_classify_with_text` / `below_floor` / `ambiguous` 
 Commit back: `reports/classify-report.json` + `/tmp/admissions.json` (review by operator);
 DB counts in `docs/v1/STATE.md` if updated.
 Blocks: wave-5 residual reduction, DoD #2/#7 "useful corpus" from real admitted rows.
+
+### LQ-8: NAAC truth ingestion (network-blocked; opportunistic retry)
+Why local: naac.gov.in was unreachable from the cloud sandbox (PR #11 wave) **and**
+from this host (probe 2026-11-23: HTTP 000 after 15s). Ingestion needs a working
+egress path to naac.gov.in; retry opportunistically from here (or via another route).
+Command: (once reachable; contract in `docs/v1/eval/03-truth-ingestion.md` +
+`data/truth/naac/README.md`)
+```
+curl -sI --max-time 25 https://www.naac.gov.in/   # probe first
+# fetch the grades list page, commit the raw copy, build data/truth/naac/naac_grades.yaml
+# with truth_version>=1 + source_sha256 + fetched_at per the ingestion contract, then:
+cd packages/pipeline && uv run python -m fmd.cli eval --eval-kind product --stream naac-proxy
+```
+Expected: `naac_grades.yaml` with real entries + raw page copy whose sha256 the loader
+re-verifies; naac-proxy report with non-trivial coverage (currently honest unknown=1.0).
+Commit back: `data/truth/naac/**` + `reports/eval-naac-proxy-*.json`.
+Blocks: naac-proxy signal, slow-stream ladder step 2. Do NOT fabricate grades.
+
+### LQ-9: verdict live variant + human-audit gate (needs a live-backend wave first)
+Why local: real 26B model + real web research + operator judgment; the ≥70%
+human-agreement gate (docs/v1/eval/04-verdict-audit-protocol.md) is an operator act.
+Precondition: `fmd/eval/verdict.py` ships only `MockVerdictRouter`; a live
+`VerdictBackend` implementation is a small cloud wave (scoring code is untouched by design).
+Command: (after the live-backend wave)
+```
+cd packages/pipeline && set -a && . ../../.env && set +a
+scripts/serve_local.sh start && scripts/serve_local.sh probe
+uv run python -m fmd.cli eval --eval-kind verdict --stream verdict-live --report-out reports/eval-verdict-live-<ts>.json
+scripts/serve_local.sh stop
+# operator: spot-check a random 10-20% of verdicts against their evidence graphs
+```
+Expected: live verdict report; operator agreement ≥70% on the audited subset;
+circularity guard (≥1 external source) passes on every case.
+Commit back: `reports/eval-verdict-live-*.json` + audit notes in `docs/v1/STATE.md`.
+Blocks: verdict stream becoming a product-quality signal (today it proves plumbing only).
