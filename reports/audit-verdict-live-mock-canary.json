@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "stream": "verdict-live",
+  "generated_at": "2026-11-23T08:56:10Z",
+  "seed": 13,
+  "fraction_requested": 0.15,
+  "fraction_used": 0.15,
+  "gate": 0.7,
+  "sampling_rule": "all incorrect/partially_correct verdicts + seeded random fill up to the clamped 10-20% target (docs/v1/eval/04-verdict-audit-protocol.md \u00a72.1)",
+  "n_cases": 5,
+  "entries": [
+    {
+      "profile_id": "canary-02-partially-correct",
+      "verdict": "partially_correct",
+      "rationale": "The shortlist's rank-1 programme is not in the state council's recognised register, but the reference top-3 partially overlaps the product's list (AIIMS appears).",
+      "reference_top3": [
+        "All India Institute of Medical Sciences, Delhi",
+        "Christian Medical College",
+        "Post Graduate Institute of Medical Education and Research"
+      ],
+      "selected_programmes": [
+        {
+          "institution_name": "Vidya Institute of Allied Health Sciences",
+          "programme": "B.Sc. Medical Laboratory Technology",
+          "evidence_tier": "thin"
+        },
+        {
+          "institution_name": "All India Institute of Medical Sciences, Delhi",
+          "programme": "B.Sc. Medical Laboratory Technology",
+          "evidence_tier": "rich"
+        },
+        {
+          "institution_name": "Christian Medical College",
+          "programme": "B.Sc. Medical Laboratory Technology",
+          "evidence_tier": "rich"
+        }
+      ],
+      "evidence": [
+        {
+          "url": "https://fixture.invalid/live/canary-02/vidya-recognition",
+          "title": "State council recognised institutions 2025 (replay stand-in)",
+          "quote": "The Vidya Institute of Allied Health Sciences is not listed in the state council's recognised institutions register.",
+          "sha256": "10ee8b8a2df93ea74d9f94d96a3112e4ee05c39a8d653741355f77dd7c417c84",
+          "fetched_at": "2026-11-23T08:56:10Z",
+          "source_kind": "official",
+          "external": true
+        },
+        {
+          "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+          "title": "NIRF 2025 Medical rank list (replay stand-in)",
+          "quote": "All India Institute of Medical Sciences, Delhi - Rank 1",
+          "sha256": "467e509157b198ad81c217c4548b2826ce30057072d8234947d8c4311f55f4b3",
+          "fetched_at": "2026-11-23T08:56:10Z",
+          "source_kind": "ranking",
+          "external": false
+        }
+      ],
+      "audit_failures": [],
+      "reverify_failures": [],
+      "fetch_ledger": [
+        {
+          "url": "https://fixture.invalid/live/canary-02/vidya-recognition",
+          "final_url": "https://fixture.invalid/live/canary-02/vidya-recognition",
+          "status": 200,
+          "sha256": "10ee8b8a2df93ea74d9f94d96a3112e4ee05c39a8d653741355f77dd7c417c84",
+          "fetched_at": "2026-11-23T08:56:10Z",
+          "n_bytes": 316
+        },
+        {
+          "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+          "final_url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+          "status": 200,
+          "sha256": "467e509157b198ad81c217c4548b2826ce30057072d8234947d8c4311f55f4b3",
+          "fetched_at": "2026-11-23T08:56:10Z",
+          "n_bytes": 494
+        }
+      ],
+      "unknown_aspects": [],
+      "as_of": "2026-11-22",
+      "operator_agreement": null
+    },
+    {
+      "profile_id": "canary-03-incorrect",
+      "verdict": "incorrect",
+      "rationale": "Two of the three recommended programmes have no recognition record in the state register; the research-backed reference top-3 disagrees with the product's ranking.",
+      "reference_top3": [
+        "All India Institute of Medical Sciences, Delhi",
+        "Christian Medical College",
+        "Post Graduate Institute of Medical Education and Research"
+      ],
+      "selected_programmes": [
+        {
+          "institution_name": "Sunrise Institute of Paramedical Sciences",
+          "programme": "B.Sc. Medical Laboratory Technology",
+          "evidence_tier": "none"
+        },
+        {
+          "institution_name": "City Care Paramedical College, Hyderabad",
+          "programme": "B.Sc. Medical Laboratory Technology",
+          "evidence_tier": "thin"
+        },
+        {
+          "institution_name": "All India Institute of Medical Sciences, Delhi",
+          "programme": "B.Sc. Medical Laboratory Technology",
+          "evidence_tier": "rich"
+        }
+      ],
+      "evidence": [
+        {
+          "url": "https://www.nirfindia.org/Rankings/2025/OverallRanking.html",
+          "title": "NIRF 2025 overall ranking (replay stand-in)",
+          "quote": "All India Institute of Medical Sciences, Delhi - Rank 1",
+          "sha256": "467e509157b198ad81c217c4548b2826ce30057072d8234947d8c4311f55f4b3",
+          "fetched_at": "2026-11-23T08:56:10Z",
+          "source_kind": "ranking",
+          "external": false
+        },
+        {
+          "url": "https://fixture.invalid/live/canary-03/sunrise-recognition",
+          "title": "State register 2025 (replay stand-in)",
+          "quote": "No record of recognition was found for the Sunrise Institute of Paramedical Sciences in the 2025 register.",
+          "sha256": "48a6803dc2f1b2c1a172b7906ce71117027b9b89eafe9a241709b3b25e29b84d",
+          "fetched_at": "2026-11-23T08:56:10Z",
+          "source_kind": "official",
+          "external": true
+        },
+        {
+          "url": "https://fixture.invalid/live/canary-03/aiims-programme",
+          "title": "AIIMS B.Sc. MLT programme page (replay stand-in)",
+          "quote": "AIIMS Delhi offers the B.Sc. (Hons.) in Medical Laboratory Technology through its own entrance examination.",
+          "sha256": "32acf8631aa100f776f5bb178023f6da7044e20048a49ccc91851d5b857e57ab",
+          "fetched_at": "2026-11-23T08:56:10Z",
+          "source_kind": "institution",
+          "external": true
+        }
+      ],
+      "audit_failures": [],
+      "reverify_failures": [],
+      "fetch_ledger": [
+        {
+          "url": "https://www.nirfindia.org/Rankings/2025/OverallRanking.html",
+          "final_url": "https://www.nirfindia.org/Rankings/2025/OverallRanking.html",
+          "status": 200,
+          "sha256": "467e509157b198ad81c217c4548b2826ce30057072d8234947d8c4311f55f4b3",
+          "fetched_at": "2026-11-23T08:56:10Z",
+          "n_bytes": 494
+        },
+        {
+          "url": "https://fixture.invalid/live/canary-03/sunrise-recognition",
+          "final_url": "https://fixture.invalid/live/canary-03/sunrise-recognition",
+          "status": 200,
+          "sha256": "48a6803dc2f1b2c1a172b7906ce71117027b9b89eafe9a241709b3b25e29b84d",
+          "fetched_at": "2026-11-23T08:56:10Z",
+          "n_bytes": 271
+        },
+        {
+          "url": "https://fixture.invalid/live/canary-03/aiims-programme",
+          "final_url": "https://fixture.invalid/live/canary-03/aiims-programme",
+          "status": 200,
+          "sha256": "32acf8631aa100f776f5bb178023f6da7044e20048a49ccc91851d5b857e57ab",
+          "fetched_at": "2026-11-23T08:56:10Z",
+          "n_bytes": 263
+        }
+      ],
+      "unknown_aspects": [],
+      "as_of": "2026-11-22",
+      "operator_agreement": null
+    }
+  ]
+}
