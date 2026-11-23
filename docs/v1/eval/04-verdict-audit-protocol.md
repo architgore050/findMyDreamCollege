@@ -84,3 +84,54 @@ protocol is already defined in `fmd/eval/verdict.py`), runs live research under 
 robots/politeness rules, and costs minutes-to-tens-of-minutes per profile. Build order when it is
 funded: 5-profile pilot → human audit (this protocol) → only then expansion. Cost per profile and
 audit hours are the limiting factor, not compute.
+
+## 5. Implemented (FMD-CLOUD-024 / w13) — this protocol is now executable
+
+The slow variant above is built: `fmd/eval/verdict_live.py` (`LiveVerdictBackend`) implements the
+same `VerdictBackend` protocol as the fast canary, so §2 above is no longer a paper protocol — it
+has CLI surfaces. The history of this document is unchanged; everything below was added by the
+verdict-live wave.
+
+What exists (harness-side guarantees unchanged):
+
+- **Bounded research loop** through the provider-agnostic router: one action per model turn —
+  `fetch_url` (routed through `fmd/fetch`: robots.txt, per-domain rate limits, truthful UA; no
+  auth/CAPTCHA bypass), `cite_source` (verbatim quote of a page fetched *in that run*), or
+  `emit_verdict`. Hard caps in code: `--max-turns` (default 8) and `--max-fetches` (default 6).
+- **The model never scores and never hashes.** The turn schema is `extra="forbid"`, so a response
+  carrying a score or an undeclared field is rejected as a schema violation. `sha256` of every
+  evidence pointer is computed by the harness over the exact bytes the fetch layer stored, and
+  `run_verdict_live` re-verifies every pointer against that ledger (a tampered page or a pointer
+  the fetch layer never stored fails the case).
+- **UNKNOWN is a first-class output** (§3): the system prompt instructs the model to prefer
+  `unknown` over guessing, and a loop that hits a cap or a fatal model error degrades to an honest
+  `unknown` verdict whose `unknown_aspects` name the stop reason. It is never coerced to a label.
+- **Circularity guard untouched**: still enforced by `audit_verdict` in `fmd/eval/verdict.py`.
+- **Replay first**: in tests/CI the `verdict_live` router profile resolves to the mock provider and
+  the stream replays committed scripted sessions
+  (`packages/pipeline/tests/fixtures/eval_verdict/live/sessions/`); the live stream has **never**
+  run against a real model yet — the first real run is the operator's (LQ-9, doc 07 runbook).
+
+Exact commands (all from `packages/pipeline/`; offline ones need no model host):
+
+1. Offline replay run (CI parity; exit 0, no network, no model):
+   `FMD_VERDICT_LIVE_PROVIDER=mock uv run python -m fmd.cli eval --eval-kind verdict --stream verdict-live --dry-run`
+2. Live run with report (operator host, model server up — see `07-verdict-live-runbook.md`):
+   `uv run python -m fmd.cli eval --eval-kind verdict --stream verdict-live --report-out reports/eval-verdict-live-<ts>.json`
+3. §2.1 sampling — pass `--audit-sample 0.15 --audit-seed 13` on the run invocation (the worksheet
+   is built from that run's cases; sampling is deterministic for a given seed, the seed is recorded
+   in the worksheet). Writes `reports/audit-verdict-live-<ts>.json`: per sampled case the full
+   evidence graph (url, title, quote, sha256, fetched_at, source_kind, external) plus the fetch
+   ledger, with an empty `operator_agreement` field. Every `incorrect` and `partially_correct`
+   verdict is always sampled; the seeded RNG fills the rest up to the clamped 10–20 % band, so
+   `n_sampled` may exceed the random band when the run itself has many failures.
+4. §2.3 gate — after the auditor completes the worksheet (fill `operator_agreement` with
+   `{"agrees": bool, "citation_ok": bool, "reason": str}`):
+   `uv run python -m fmd.cli eval --eval-kind verdict --audit-score reports/audit-verdict-live-<ts>.json`
+   prints the harness-computed agreement rate and PASS/FAIL/INSUFFICIENT (exit 0/1/3) against the
+   ≥70 % gate. A `citation_ok: false` finding fails the whole run regardless of the rate (§2.3).
+   The gate is REPORTED, never enforced in CI (no operator exists in CI).
+
+Limitation, stated honestly: the worksheet must be sampled in the same invocation as the run
+(`--audit-sample` reads that run's cases); regenerating a worksheet from an already-written report
+JSON is not implemented — re-run with the flag if the report was written without it.
