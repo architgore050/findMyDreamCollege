@@ -4,7 +4,7 @@
  * dispute path) and degrade to a named failure state — never invent content.
  */
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MethodologyClient } from "@/components/methodology-client";
