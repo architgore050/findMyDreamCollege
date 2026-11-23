@@ -32,6 +32,7 @@ def test_eval_unknown_stream_is_a_usage_error(capsys) -> None:
         ["eval", "--eval-kind", "product", "--stream", "naac-proxy", "--dry-run"],
         ["eval", "--eval-kind", "product", "--stream", "self-drift", "--dry-run"],
         ["eval", "--eval-kind", "product", "--stream", "cv-stability", "--dry-run"],
+        ["eval", "--eval-kind", "product", "--stream", "prompt-effectiveness", "--dry-run"],
         ["eval", "--eval-kind", "product", "--stream", "expert-panel", "--dry-run"],
         ["eval", "--eval-kind", "verdict", "--stream", "verdict-fast", "--dry-run"],
         [
