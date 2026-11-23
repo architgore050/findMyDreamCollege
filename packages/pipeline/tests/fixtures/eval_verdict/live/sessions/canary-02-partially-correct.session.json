@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "profile_id": "canary-02-partially-correct",
+  "notes": "Live replay 2/5: partially_correct (product rank 1 is unrecognised; two of the reference top-3 are missing from the shortlist).",
+  "pages": [
+    {
+      "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+      "status": 200,
+      "body": "<!DOCTYPE html>\n<html><head><title>NIRF 2025 Medical (session stand-in)</title></head>\n<body><h1>NIRF India Rankings 2025: Medical (replay stand-in body)</h1>\n<table>\n<tr><td>All India Institute of Medical Sciences, Delhi - Rank 1</td></tr>\n<tr><td>Post Graduate Institute of Medical Education and Research - Rank 2</td></tr>\n<tr><td>Christian Medical College - Rank 3</td></tr>\n</table>\n<p>Structural replay body for the verdict-live sessions; not the committed truth copy.</p>\n</body></html>\n"
+    },
+    {
+      "url": "https://fixture.invalid/live/canary-02/vidya-recognition",
+      "status": 200,
+      "body": "<!DOCTYPE html>\n<html><head><title>State council recognised institutions 2025 (replay stand-in)</title></head>\n<body><h1>Recognised paramedical institutions, 2025 register</h1>\n<p>The Vidya Institute of Allied Health Sciences is not listed in the state council's recognised institutions register.</p>\n</body></html>\n"
+    }
+  ],
+  "turns": [
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/canary-02/vidya-recognition",
+        "note": "the product ranks Vidya first; check its recognition status"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+        "note": "independent reference ranking"
+      }
+    },
+    {
+      "content": {
+        "action": "cite_source",
+        "url": "https://fixture.invalid/live/canary-02/vidya-recognition",
+        "quote": "The Vidya Institute of Allied Health Sciences is not listed in the state council's recognised institutions register.",
+        "title": "State council recognised institutions 2025 (replay stand-in)",
+        "source_kind": "official"
+      }
+    },
+    {
+      "content": {
+        "action": "cite_source",
+        "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+        "quote": "All India Institute of Medical Sciences, Delhi - Rank 1",
+        "title": "NIRF 2025 Medical rank list (replay stand-in)",
+        "source_kind": "ranking"
+      }
+    },
+    {
+      "content": {
+        "action": "emit_verdict",
+        "verdict": {
+          "profile_id": "canary-02-partially-correct",
+          "verdict": "partially_correct",
+          "rationale": "The shortlist's rank-1 programme is not in the state council's recognised register, but the reference top-3 partially overlaps the product's list (AIIMS appears).",
+          "reference_top3": [
+            "All India Institute of Medical Sciences, Delhi",
+            "Christian Medical College",
+            "Post Graduate Institute of Medical Education and Research"
+          ],
+          "selected_programmes": [
+            {
+              "institution_name": "Vidya Institute of Allied Health Sciences",
+              "programme": "B.Sc. Medical Laboratory Technology",
+              "evidence_tier": "thin"
+            },
+            {
+              "institution_name": "All India Institute of Medical Sciences, Delhi",
+              "programme": "B.Sc. Medical Laboratory Technology",
+              "evidence_tier": "rich"
+            },
+            {
+              "institution_name": "Christian Medical College",
+              "programme": "B.Sc. Medical Laboratory Technology",
+              "evidence_tier": "rich"
+            }
+          ],
+          "as_of": "2026-11-22"
+        }
+      }
+    }
+  ]
+}

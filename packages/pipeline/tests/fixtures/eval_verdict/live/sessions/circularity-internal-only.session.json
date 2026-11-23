@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "profile_id": "live-circularity-internal",
+  "notes": "Test session: the verdict cites only the product's own ingested evidence URL, so the circularity guard (>=1 external source) must fail the audit.",
+  "pages": [
+    {
+      "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+      "status": 200,
+      "body": "<!DOCTYPE html>\n<html><head><title>NIRF 2025 Medical (session stand-in)</title></head>\n<body><h1>NIRF India Rankings 2025: Medical (replay stand-in body)</h1>\n<table>\n<tr><td>All India Institute of Medical Sciences, Delhi - Rank 1</td></tr>\n<tr><td>Post Graduate Institute of Medical Education and Research - Rank 2</td></tr>\n<tr><td>Christian Medical College - Rank 3</td></tr>\n</table>\n<p>Structural replay body for the verdict-live sessions; not the committed truth copy.</p>\n</body></html>\n"
+    }
+  ],
+  "turns": [
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+        "note": "the only page the model looks at"
+      }
+    },
+    {
+      "content": {
+        "action": "cite_source",
+        "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+        "quote": "All India Institute of Medical Sciences, Delhi - Rank 1",
+        "title": "NIRF 2025 Medical rank list (replay stand-in)",
+        "source_kind": "ranking"
+      }
+    },
+    {
+      "content": {
+        "action": "emit_verdict",
+        "verdict": {
+          "profile_id": "live-circularity-internal",
+          "verdict": "correct",
+          "rationale": "Confirmed entirely from the product's own source.",
+          "reference_top3": [
+            "All India Institute of Medical Sciences, Delhi",
+            "Post Graduate Institute of Medical Education and Research",
+            "Christian Medical College"
+          ],
+          "as_of": "2026-11-22"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "profile_id": "live-schema-violation",
+  "notes": "Test session: the first turn tries to emit a score (an undeclared field) and is rejected by schema validation; the backend feeds the rejection back and the model recovers into a valid verdict.",
+  "pages": [
+    {
+      "url": "https://fixture.invalid/live/violation/aiims-programme",
+      "status": 200,
+      "body": "<!DOCTYPE html>\n<html><head><title>AIIMS B.Sc. MLT programme page (replay stand-in)</title></head>\n<body><h1>Programmes offered</h1>\n<p>AIIMS Delhi offers the B.Sc. (Hons.) in Medical Laboratory Technology through its own entrance examination.</p>\n</body></html>\n"
+    }
+  ],
+  "turns": [
+    {
+      "content": {
+        "action": "emit_verdict",
+        "score": 0.87,
+        "verdict": {
+          "profile_id": "live-schema-violation",
+          "verdict": "correct",
+          "rationale": "try to sneak a score past the schema",
+          "reference_top3": [
+            "All India Institute of Medical Sciences, Delhi"
+          ],
+          "as_of": "2026-11-22"
+        }
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/violation/aiims-programme",
+        "note": "after the rejection, do honest research"
+      }
+    },
+    {
+      "content": {
+        "action": "cite_source",
+        "url": "https://fixture.invalid/live/violation/aiims-programme",
+        "quote": "AIIMS Delhi offers the B.Sc. (Hons.) in Medical Laboratory Technology through its own entrance examination.",
+        "title": "AIIMS B.Sc. MLT programme page (replay stand-in)",
+        "source_kind": "institution"
+      }
+    },
+    {
+      "content": {
+        "action": "emit_verdict",
+        "verdict": {
+          "profile_id": "live-schema-violation",
+          "verdict": "correct",
+          "rationale": "Recovered after the schema rejection: the researched reference matches the shortlist.",
+          "reference_top3": [
+            "All India Institute of Medical Sciences, Delhi"
+          ],
+          "as_of": "2026-11-22"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "profile_id": "canary-05-correct-thin-negative",
+  "notes": "Live replay 5/5: correct with an honest negative (a shortlisted programme with no evidence is kept in the verdict, not hidden).",
+  "pages": [
+    {
+      "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+      "status": 200,
+      "body": "<!DOCTYPE html>\n<html><head><title>NIRF 2025 Medical (session stand-in)</title></head>\n<body><h1>NIRF India Rankings 2025: Medical (replay stand-in body)</h1>\n<table>\n<tr><td>All India Institute of Medical Sciences, Delhi - Rank 1</td></tr>\n<tr><td>Post Graduate Institute of Medical Education and Research - Rank 2</td></tr>\n<tr><td>Christian Medical College - Rank 3</td></tr>\n</table>\n<p>Structural replay body for the verdict-live sessions; not the committed truth copy.</p>\n</body></html>\n"
+    },
+    {
+      "url": "https://fixture.invalid/live/canary-05/pgimer-internship",
+      "status": 200,
+      "body": "<!DOCTYPE html>\n<html><head><title>PGIMER B.Sc. MLT internship structure (replay stand-in)</title></head>\n<body><h1>Internship structure</h1>\n<p>The B.Sc. Medical Laboratory Technology programme at PGIMER includes a 12-month rotary internship.</p>\n</body></html>\n"
+    },
+    {
+      "url": "https://fixture.invalid/live/canary-05/lakeview-no-record",
+      "status": 200,
+      "body": "<!DOCTYPE html>\n<html><head><title>Lakeview Institute - records search (replay stand-in)</title></head>\n<body><h1>Registry search results</h1>\n<p>No NIRF or state-council record was found for the Lakeview Institute of Paramedical Education.</p>\n</body></html>\n"
+    }
+  ],
+  "turns": [
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+        "note": "independent reference ranking"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/canary-05/pgimer-internship",
+        "note": "internship structure of the rank-1 programme"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/canary-05/lakeview-no-record",
+        "note": "the shortlist's rank-3 row has no evidence in the product; check it"
+      }
+    },
+    {
+      "content": {
+        "action": "cite_source",
+        "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+        "quote": "Post Graduate Institute of Medical Education and Research - Rank 2",
+        "title": "NIRF 2025 Medical rank list (replay stand-in)",
+        "source_kind": "ranking"
+      }
+    },
+    {
+      "content": {
+        "action": "cite_source",
+        "url": "https://fixture.invalid/live/canary-05/pgimer-internship",
+        "quote": "The B.Sc. Medical Laboratory Technology programme at PGIMER includes a 12-month rotary internship.",
+        "title": "PGIMER B.Sc. MLT internship page (replay stand-in)",
+        "source_kind": "institution"
+      }
+    },
+    {
+      "content": {
+        "action": "cite_source",
+        "url": "https://fixture.invalid/live/canary-05/lakeview-no-record",
+        "quote": "No NIRF or state-council record was found for the Lakeview Institute of Paramedical Education.",
+        "title": "Lakeview Institute registry search (replay stand-in)",
+        "source_kind": "official"
+      }
+    },
+    {
+      "content": {
+        "action": "emit_verdict",
+        "verdict": {
+          "profile_id": "canary-05-correct-thin-negative",
+          "verdict": "correct",
+          "rationale": "The reference top-3 agrees with the product's evidence-backed ranks; the product's rank-3 row has no supporting record, reported as a thin/none honest negative.",
+          "reference_top3": [
+            "All India Institute of Medical Sciences, Delhi",
+            "Post Graduate Institute of Medical Education and Research",
+            "Christian Medical College"
+          ],
+          "selected_programmes": [
+            {
+              "institution_name": "Post Graduate Institute of Medical Education and Research",
+              "programme": "B.Sc. Medical Laboratory Technology",
+              "evidence_tier": "rich"
+            },
+            {
+              "institution_name": "Lakeview Institute of Paramedical Education",
+              "programme": "B.Sc. Medical Laboratory Technology",
+              "evidence_tier": "none"
+            }
+          ],
+          "as_of": "2026-11-22"
+        }
+      }
+    }
+  ]
+}

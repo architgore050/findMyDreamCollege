@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "profile_id": "canary-01-correct",
+  "notes": "Live replay 1/5: correct. External hosts are RFC-2606 .invalid fixtures; the NIRF URL body is a synthetic stand-in (sha256 differs from the truth copy on purpose). Quotes are verbatim substrings of these bodies.",
+  "pages": [
+    {
+      "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+      "status": 200,
+      "body": "<!DOCTYPE html>\n<html><head><title>NIRF 2025 Medical (session stand-in)</title></head>\n<body><h1>NIRF India Rankings 2025: Medical (replay stand-in body)</h1>\n<table>\n<tr><td>All India Institute of Medical Sciences, Delhi - Rank 1</td></tr>\n<tr><td>Post Graduate Institute of Medical Education and Research - Rank 2</td></tr>\n<tr><td>Christian Medical College - Rank 3</td></tr>\n</table>\n<p>Structural replay body for the verdict-live sessions; not the committed truth copy.</p>\n</body></html>\n"
+    },
+    {
+      "url": "https://fixture.invalid/live/canary-01/aiims-curriculum",
+      "status": 200,
+      "body": "<!DOCTYPE html>\n<html><head><title>AIIMS Delhi B.Sc. MLT curriculum (replay stand-in)</title></head>\n<body><h1>Department of Laboratory Medicine - academic programmes</h1>\n<p>The B.Sc. Medical Laboratory Technology programme runs 4 years with a 12-month internship.</p>\n<p>Admissions are conducted through the institute's own entrance examination.</p>\n</body></html>\n"
+    },
+    {
+      "url": "https://fixture.invalid/live/canary-01/cmc-allied-health",
+      "status": 200,
+      "body": "<!DOCTYPE html>\n<html><head><title>CMC Vellore allied-health admissions (replay stand-in)</title></head>\n<body><h1>Allied Health Sciences - admissions</h1>\n<p>Admissions to allied health sciences are through the institution's own entrance process.</p>\n</body></html>\n"
+    }
+  ],
+  "turns": [
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+        "note": "the product cites this ranking page; verify it independently"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/canary-01/aiims-curriculum",
+        "note": "curriculum and internship structure for the rank-1 programme"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/canary-01/cmc-allied-health",
+        "note": "admissions route for the rank-3 programme"
+      }
+    },
+    {
+      "content": {
+        "action": "cite_source",
+        "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
+        "quote": "All India Institute of Medical Sciences, Delhi - Rank 1",
+        "title": "NIRF 2025 Medical rank list (replay stand-in)",
+        "source_kind": "ranking"
+      }
+    },
+    {
+      "content": {
+        "action": "cite_source",
+        "url": "https://fixture.invalid/live/canary-01/aiims-curriculum",
+        "quote": "The B.Sc. Medical Laboratory Technology programme runs 4 years with a 12-month internship.",
+        "title": "AIIMS B.Sc. MLT curriculum page (replay stand-in)",
+        "source_kind": "institution"
+      }
+    },
+    {
+      "content": {
+        "action": "cite_source",
+        "url": "https://fixture.invalid/live/canary-01/cmc-allied-health",
+        "quote": "Admissions to allied health sciences are through the institution's own entrance process.",
+        "title": "CMC allied-health admissions page (replay stand-in)",
+        "source_kind": "institution"
+      }
+    },
+    {
+      "content": {
+        "action": "emit_verdict",
+        "verdict": {
+          "profile_id": "canary-01-correct",
+          "verdict": "correct",
+          "rationale": "The product's top-3 matches the reference built from the ranking page and two independently researched institution pages; no counter-evidence found.",
+          "reference_top3": [
+            "All India Institute of Medical Sciences, Delhi",
+            "Post Graduate Institute of Medical Education and Research",
+            "Christian Medical College"
+          ],
+          "selected_programmes": [
+            {
+              "institution_name": "All India Institute of Medical Sciences, Delhi",
+              "programme": "B.Sc. Medical Laboratory Technology",
+              "evidence_tier": "rich"
+            },
+            {
+              "institution_name": "Christian Medical College",
+              "programme": "B.Sc. Medical Laboratory Technology",
+              "evidence_tier": "rich"
+            }
+          ],
+          "as_of": "2026-11-22"
+        }
+      }
+    }
+  ]
+}

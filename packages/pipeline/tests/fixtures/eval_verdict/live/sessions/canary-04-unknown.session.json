@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "profile_id": "canary-04-unknown",
+  "notes": "Live replay 4/5: unknown (the fetched register does not match any shortlist institution; the research is thin, so the verdict stays unknown instead of guessing).",
+  "pages": [
+    {
+      "url": "https://fixture.invalid/live/canary-04/state-list-search",
+      "status": 200,
+      "body": "<!DOCTYPE html>\n<html><head><title>District paramedical register (replay stand-in)</title></head>\n<body><h1>Registered paramedical colleges in the district</h1>\n<p>The district register lists three paramedical colleges, and none of them matches the names on the product's shortlist.</p>\n<p>Contact details of the registering authority are on the next page.</p>\n</body></html>\n"
+    }
+  ],
+  "turns": [
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/canary-04/state-list-search",
+        "note": "find the shortlisted colleges in the district register"
+      }
+    },
+    {
+      "content": {
+        "action": "cite_source",
+        "url": "https://fixture.invalid/live/canary-04/state-list-search",
+        "quote": "The district register lists three paramedical colleges, and none of them matches the names on the product's shortlist.",
+        "title": "District paramedical register (replay stand-in)",
+        "source_kind": "official"
+      }
+    },
+    {
+      "content": {
+        "action": "emit_verdict",
+        "verdict": {
+          "profile_id": "canary-04-unknown",
+          "verdict": "unknown",
+          "rationale": "The fetched register does not match any shortlisted institution and no national ranking evidence was reachable; the evidence is too thin to score the shortlist.",
+          "unknown_aspects": [
+            "recognition status of all three recommended institutions",
+            "internship structure (hours/months) at each institution",
+            "whether a better-evidenced programme exists in the same state"
+          ],
+          "as_of": "2026-11-22"
+        }
+      }
+    }
+  ]
+}

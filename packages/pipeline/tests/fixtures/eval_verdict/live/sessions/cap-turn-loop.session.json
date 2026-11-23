@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "profile_id": "live-cap-turn-loop",
+  "notes": "Test session: the model keeps asking for fetches. The loop must stop at the hard turn cap (8) and the hard fetch cap (6) and degrade to unknown.",
+  "pages": [
+    {
+      "url": "https://fixture.invalid/live/cap/page-1",
+      "status": 200,
+      "body": "<html>cap fixture page 1</html>"
+    },
+    {
+      "url": "https://fixture.invalid/live/cap/page-2",
+      "status": 200,
+      "body": "<html>cap fixture page 2</html>"
+    },
+    {
+      "url": "https://fixture.invalid/live/cap/page-3",
+      "status": 200,
+      "body": "<html>cap fixture page 3</html>"
+    }
+  ],
+  "turns": [
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/cap/page-1",
+        "note": "research loop keeps going"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/cap/page-2",
+        "note": "research loop keeps going"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/cap/page-3",
+        "note": "research loop keeps going"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/cap/page-4",
+        "note": "research loop keeps going"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/cap/page-5",
+        "note": "research loop keeps going"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/cap/page-6",
+        "note": "research loop keeps going"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/cap/page-7",
+        "note": "research loop keeps going"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/cap/page-8",
+        "note": "research loop keeps going"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/cap/page-9",
+        "note": "research loop keeps going"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/cap/page-10",
+        "note": "research loop keeps going"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/cap/page-11",
+        "note": "research loop keeps going"
+      }
+    },
+    {
+      "content": {
+        "action": "fetch_url",
+        "url": "https://fixture.invalid/live/cap/page-12",
+        "note": "research loop keeps going"
+      }
+    }
+  ]
+}
