@@ -311,13 +311,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "self-drift",
             "cv-stability",
             "verdict-fast",
+            "verdict-live",
             "expert-panel",
         ],
         default=None,
         help=(
             "product/verdict stream to run: nirf-proxy|naac-proxy|self-drift|"
-            "cv-stability|expert-panel (--eval-kind product) or verdict-fast "
-            "(--eval-kind verdict)"
+            "cv-stability|expert-panel (--eval-kind product) or verdict-fast|"
+            "verdict-live (--eval-kind verdict)"
         ),
     )
     eval_parser.add_argument(
@@ -364,6 +365,45 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="product/verdict kinds: compute and print a summary without writing a report",
+    )
+    eval_parser.add_argument(
+        "--audit-sample",
+        type=float,
+        default=None,
+        help=(
+            "verdict-live: sample a seeded random 10-20 percent of verdict cases "
+            "(fraction is clamped into that band) and write an audit worksheet JSON "
+            "next to the report; every incorrect/partially_correct verdict is always "
+            "sampled (docs/v1/eval/04-verdict-audit-protocol.md section 2.1)"
+        ),
+    )
+    eval_parser.add_argument(
+        "--audit-seed",
+        type=int,
+        default=13,
+        help="seed for --audit-sample (recorded in the worksheet; default 13)",
+    )
+    eval_parser.add_argument(
+        "--audit-score",
+        default=None,
+        metavar="WORKSHEET_JSON",
+        help=(
+            "verdict: score a completed audit worksheet against the >=70 percent "
+            "human-agreement gate and print PASS/FAIL/INSUFFICIENT (exit 0/1/3); "
+            "the gate is reported, never enforced in CI"
+        ),
+    )
+    eval_parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=8,
+        help="verdict-live: hard cap on model turns per profile (default 8)",
+    )
+    eval_parser.add_argument(
+        "--max-fetches",
+        type=int,
+        default=6,
+        help="verdict-live: hard cap on fetches per profile (default 6)",
     )
 
     score_parser = subparsers.add_parser(
@@ -1394,7 +1434,14 @@ def _cmd_eval_expert_panel(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval_verdict(args: argparse.Namespace) -> int:
-    """Verdict streams: the verdict-fast canary (offline, mock router)."""
+    """Verdict streams: the verdict-fast canary and the verdict-live backend."""
+
+    audit_score = getattr(args, "audit_score", None)
+    if audit_score:
+        return _cmd_eval_audit_score(args)
+    stream = args.stream
+    if stream == "verdict-live":
+        return _cmd_eval_verdict_live(args)
 
     from fmd.eval.product import build_product_report
     from fmd.eval.product import write_report as write_product_report
@@ -1406,11 +1453,9 @@ def _cmd_eval_verdict(args: argparse.Namespace) -> int:
         verdict_aggregate,
     )
 
-    stream = args.stream
     if stream != "verdict-fast":
         print(
-            "fmd eval: --eval-kind verdict supports --stream verdict-fast "
-            "(slow live-research variant is not built; docs/v1/eval/04-verdict-audit-protocol.md)",
+            "fmd eval: --eval-kind verdict supports --stream verdict-fast|verdict-live",
             file=sys.stderr,
         )
         return 2
@@ -1433,6 +1478,232 @@ def _cmd_eval_verdict(args: argparse.Namespace) -> int:
     print(render_verdict_summary(report))
     if report_path is not None:
         print(f"  report: {report_path}")
+    return 0
+
+
+def _cmd_eval_audit_score(args: argparse.Namespace) -> int:
+    """--audit-score: harness-computed agreement rate vs the >=70% gate (doc 04).
+
+    The gate is REPORTED, never enforced in CI (no operator exists in CI).
+    Exit codes: 0 PASS, 1 FAIL, 3 INSUFFICIENT.
+    """
+
+    from pydantic import ValidationError
+
+    from fmd.eval.verdict_live import AuditWorksheet, score_audit_worksheet
+
+    path = Path(args.audit_score)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"fmd eval: cannot read audit worksheet {path}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        worksheet = AuditWorksheet.model_validate(payload)
+    except ValidationError as exc:
+        print(f"fmd eval: audit worksheet {path} is not schema-valid: {exc}", file=sys.stderr)
+        return 1
+    outcome = score_audit_worksheet(worksheet)
+    print(f"fmd eval (audit-score): worksheet {path}")
+    print(
+        "  sampled {n} verdict(s), completed {m} operator audit(s), "
+        "agreement_rate {rate}, gate {gate}".format(
+            n=outcome["n_sampled"],
+            m=outcome["n_completed"],
+            rate=outcome["agreement_rate"],
+            gate=outcome["gate"],
+        )
+    )
+    for disagreement in outcome["disagreements"]:
+        print(
+            "  disagreement: {profile_id} agent={agent_verdict} — {reason}".format(
+                **disagreement
+            )
+        )
+    if outcome["fabricated_citations"]:
+        print(
+            "  fabricated citation finding(s): "
+            + ", ".join(outcome["fabricated_citations"])
+            + " — whole run quarantined (doc 04 section 2.3)"
+        )
+    print(f"  result: {outcome['result']} — {outcome['reason']}")
+    print("  note: the gate is reported, never enforced in CI (no operator in CI)")
+    if outcome["result"] == "PASS":
+        return 0
+    return 3 if outcome["result"] == "INSUFFICIENT" else 1
+
+
+def _cmd_eval_verdict_live(args: argparse.Namespace) -> int:
+    """verdict-live: the bounded live-research backend (replay in CI, live on host).
+
+    Router resolution: the ``verdict_live`` profile in config/models.yaml. In
+    tests/CI (FMD_VERDICT_LIVE_PROVIDER=mock, a replay provider) the stream
+    replays committed scripted sessions and never touches the network; on the
+    operator's host it resolves to the configured local profile and fetches go
+    through the fetch ladder (robots.txt, rate limits, truthful UA).
+    """
+
+    from datetime import UTC, datetime
+
+    from fmd.eval.product import build_product_report
+    from fmd.eval.product import write_report as write_product_report
+    from fmd.eval.verdict import VerdictError, load_profile_fixtures
+    from fmd.eval.verdict_live import (
+        VERDICT_LIVE_PURPOSE,
+        LiveVerdictBackend,
+        ScriptedModelRouter,
+        ScriptedPageFetcher,
+        build_audit_worksheet,
+        clamp_audit_fraction,
+        load_live_sessions,
+        render_verdict_live_summary,
+        run_verdict_live,
+        verdict_live_aggregate,
+    )
+    from fmd.llm.doctor import profile_blockers, profile_remediation
+    from fmd.llm.providers import LLMError
+    from fmd.llm.router import ModelRouter
+
+    repo_root = Path(__file__).resolve().parents[3]
+    fixture_dir = Path(args.fixture_path) if args.fixture_path else (
+        repo_root / "packages" / "pipeline" / "tests" / "fixtures" / "eval_verdict" / "profiles"
+    )
+    sessions_dir = fixture_dir.parent / "live" / "sessions"
+    try:
+        profiles = load_profile_fixtures(fixture_dir)
+    except VerdictError as exc:
+        print(f"fmd eval: {exc}", file=sys.stderr)
+        return 1
+
+    router = ModelRouter()
+    profile_cfg = router.models.profiles.get(VERDICT_LIVE_PURPOSE)
+    if profile_cfg is None:
+        print(
+            f"fmd eval: config/models.yaml has no {VERDICT_LIVE_PURPOSE!r} profile; "
+            "the verdict-live stream cannot resolve its model",
+            file=sys.stderr,
+        )
+        return 1
+    provider_name = profile_cfg.provider
+    provider_cfg = router.models.providers.get(provider_name)
+    if provider_cfg is None:
+        print(
+            f"fmd eval: provider {provider_name!r} for {VERDICT_LIVE_PURPOSE!r} is not "
+            "declared in config/models.yaml",
+            file=sys.stderr,
+        )
+        return 1
+    replay_mode = provider_cfg.kind == "replay"
+
+    try:
+        if replay_mode:
+            sessions = load_live_sessions(sessions_dir)
+            missing = [p.profile_id for p in profiles if p.profile_id not in sessions]
+            if missing:
+                print(
+                    "fmd eval: no scripted live session for profile(s): "
+                    + ", ".join(missing)
+                    + f" (expected under {sessions_dir})",
+                    file=sys.stderr,
+                )
+                return 1
+            fetcher = ScriptedPageFetcher(
+                [page for session in sessions.values() for page in session.pages]
+            )
+            backends = [
+                LiveVerdictBackend(
+                    ScriptedModelRouter(sessions[profile.profile_id]),
+                    fetcher,
+                    max_turns=args.max_turns,
+                    max_fetches=args.max_fetches,
+                )
+                for profile in profiles
+            ]
+            mode = "replay"
+        else:
+            _providers, blockers = profile_blockers(router.models, profile_cfg)
+            if blockers:
+                print(
+                    "fmd eval: the verdict_live model profile does not resolve on this "
+                    "host: " + "; ".join(blockers) + ". " + profile_remediation(
+                        router.models, VERDICT_LIVE_PURPOSE
+                    ),
+                    file=sys.stderr,
+                )
+                return 1
+            from fmd.fetch.ladder import FetchLadder
+
+            backend = LiveVerdictBackend(
+                router,
+                FetchLadder(),
+                max_turns=args.max_turns,
+                max_fetches=args.max_fetches,
+            )
+            backends = [backend] * len(profiles)
+            mode = "live"
+
+        cases = []
+        for profile, backend in zip(profiles, backends, strict=True):
+            cases.extend(run_verdict_live([profile], backend))
+    except (VerdictError, LLMError, RuntimeError) as exc:
+        print(f"fmd eval: verdict-live failed: {exc}", file=sys.stderr)
+        return 1
+
+    report = build_product_report("verdict-live", cases)
+    report["proxy_label"] = None
+    report["aggregate"].update(verdict_live_aggregate(cases))
+    report["backend"] = {
+        "mode": mode,
+        "provider": provider_name,
+        "purpose": VERDICT_LIVE_PURPOSE,
+        "max_turns": args.max_turns,
+        "max_fetches": args.max_fetches,
+        "sessions_dir": str(sessions_dir) if replay_mode else None,
+    }
+    if replay_mode:
+        report["backend"]["note"] = (
+            "replay path (committed scripted sessions, offline); the live stream has "
+            "NEVER run against a real model yet — the first real run is the "
+            "operator's (LQ-9)"
+        )
+    report_path = _eval_report_target(args, "verdict-live")
+    if report_path is not None:
+        write_product_report(report, report_path)
+
+    worksheet_preview = None
+    if getattr(args, "audit_sample", None) is not None:
+        worksheet = build_audit_worksheet(
+            cases,
+            fraction=args.audit_sample,
+            seed=args.audit_seed,
+            generated_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        if report_path is not None and not getattr(args, "dry_run", False):
+            worksheet_path = report_path.with_name(
+                report_path.name.replace("eval-verdict-live", "audit-verdict-live", 1)
+            )
+            worksheet_path.write_text(
+                json.dumps(worksheet.model_dump(mode="json"), indent=2) + "\n",
+                encoding="utf-8",
+            )
+            worksheet_preview = f"  audit worksheet: {worksheet_path}"
+        else:
+            worksheet_preview = (
+                "  audit worksheet (dry-run preview): seed {seed} fraction {frac} "
+                "sampled {n}/{total}: {ids}".format(
+                    seed=worksheet.seed,
+                    frac=clamp_audit_fraction(args.audit_sample),
+                    n=len(worksheet.entries),
+                    total=worksheet.n_cases,
+                    ids=", ".join(e.profile_id for e in worksheet.entries) or "(none)",
+                )
+            )
+
+    print(render_verdict_live_summary(report))
+    if report_path is not None:
+        print(f"  report: {report_path}")
+    if worksheet_preview is not None:
+        print(worksheet_preview)
     return 0
 
 
