@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, fields as dataclass_fields
+from dataclasses import asdict, dataclass
+from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -244,9 +245,12 @@ def aggregate(failures: list[FetchFailure], top_n: int = 10) -> dict:
             entry["first_ts"] = failure.ts
         if failure.ts > entry["last_ts"]:
             entry["last_ts"] = failure.ts
-        if failure.url and failure.url not in entry["sample_urls"]:
-            if len(entry["sample_urls"]) < SAMPLE_URLS_MAX:
-                entry["sample_urls"].append(failure.url)
+        if (
+            failure.url
+            and failure.url not in entry["sample_urls"]
+            and len(entry["sample_urls"]) < SAMPLE_URLS_MAX
+        ):
+            entry["sample_urls"].append(failure.url)
 
     ranked = sorted(by_institution.items(), key=lambda item: (-item[1]["n"], item[0]))
     truncated = {
