@@ -1,0 +1,251 @@
+{
+  "format": "fmd-acceptance-v1",
+  "generated_at": "2026-11-23T06:25:57.755733+00:00",
+  "sentinel": "fmd-acceptance-sentinel-5827-4",
+  "totals": {
+    "passed": 30,
+    "failed": 0,
+    "skipped": 3
+  },
+  "verdict": "PASS",
+  "manifest": {
+    "expected": [
+      "compose/smoke",
+      "preflight/db-reachable",
+      "preflight/migrations",
+      "preflight/registry-seeded",
+      "preflight/model-reachable",
+      "preflight/serve-local-probe",
+      "api/server",
+      "api/health",
+      "api/sources",
+      "api/programmes",
+      "api/programme-detail",
+      "api/programme-cost",
+      "api/programme-filters",
+      "api/rankings",
+      "api/compare",
+      "api/exams",
+      "api/exclusions",
+      "web/pnpm",
+      "web/lint",
+      "web/build",
+      "web/test",
+      "web/server",
+      "web/render /",
+      "web/render /shortlist",
+      "web/render /programmes/<id>",
+      "web/render /compare",
+      "web/render /exams",
+      "web/render /exclusions",
+      "web/render /sources",
+      "privacy/response-bodies",
+      "privacy/api-logs",
+      "privacy/db-rows"
+    ],
+    "recorded": [
+      "api/compare",
+      "api/exams",
+      "api/exclusions",
+      "api/health",
+      "api/programme-cost",
+      "api/programme-detail",
+      "api/programme-filters",
+      "api/programmes",
+      "api/rankings",
+      "api/server",
+      "api/sources",
+      "compose/smoke",
+      "preflight/db-reachable",
+      "preflight/migrations",
+      "preflight/model-reachable",
+      "preflight/registry-seeded",
+      "preflight/serve-local-probe",
+      "privacy/api-logs",
+      "privacy/db-rows",
+      "privacy/response-bodies",
+      "web/build",
+      "web/lint",
+      "web/pnpm",
+      "web/render /",
+      "web/render /compare",
+      "web/render /exams",
+      "web/render /exclusions",
+      "web/render /programmes/1",
+      "web/render /programmes/<id>",
+      "web/render /shortlist",
+      "web/render /sources",
+      "web/server",
+      "web/test"
+    ],
+    "missing": [],
+    "complete": true
+  },
+  "checks": [
+    {
+      "name": "compose/smoke",
+      "result": "PASS",
+      "detail": "compose config valid; api container connects to db over the declared network; web answers on :3000 (LIVE)"
+    },
+    {
+      "name": "preflight/db-reachable",
+      "result": "PASS",
+      "detail": "fmd via DATABASE_URL (LIVE)"
+    },
+    {
+      "name": "preflight/migrations",
+      "result": "PASS",
+      "detail": "12 of 12 migrations applied (LIVE)"
+    },
+    {
+      "name": "preflight/registry-seeded",
+      "result": "PASS",
+      "detail": "sources=32 countries=13 (LIVE)"
+    },
+    {
+      "name": "preflight/model-reachable",
+      "result": "SKIP",
+      "detail": "fmd llm doctor --live reported required profiles unusable (see /tmp/fmd-acceptance.p7nX9L/llm-doctor.txt; a local model server is optional for the API/web path)"
+    },
+    {
+      "name": "preflight/serve-local-probe",
+      "result": "SKIP",
+      "detail": "serve_local probe failed \u2014 GGUF weights absent or llama-server down (optional for the API/web path; see /tmp/fmd-acceptance.p7nX9L/serve-probe.txt)"
+    },
+    {
+      "name": "api/server",
+      "result": "PASS",
+      "detail": "API answering at http://127.0.0.1:8000 (operator-provided)"
+    },
+    {
+      "name": "api/health",
+      "result": "PASS",
+      "detail": "GET /api/health \u2192 200, envelope +  clean"
+    },
+    {
+      "name": "api/sources",
+      "result": "PASS",
+      "detail": "GET /api/sources \u2192 200, envelope + unknown clean"
+    },
+    {
+      "name": "api/programmes",
+      "result": "PASS",
+      "detail": "GET /api/programmes?limit=10 \u2192 200, envelope + unknown clean"
+    },
+    {
+      "name": "api/programme-detail",
+      "result": "PASS",
+      "detail": "GET /api/programmes/1 \u2192 200, envelope + unknown,money clean"
+    },
+    {
+      "name": "api/programme-cost",
+      "result": "PASS",
+      "detail": "POST /api/programmes/1/cost \u2192 200, envelope + unknown,money,cost-profile clean"
+    },
+    {
+      "name": "api/programme-filters",
+      "result": "PASS",
+      "detail": "POST /api/programmes/1/filters \u2192 200, envelope + filters clean"
+    },
+    {
+      "name": "api/rankings",
+      "result": "PASS",
+      "detail": "POST /api/rankings \u2192 200, envelope + unknown,money,filters clean"
+    },
+    {
+      "name": "api/exams",
+      "result": "PASS",
+      "detail": "POST /api/exams \u2192 200, envelope + unknown clean"
+    },
+    {
+      "name": "api/exclusions",
+      "result": "PASS",
+      "detail": "POST /api/exclusions \u2192 200, envelope + filters clean"
+    },
+    {
+      "name": "api/compare",
+      "result": "PASS",
+      "detail": "GET /api/compare?ids=1,2 \u2192 200, envelope + unknown,money clean"
+    },
+    {
+      "name": "web/pnpm",
+      "result": "PASS",
+      "detail": "pnpm available (9.15.9)"
+    },
+    {
+      "name": "web/lint",
+      "result": "PASS",
+      "detail": "pnpm lint"
+    },
+    {
+      "name": "web/build",
+      "result": "PASS",
+      "detail": "pnpm build"
+    },
+    {
+      "name": "web/test",
+      "result": "PASS",
+      "detail": "pnpm test (vitest)"
+    },
+    {
+      "name": "web/server",
+      "result": "PASS",
+      "detail": "next start answering on port 3100"
+    },
+    {
+      "name": "web/render /",
+      "result": "PASS",
+      "detail": "200, no raw NaN/undefined, no bare composite decimal"
+    },
+    {
+      "name": "web/render /shortlist",
+      "result": "PASS",
+      "detail": "200, no raw NaN/undefined, no bare composite decimal"
+    },
+    {
+      "name": "web/render /compare",
+      "result": "PASS",
+      "detail": "200, no raw NaN/undefined, no bare composite decimal"
+    },
+    {
+      "name": "web/render /exams",
+      "result": "PASS",
+      "detail": "200, no raw NaN/undefined, no bare composite decimal"
+    },
+    {
+      "name": "web/render /exclusions",
+      "result": "PASS",
+      "detail": "200, no raw NaN/undefined, no bare composite decimal"
+    },
+    {
+      "name": "web/render /sources",
+      "result": "PASS",
+      "detail": "200, no raw NaN/undefined, no bare composite decimal"
+    },
+    {
+      "name": "web/render /programmes/1",
+      "result": "PASS",
+      "detail": "200, no raw NaN/undefined, no bare composite decimal"
+    },
+    {
+      "name": "web/render /programmes/<id>",
+      "result": "PASS",
+      "detail": "mirrored from web/render /programmes/1: 200, no raw NaN/undefined, no bare composite decimal"
+    },
+    {
+      "name": "privacy/response-bodies",
+      "result": "PASS",
+      "detail": "sentinel absent from every captured API response and rendered page"
+    },
+    {
+      "name": "privacy/api-logs",
+      "result": "SKIP",
+      "detail": "API log only available when this script started the server"
+    },
+    {
+      "name": "privacy/db-rows",
+      "result": "PASS",
+      "detail": "sentinel absent from every table (read-only scan)"
+    }
+  ]
+}

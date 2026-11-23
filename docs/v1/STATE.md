@@ -181,6 +181,12 @@ risks).
 
 ## Merged to main (verified via GitHub API)
 
+- PR #11 (wave 11: product-eval streams — NIRF truth tables + nirf/naac proxy,
+  self-drift, cv-stability, verdict-fast canary, expert-panel kit, audit +
+  survey + acquisition docs; 49 new tests). Intake-verified on host: offline
+  1535 passed/96 skipped, DB gate 1628 passed, provenance 1.0, sha256
+  provenance re-verified, scope clean. Merged fast-forward at `2797777`.
+
 - PR #10 (wave 9: generated methodology surface + append-only exclusion
   registry), verifier verdict approve. **Cumulative: waves 1-9 all merged
   (PRs #1-#10). Wave 10 = release v1.0.0-rc1.**
@@ -199,6 +205,21 @@ risks).
 - PR #1 (wave 1 compose wiring), PR #2 (wave 2 acceptance manifest), PR #3
   (W10 foundation: T1 parse cache + batched acquire), PR #4 (wave 3 T2 parse
   cache, engine-pinned keys). Local main synced to 33eb59f.
+
+## Local queue runs (operator, host)
+
+- **LQ-1 — real `make up` compose verification + acceptance run** (2026-11-23).
+  `scripts/acceptance.sh --json-out reports/acceptance.json` → **VERDICT: PASS —
+  30 passed, 0 failed, 3 skipped**. No `Temporary failure in name resolution`
+  lines in the api logs; migrate + seed ran; api/web answered 200. Skips:
+  `preflight/model-reachable` and `preflight/serve-local-probe` (the 26B
+  server was not started for this run — optional for the API/web path), and
+  `privacy/api-logs` (script-owned server). Deviation: the LQ-1 recipe's
+  `docker compose down -v` was skipped — the db volume holds the append-only
+  mined corpus (85 claims / 230 docs). A one-line lint fix (drop the unused
+  `screen` import in `app/__tests__/methodology.test.tsx`, wave w9) was needed
+  to get the web image build to pass; committed separately. Report committed:
+  `reports/acceptance.json`.
 
 ## In-PR
 
