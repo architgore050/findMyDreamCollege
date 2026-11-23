@@ -310,6 +310,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "naac-proxy",
             "self-drift",
             "cv-stability",
+            "prompt-effectiveness",
             "verdict-fast",
             "verdict-live",
             "expert-panel",
@@ -317,17 +318,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "product/verdict stream to run: nirf-proxy|naac-proxy|self-drift|"
-            "cv-stability|expert-panel (--eval-kind product) or verdict-fast|"
-            "verdict-live (--eval-kind verdict)"
+            "cv-stability|prompt-effectiveness|expert-panel (--eval-kind "
+            "product) or verdict-fast|verdict-live (--eval-kind verdict)"
         ),
     )
     eval_parser.add_argument(
         "--fixture-path",
         default=None,
         help=(
-            "stream input: shortlist JSON (proxy/self-drift/cv-stability), "
-            "directory of profile fixtures (verdict-fast), or directory of "
-            "panel-rating YAMLs + product_ranking.json (expert-panel)"
+            "stream input: shortlist JSON (proxy/self-drift/cv-stability/"
+            "prompt-effectiveness), directory of profile fixtures "
+            "(verdict-fast), or directory of panel-rating YAMLs + "
+            "product_ranking.json (expert-panel)"
         ),
     )
     eval_parser.add_argument(
@@ -1333,17 +1335,19 @@ def _eval_report_target(args: argparse.Namespace, stream: str) -> Path | None:
 
 
 def _cmd_eval_product(args: argparse.Namespace) -> int:
-    """Product streams: proxy ranking, self-drift, cv-stability, expert-panel."""
+    """Product streams: proxy ranking, prompt-effectiveness, self-drift, cv-stability."""
 
     from fmd.eval.product import (
         ShortlistError,
         build_product_report,
         load_shortlist,
         load_truth_for_stream,
+        prompt_effectiveness_aggregate,
         render_product_summary,
         run_cv_stability,
         run_naac_proxy,
         run_nirf_proxy,
+        run_prompt_effectiveness,
         run_self_drift,
         truth_summary,
     )
@@ -1416,6 +1420,15 @@ def _cmd_eval_product(args: argparse.Namespace) -> int:
                 [case],
                 extra={"weights_version": shortlist.weights_version},
             )
+            report["proxy_label"] = None
+        elif stream == "prompt-effectiveness":
+            shortlist = load_shortlist(_fixture_default("prompt_effectiveness_fixture.json"))
+            truth_dir = Path(args.truth_dir) if args.truth_dir else repo_root / "data" / "truth"
+            nirf_truth = load_truth_for_stream("nirf-proxy", truth_dir, root=repo_root)
+            naac_truth = load_truth_for_stream("naac-proxy", truth_dir, root=repo_root)
+            cases = [run_prompt_effectiveness(shortlist, nirf_truth, naac_truth)]
+            report = build_product_report("prompt-effectiveness", cases)
+            report["aggregate"].update(prompt_effectiveness_aggregate(cases))
             report["proxy_label"] = None
         elif stream == "expert-panel":
             return _cmd_eval_expert_panel(args)
