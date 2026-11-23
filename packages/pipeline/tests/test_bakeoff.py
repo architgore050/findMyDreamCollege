@@ -296,6 +296,7 @@ def test_models_config_defaults_and_every_profile_is_env_overridable() -> None:
     assert "ocr_vlm" not in defaults.profiles
     # `programme_equivalence` is the W9 Tier-2 semantic equivalence classifier
     # (config/programmes.yaml is its taxonomy of record).
+    # `verdict_live` is the w13 live-verdict research profile (docs/v1/eval/07).
     assert set(defaults.profiles) == {
         "bulk_extract",
         "hard_pdf",
@@ -304,6 +305,7 @@ def test_models_config_defaults_and_every_profile_is_env_overridable() -> None:
         "nlp_rubric",
         "verify",
         "programme_equivalence",
+        "verdict_live",
         "embed",
     }
     # `hard_pdf` is the hosted fallback: provider `api` plus the shared

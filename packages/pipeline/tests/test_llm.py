@@ -257,6 +257,8 @@ def test_every_profile_provider_and_model_are_env_switchable() -> None:
         "FMD_VERIFY_MODEL": "verify-test",
         "FMD_EMBED_MODEL": "embed-test",
         "FMD_EMBED_PROVIDER": "mock",
+        "FMD_VERDICT_LIVE_PROVIDER": "local",
+        "FMD_VERDICT_LIVE_MODEL": "verdict-test",
     }
     models = load_registry(CONFIG_DIR, env=env).models
 
@@ -270,6 +272,8 @@ def test_every_profile_provider_and_model_are_env_switchable() -> None:
     assert models.profiles["verify"].model == "verify-test"
     assert models.profiles["embed"].provider == "mock"
     assert models.profiles["embed"].model == "embed-test"
+    assert models.profiles["verdict_live"].provider == "local"
+    assert models.profiles["verdict_live"].model == "verdict-test"
     # OCR is an acquisition stage, not a router profile: `ocr_vlm` was retired on
     # 2026-11-16 and must not come back as a doctor-visible capability.
     assert set(models.profiles) == {
@@ -280,6 +284,7 @@ def test_every_profile_provider_and_model_are_env_switchable() -> None:
         "nlp_rubric",
         "verify",
         "programme_equivalence",
+        "verdict_live",
         "embed",
     }
     assert "ocr_vlm" not in models.profiles
