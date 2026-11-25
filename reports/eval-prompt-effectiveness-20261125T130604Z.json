@@ -1,0 +1,41 @@
+{
+  "aggregate": {
+    "mean_overlap_naac": 0.0,
+    "mean_overlap_nirf": 2.0,
+    "n_cases": 1,
+    "n_profiles": 1,
+    "n_profiles_overlap_ge2": 1,
+    "n_profiles_top_in_naac": 0,
+    "n_profiles_top_in_nirf": 1,
+    "product_top_unknown_frac": 0.0,
+    "prompting_working": true
+  },
+  "cases": [
+    {
+      "naac_proxy_top3": [],
+      "nirf_proxy_top3": [
+        "all india institute of medical sciences delhi",
+        "post graduate institute of medical education and research"
+      ],
+      "overlap_naac_top3": 0,
+      "overlap_nirf_top3": 2,
+      "product_top3": [
+        "all india institute of medical sciences delhi",
+        "post graduate institute of medical education and research",
+        "city care paramedical college hyderabad"
+      ],
+      "product_top_in_naac": false,
+      "product_top_in_nirf": true,
+      "product_top_unknown": false,
+      "profile_id": "fixture-mlt-prompt-effectiveness-v1",
+      "shortlist_rows": 3
+    }
+  ],
+  "eval_kind": "product",
+  "generated_at": "2026-11-25T13:06:04Z",
+  "ok": true,
+  "proxy_label": null,
+  "schema_version": 1,
+  "stream": "prompt-effectiveness",
+  "truth": {}
+}
