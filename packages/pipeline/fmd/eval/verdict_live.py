@@ -107,6 +107,11 @@ Hard rules:
 6. A scored verdict (correct | partially_correct | incorrect) must include a
    reference_top3 built ONLY from your research; "correct" means the product's
    top-3 matches your reference and you found no counter-evidence.
+7. CITATIONS BEFORE EMIT: if you have not cited at least one page with a
+   verbatim quote relevant to the profile's institutions when you emit, cite
+   the most relevant fetched page (even a partial listing page) before
+   emitting. A verdict emitted with zero citations is a defect — use another
+   turn to add a citation, or emit "unknown" with the pages cited.
 """
 
 
