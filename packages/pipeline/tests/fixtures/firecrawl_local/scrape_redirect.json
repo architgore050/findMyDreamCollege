@@ -1,0 +1,15 @@
+{
+  "comment": "Real /v2/scrape answer (Firecrawl Local 0.1.1, local real-server matrix 2026-11-27) for a 302 target: metadata.sourceURL keeps the REQUESTED url, metadata.url is the FINAL one and statusCode the final status. The adapter must report metadata.url as final_url so provenance names the page that was actually rendered.",
+  "success": true,
+  "data": {
+    "source": "local",
+    "metadata": {
+      "sourceURL": "http://127.0.0.1:18765/redirect",
+      "url": "http://127.0.0.1:18765/ok",
+      "statusCode": 200,
+      "title": "ok"
+    },
+    "html": "<html><body>ok</body></html>",
+    "markdown": "ok"
+  }
+}

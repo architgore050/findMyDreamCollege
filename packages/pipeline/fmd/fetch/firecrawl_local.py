@@ -208,6 +208,21 @@ class FirecrawlLocalClient:
         return body
 
     # ------------------------------------------------------------------- v2 API
+    @staticmethod
+    def _final_url(metadata: dict[str, Any], requested: str) -> str:
+        """The URL the fetch actually landed on.
+
+        The real API (0.1.1, local matrix 2026-11-27) keeps the *requested*
+        URL in ``metadata.sourceURL`` and puts the *final* one — after a 302 —
+        in ``metadata.url``. Prefer the final URL, fall back to sourceURL and
+        then to the requested URL for older/sparser shapes.
+        """
+        for key in ("url", "sourceURL"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                return value
+        return requested
+
     def scrape(self, url: str) -> FetchResult:
         """One page via ``POST /v2/scrape`` (formats: html + markdown, fresh).
 
@@ -236,7 +251,7 @@ class FirecrawlLocalClient:
         status_raw = metadata.get("statusCode")
         if status_raw is None:
             raise FirecrawlBadResponse("firecrawl_bad_response: scrape metadata has no statusCode")
-        final_url = str(metadata.get("sourceURL") or url)
+        final_url = self._final_url(metadata, url)
         html = data.get("html")
         body = html if isinstance(html, str) and html else data.get("markdown") or ""
         if not isinstance(body, str):  # defensive: v2 always returns strings here
