@@ -3,11 +3,15 @@
 No real browser engine, no network. The fake-server roundtrip proves the
 spawn/wire path (initialize -> tools/list -> tools/call over stdio) with
 ``sys.executable`` as the command; the session-fake tests prove call order,
-parsing, and failure honesty.
+parsing, and failure honesty. The committed fixtures under
+``fixtures/mcp/`` are the REAL wire shapes captured by the 2026-11-27 local
+real-server matrix (invisible-playwright-mcp 0.74.0) and are fed straight
+through the parser, so an upstream contract change fails loudly offline.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 from pathlib import Path
@@ -19,6 +23,26 @@ from fmd.fetch.mcp_browser import InvisiblePlaywrightMCPFetcher, RealMcpSession,
 from fmd.fetch.types import FetchRequest, TierUnavailable, UnsupportedReplay
 
 FAKE_SERVER = Path(__file__).resolve().parent / "fixtures" / "mcp" / "fake_mcp_server.py"
+MCP_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "mcp"
+
+
+def mcp_fixture(name: str) -> dict:
+    return json.loads((MCP_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def answer_from_fixture(fixture: dict) -> ToolAnswer:
+    """Build the one ToolAnswer shape from a committed wire fixture."""
+    text = "\n".join(
+        block["text"]
+        for block in fixture.get("content", [])
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    )
+    structured = fixture.get("structuredContent")
+    return ToolAnswer(
+        structured=dict(structured) if isinstance(structured, dict) else None,
+        text=text,
+        is_error=bool(fixture.get("isError", False)),
+    )
 
 
 class FakeSession:
@@ -150,6 +174,96 @@ def test_navigate_without_a_parseable_status_is_a_browser_error() -> None:
 
     with pytest.raises(BrowserNavigationError, match="no parseable HTTP status"):
         fetcher.fetch(FetchRequest(url=url))
+
+
+# ------------------------------------------------------------------- real 0.74.0 wire shape
+
+
+def test_navigate_real_sentence_shape_is_parsed_from_the_committed_fixture() -> None:
+    """The exact 0.74.0 wire shape: 'navigated to <url> (HTTP <status>)' in the
+    text block AND in structuredContent.result, with no explicit fields."""
+    fixture = mcp_fixture("navigate_real_answer_200.json")
+    url = str(fixture["requested_url"])
+    session = FakeSession([open_ok(), answer_from_fixture(fixture), read_html("<html>ok</html>")])
+    fetcher = make_fetcher(session)
+
+    result = fetcher.fetch(FetchRequest(url=url))
+
+    assert result.status == 200
+    assert result.ok
+    assert result.final_url == "http://127.0.0.1:18765/ok"
+    assert result.fetcher_tier == TIER_MCP_BROWSER
+
+
+def test_navigate_real_sentence_shape_reports_the_redirect_final_url() -> None:
+    """A 302 target lands on the final page: the sentence carries the final
+    URL and final status, so final_url reflects where the page actually is."""
+    fixture = mcp_fixture("navigate_real_answer_redirect.json")
+    requested = str(fixture["requested_url"])
+    session = FakeSession([open_ok(), answer_from_fixture(fixture), read_html("<html>ok</html>")])
+    fetcher = make_fetcher(session)
+
+    result = fetcher.fetch(FetchRequest(url=requested))
+
+    assert result.status == 200
+    assert result.ok
+    assert result.final_url == "http://127.0.0.1:18765/ok"
+    assert result.final_url != requested
+
+
+def test_navigate_real_sentence_shape_keeps_404_terminal() -> None:
+    fixture = mcp_fixture("navigate_real_answer_404.json")
+    url = str(fixture["requested_url"])
+    session = FakeSession([open_ok(), answer_from_fixture(fixture), read_html("<html>gone</html>")])
+    fetcher = make_fetcher(session)
+
+    result = fetcher.fetch(FetchRequest(url=url))
+
+    assert result.status == 404
+    assert result.terminal
+    assert result.final_url == url
+
+
+def test_navigate_sentence_in_structured_result_only_is_parsed_too() -> None:
+    """Some servers put the sentence only in structuredContent.result (empty
+    text blocks); the parser must not depend on the text fallback."""
+    session = FakeSession(
+        [
+            open_ok(),
+            ToolAnswer(
+                structured={"result": "navigated to http://127.0.0.1:18765/ok (HTTP 200)"},
+                text="",
+            ),
+            read_html("<html>ok</html>"),
+        ]
+    )
+    fetcher = make_fetcher(session)
+
+    result = fetcher.fetch(FetchRequest(url="http://127.0.0.1:18765/ok"))
+
+    assert result.status == 200
+    assert result.final_url == "http://127.0.0.1:18765/ok"
+
+
+def test_navigate_sentence_with_a_relative_url_falls_back_to_field_parsing() -> None:
+    """A sentence whose 'URL' is not http(s) is not trusted; the older
+    explicit-field shape (still sent by older builds) must keep working."""
+    session = FakeSession(
+        [
+            open_ok(),
+            ToolAnswer(
+                structured={"status": 200, "url": "https://college.ac.in/page"},
+                text="navigated to /page (HTTP 200)",
+            ),
+            read_html("<html>ok</html>"),
+        ]
+    )
+    fetcher = make_fetcher(session)
+
+    result = fetcher.fetch(FetchRequest(url="https://college.ac.in/page"))
+
+    assert result.status == 200
+    assert result.final_url == "https://college.ac.in/page"
 
 
 # ------------------------------------------------------------------- honesty

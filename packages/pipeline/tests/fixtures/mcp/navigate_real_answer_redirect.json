@@ -1,0 +1,12 @@
+{
+  "comment": "browser_navigate to a 302 target (/redirect -> /ok), same 0.74.0 sentence shape: the browser follows the redirect and reports the FINAL url with the final status, so the ladder sees the landing page, not the 302.",
+  "tool": "browser_navigate",
+  "requested_url": "http://127.0.0.1:18765/redirect",
+  "content": [
+    {"type": "text", "text": "navigated to http://127.0.0.1:18765/ok (HTTP 200)"}
+  ],
+  "structuredContent": {
+    "result": "navigated to http://127.0.0.1:18765/ok (HTTP 200)"
+  },
+  "isError": false
+}

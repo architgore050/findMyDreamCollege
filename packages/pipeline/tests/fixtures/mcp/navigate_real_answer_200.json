@@ -1,0 +1,12 @@
+{
+  "comment": "Real wire shape, invisible-playwright-mcp 0.74.0 browser_navigate (local real-server matrix, 2026-11-27): the answer is one sentence in the text block, mirrored under structuredContent.result; there are no explicit status/url fields.",
+  "tool": "browser_navigate",
+  "requested_url": "http://127.0.0.1:18765/ok",
+  "content": [
+    {"type": "text", "text": "navigated to http://127.0.0.1:18765/ok (HTTP 200)"}
+  ],
+  "structuredContent": {
+    "result": "navigated to http://127.0.0.1:18765/ok (HTTP 200)"
+  },
+  "isError": false
+}

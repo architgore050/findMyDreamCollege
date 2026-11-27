@@ -43,10 +43,11 @@ def handle_call(name: str, arguments: dict) -> dict:
         # A 404 path is visible through the structured answer, like upstream.
         status = 404 if url.rstrip("/").endswith("/missing") else 200
         LAST_URL["value"] = url
-        return {
-            "structuredContent": {"status": status, "url": url},
-            "text": f"status: {status}\nurl: {url}",
-        }
+        # The real 0.74.0 wire shape: one sentence, no explicit status/url
+        # fields. The fixture-backed parser tests cover that shape; this fake
+        # proves the same sentence survives the actual stdio wire.
+        sentence = f"navigated to {url} (HTTP {status})"
+        return {"structuredContent": {"result": sentence}, "text": sentence}
     if name == "browser_read_html":
         mode = str(arguments.get("mode") or "form")
         if mode != "full":
