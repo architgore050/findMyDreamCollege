@@ -1,0 +1,9 @@
+{
+  "comment": "Real error shape, invisible-playwright-mcp 0.74.0 browser_open with no usable display (local real-server matrix, 2026-11-27): the tool answer carries isError=true and structuredContent {opened: false, cause: no_display}. The cause must survive into the honest FetchResult error (mcp_browser_no_display), not be swallowed by a generic tool error.",
+  "tool": "browser_open",
+  "content": [
+    {"type": "text", "text": "Error: browser could not be opened (no display available)"}
+  ],
+  "structuredContent": {"opened": false, "cause": "no_display"},
+  "isError": true
+}
