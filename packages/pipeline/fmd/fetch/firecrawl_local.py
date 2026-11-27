@@ -140,8 +140,10 @@ class FirecrawlLocalClient:
         raw_url = base_url or os.environ.get("FIRECRAWL_LOCAL_URL", "") or DEFAULT_LOCAL_URL
         self.base_url = raw_url.rstrip("/")
         try:
-            raw_timeout = timeout if timeout is not None else os.environ.get(
-                "FIRECRAWL_LOCAL_TIMEOUT_S", DEFAULT_TIMEOUT_S
+            raw_timeout = (
+                timeout
+                if timeout is not None
+                else os.environ.get("FIRECRAWL_LOCAL_TIMEOUT_S", DEFAULT_TIMEOUT_S)
             )
             self.timeout = float(raw_timeout)
         except ValueError:
@@ -233,12 +235,10 @@ class FirecrawlLocalClient:
             )
         status_raw = metadata.get("statusCode")
         if status_raw is None:
-            raise FirecrawlBadResponse(
-                "firecrawl_bad_response: scrape metadata has no statusCode"
-            )
+            raise FirecrawlBadResponse("firecrawl_bad_response: scrape metadata has no statusCode")
         final_url = str(metadata.get("sourceURL") or url)
         html = data.get("html")
-        body = (html if isinstance(html, str) and html else data.get("markdown") or "")
+        body = html if isinstance(html, str) and html else data.get("markdown") or ""
         if not isinstance(body, str):  # defensive: v2 always returns strings here
             body = ""
         return FetchResult(
