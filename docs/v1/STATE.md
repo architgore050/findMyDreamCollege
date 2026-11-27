@@ -181,6 +181,14 @@ risks).
 
 ## Merged to main (verified via GitHub API)
 
+- PR #15 (free web stack: invisible-playwright-mcp browser tier + Firecrawl Local
+  `FIRECRAWL_CLOUD=off` + SearXNG discovery) + PR #16 (real-provider contract
+  fixes), verifier verdict approve after full local matrix: official MCP
+  **20/20 tools**, Firecrawl Local **30/30 checks**, opt-in integration **2/2**,
+  final MCP unset-headless + delayed-JS **10/10** PASS; offline pytest
+  **1653 passed / 99 skipped**, DB gate **1746 passed / 6 skipped**, provenance
+  1.0. Merged at `c64c455`.
+
 - PR #11 (wave 11: product-eval streams — NIRF truth tables + nirf/naac proxy,
   self-drift, cv-stability, verdict-fast canary, expert-panel kit, audit +
   survey + acquisition docs; 49 new tests). Intake-verified on host: offline
