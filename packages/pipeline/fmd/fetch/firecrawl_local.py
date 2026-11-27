@@ -248,6 +248,34 @@ class FirecrawlLocalClient:
                 return value
         return requested
 
+    @staticmethod
+    def _body_and_type(data: dict[str, Any], metadata: dict[str, Any]) -> tuple[str, str]:
+        """The body to hand downstream and the content-type that describes IT.
+
+        Local PDF/DOCX parsing arrives as parsed markdown while
+        ``metadata.contentType`` still says ``application/pdf`` (real 0.1.1
+        shape, 2026-11-27 finding #6) — claiming ``text/html`` for a markdown
+        body poisons every downstream consumer. An HTML body is
+        ``text/html``; a markdown body (parsed document or the markdown
+        fallback) is ``text/markdown``. The declared ``contentType`` is used
+        only when its base type matches the bytes actually returned (keeping
+        a charset parameter); otherwise the derived type wins.
+        """
+        html = data.get("html")
+        markdown = data.get("markdown")
+        if isinstance(html, str) and html:
+            body = html
+            derived = "text/html"
+        elif isinstance(markdown, str) and markdown:
+            body = markdown
+            derived = "text/markdown"
+        else:  # defensive: v2 always returns strings here
+            return "", "text/html"
+        declared = str(metadata.get("contentType") or "").strip()
+        if declared.lower().split(";", 1)[0].strip() == derived:
+            return body, declared
+        return body, derived
+
     def scrape(self, url: str) -> FetchResult:
         """One page via ``POST /v2/scrape`` (formats: html + markdown, fresh).
 
@@ -294,15 +322,12 @@ class FirecrawlLocalClient:
             )
         if status_raw is None:
             raise FirecrawlBadResponse("firecrawl_bad_response: scrape metadata has no statusCode")
-        html = data.get("html")
-        body = html if isinstance(html, str) and html else data.get("markdown") or ""
-        if not isinstance(body, str):  # defensive: v2 always returns strings here
-            body = ""
+        body, content_type = self._body_and_type(data, metadata)
         return FetchResult(
             url=url,
             final_url=final_url,
             status=int(status_raw),
-            headers={"content-type": "text/html"},
+            headers={"content-type": content_type},
             body=body.encode("utf-8"),
             fetcher_tier=TIER_FIRECRAWL_LOCAL,
             method="GET",

@@ -1,0 +1,15 @@
+{
+  "comment": "Real /v2/scrape answer (Firecrawl Local 0.1.1, local real-server matrix 2026-11-27) for a PDF: local parsing arrives as data.markdown while metadata.contentType still says application/pdf. The adapter's content-type must describe the returned bytes (text/markdown), never the source document type.",
+  "success": true,
+  "data": {
+    "source": "local",
+    "metadata": {
+      "sourceURL": "https://college.ac.in/prospectus.pdf",
+      "url": "https://college.ac.in/prospectus.pdf",
+      "statusCode": 200,
+      "contentType": "application/pdf",
+      "title": "Prospectus 2026-27"
+    },
+    "markdown": "# Prospectus 2026-27\n\nFee schedule and admission timeline."
+  }
+}
