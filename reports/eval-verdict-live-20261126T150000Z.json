@@ -1,0 +1,272 @@
+{
+  "aggregate": {
+    "agreement_rate": 0.0,
+    "audit_failures": 4,
+    "incorrect_rate": 0.0,
+    "n_cases": 5,
+    "n_fetches_mean": 5.8,
+    "n_profiles": 5,
+    "n_turns_mean": 7.6,
+    "partial_rate": 0.0,
+    "reverify_failures": 0,
+    "schema_violations": 0,
+    "top3_overlap_mean": 0.0,
+    "unknown_coverage": 1.0
+  },
+  "backend": {
+    "max_fetches": 6,
+    "max_turns": 8,
+    "mode": "live",
+    "provider": "local",
+    "purpose": "verdict_live",
+    "sessions_dir": null
+  },
+  "cases": [
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [],
+        "failures": [
+          "circularity guard: verdict cites no source outside the product's ingested evidence (needs >= 1 external source)"
+        ],
+        "n_evidence": 0,
+        "n_external": 0,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 0,
+        "fetches_used": 6,
+        "profile_id": "canary-01-correct",
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "stop_reason": "emitted_verdict",
+        "turns_used": 8
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-25T20:01:31Z",
+          "final_url": "https://www.aiims.edu/index.php/en",
+          "n_bytes": 226218,
+          "sha256": "078cc4b6e3c24abf8aca8e87ddc4f2f36b459517aa2f078f791a92e718d8aebd",
+          "status": 200,
+          "url": "https://www.aiims.edu/"
+        }
+      ],
+      "product_top3": [
+        "All India Institute of Medical Sciences, Delhi",
+        "Post Graduate Institute of Medical Education and Research",
+        "Christian Medical College"
+      ],
+      "profile_id": "canary-01-correct",
+      "rationale": "I am unable to verify the existence of the 'B.Sc. Medical Laboratory Technology' programme at the listed institutions. The attempt to access specific course pages for AIIMS, PGIMER, and CMC resulted in 404 errors or robots.txt restrictions. While the AIIMS homepage was fetched, it does not contain the specific course curriculum or programme listings required to validate the product's claims.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 0
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "verification of B.Sc. Medical Laboratory Technology programme at AIIMS Delhi",
+        "verification of B.Sc. Medical Laboratory Technology programme at PGIMER",
+        "verification of B.Sc. Medical Laboratory Technology programme at CMC"
+      ],
+      "verdict": "unknown"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-25T20:01:41Z",
+            "quote": "AIIMS - All India Institute Of Medical Science",
+            "sha256": "078cc4b6e3c24abf8aca8e87ddc4f2f36b459517aa2f078f791a92e718d8aebd",
+            "source_kind": "institution",
+            "title": "AIIMS Home",
+            "url": "https://www.aiims.edu/"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 1,
+        "n_external": 1,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 1,
+        "fetches_used": 6,
+        "profile_id": "canary-02-partially-correct",
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "stop_reason": "turn_cap_reached",
+        "turns_used": 8
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-25T20:01:41Z",
+          "final_url": "https://www.aiims.edu/index.php/en",
+          "n_bytes": 226218,
+          "sha256": "078cc4b6e3c24abf8aca8e87ddc4f2f36b459517aa2f078f791a92e718d8aebd",
+          "status": 200,
+          "url": "https://www.aiims.edu/"
+        }
+      ],
+      "product_top3": [
+        "Vidya Institute of Allied Health Sciences",
+        "All India Institute of Medical Sciences, Delhi",
+        "City Care Paramedical College, Hyderabad"
+      ],
+      "profile_id": "canary-02-partially-correct",
+      "rationale": "Live research stopped before producing a citable verdict (stop_reason: turn_cap_reached). No score is invented for incomplete research; the verdict stays unknown per the anti-hallucination rules.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 1
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "stop_reason: turn_cap_reached",
+        "research incomplete: the reference top-3 was never derived"
+      ],
+      "verdict": "unknown"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [],
+        "failures": [
+          "circularity guard: verdict cites no source outside the product's ingested evidence (needs >= 1 external source)"
+        ],
+        "n_evidence": 0,
+        "n_external": 0,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 0,
+        "fetches_used": 5,
+        "profile_id": "canary-03-incorrect",
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "stop_reason": "emitted_verdict",
+        "turns_used": 6
+      },
+      "fetch_ledger": [],
+      "product_top3": [
+        "Sunrise Institute of Paramedical Sciences",
+        "City Care Paramedical College, Hyderabad",
+        "Vidya Institute of Allied Health Sciences"
+      ],
+      "profile_id": "canary-03-incorrect",
+      "rationale": "All attempts to fetch information regarding the specific institutions (Sunrise Institute of Paramedical Sciences, City Care Paramedical College, and Vidya Institute of Allied Health Sciences) and their B.Sc. MLT programs failed due to robots.txt restrictions on search engine queries. Without the ability to verify the existence of these programs or their relevance to the target field in India, a correctness determination cannot be made.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 0
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "existence and accreditation of Sunrise Institute of Paramedical Sciences B.Sc. MLT (Lateral Entry)",
+        "existence and accreditation of City Care Paramedical College B.Sc. MLT",
+        "existence and accreditation of Vidya Institute of Allied Health Sciences B.Sc. MLT"
+      ],
+      "verdict": "unknown"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [],
+        "failures": [
+          "circularity guard: verdict cites no source outside the product's ingested evidence (needs >= 1 external source)"
+        ],
+        "n_evidence": 0,
+        "n_external": 0,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 0,
+        "fetches_used": 6,
+        "profile_id": "canary-04-unknown",
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "stop_reason": "emitted_verdict",
+        "turns_used": 8
+      },
+      "fetch_ledger": [],
+      "product_top3": [
+        "Malabar Allied Health Academy, Kozhikode",
+        "Coastal Institute of Health Sciences",
+        "Backwater Paramedical College"
+      ],
+      "profile_id": "canary-04-unknown",
+      "rationale": "The research budget was exhausted without successfully fetching any verifiable information regarding the listed institutions (Malabar Allied Health Academy, Coastal Institute of Health Sciences, or Backwater Paramedical College) or their B.Sc. Medical Laboratory Technology programmes in Kerala. All attempted searches were blocked by robots.txt. Consequently, I cannot verify the legitimacy, accreditation, or availability of these courses for the 2027 intake.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 0
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "institution_accreditation",
+        "programme_availability_2027",
+        "institution_legitimacy"
+      ],
+      "verdict": "unknown"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [],
+        "failures": [
+          "circularity guard: verdict cites no source outside the product's ingested evidence (needs >= 1 external source)"
+        ],
+        "n_evidence": 0,
+        "n_external": 0,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 0,
+        "fetches_used": 6,
+        "profile_id": "canary-05-correct-thin-negative",
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "stop_reason": "emitted_verdict",
+        "turns_used": 8
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-25T20:02:08Z",
+          "final_url": "https://www.aiims.edu/index.php/en",
+          "n_bytes": 226218,
+          "sha256": "078cc4b6e3c24abf8aca8e87ddc4f2f36b459517aa2f078f791a92e718d8aebd",
+          "status": 200,
+          "url": "https://www.aiims.edu/"
+        }
+      ],
+      "product_top3": [
+        "Post Graduate Institute of Medical Education and Research",
+        "All India Institute of Medical Sciences, Delhi",
+        "Lakeview Institute of Paramedical Education"
+      ],
+      "profile_id": "canary-05-correct-thin-negative",
+      "rationale": "The research budget was exhausted before I could verify the existence of the 'B.Sc. Medical Laboratory Technology' programme at the ranked institutions. While the AIIMS homepage was fetched, the specific course pages returned 404 errors or were blocked by robots.txt. I cannot confirm if PGIMS or AIIMS Delhi offer the specific degree requested, nor can I verify the legitimacy of Lakeview Institute of Paramedical Education.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 0
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "existence of B.Sc. Medical Laboratory Technology at Post Graduate Institute of Medical Education and Research",
+        "existence of B.Sc. Medical Laboratory Technology at All India Institute of Medical Sciences, Delhi",
+        "existence of B.Sc. Medical Laboratory Technology at Lakeview Institute of Paramedical Education"
+      ],
+      "verdict": "unknown"
+    }
+  ],
+  "eval_kind": "product",
+  "generated_at": "2026-11-25T20:02:16Z",
+  "ok": true,
+  "proxy_label": null,
+  "schema_version": 1,
+  "stream": "verdict-live",
+  "truth": {}
+}
