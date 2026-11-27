@@ -246,6 +246,14 @@ risks).
   quality not yet proven. Report + empty operator worksheet committed:
   `reports/eval-verdict-live-20261127T172435Z.json`,
   `reports/audit-verdict-live-20261127T172435Z.json`. **Human audit pending.**
+- **Post-tuning live verdict run** (2026-11-27): final-turn reservation
+  removed all turn-cap stops (3/5 `emitted_verdict`, 2 turn-1 model errors),
+  but all 5 audits failed with zero external citations; 2 model errors were
+  `unresolved_provider` caused by local `json_schema_violation` falling through
+  to the global paid `api` fallback (no paid call occurred, but the original
+  error/retry was masked). Audit fraction 0.4 clamped to 0.2 yielded only 1
+  worksheet entry; the gate requires 2. Fix wave launched for no-fallback,
+  penultimate citation checkpoint + hard final turn, and minimum-2 sampling.
 - **Real fetch-ladder smoke** (2026-11-27): AIIMS homepage → 200/httpx;
   PGIMER → `robots_disallowed`; CMC undergraduate page → 404/httpx. Failure
   records appended to `data/scrape-failures/failures-202611.jsonl`.
