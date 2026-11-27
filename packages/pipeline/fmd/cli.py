@@ -818,7 +818,27 @@ def _orchestrator(args: argparse.Namespace):
     return Orchestrator(registry=registry, database=database), database
 
 
+def _warn_placeholder_user_agent() -> None:
+    """Public crawls must present a truthful UA with a real contact
+    (invariant 9). The shipped default still carries the placeholder, so
+    warn loudly and name the fix; never invent an address for the operator.
+    A warning (not an error) keeps dry-runs and tests usable."""
+    from fmd.settings import get_settings
+
+    user_agent = get_settings().user_agent
+    lowered = user_agent.lower()
+    if "set-me" in lowered or "example.com" in lowered:
+        print(
+            "WARNING: FMD_USER_AGENT still contains a placeholder contact "
+            f"({user_agent}). Public crawls must present a real contact "
+            "address — set FMD_USER_AGENT in .env before pointing the "
+            "crawler at the public web.",
+            file=sys.stderr,
+        )
+
+
 def _cmd_crawl(args: argparse.Namespace) -> int:
+    _warn_placeholder_user_agent()
     orchestrator, database = _orchestrator(args)
     try:
         summary = orchestrator.crawl(
