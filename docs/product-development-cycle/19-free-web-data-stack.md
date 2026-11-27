@@ -175,9 +175,16 @@ with local defaults. The paid/managed opportunities that exist upstream are
 considering any of them. Invariant 10 stands until an explicit product
 decision says otherwise.
 
-Politeness note (invariant 9): the crawl preflight warns loudly when
-`FMD_USER_AGENT` still carries the placeholder contact
-(`set-me@example.com`). The operator must set a real address in `.env`
-before pointing the crawler at the public web; nothing in the codebase
-invents one, and the warning (not an error) keeps dry-runs and tests
-usable.
+Politeness note (invariant 9): before public crawling, the operator adds this
+exact line to `.env`, replacing `...` with a real, monitored address:
+
+```dotenv
+FMD_CONTACT_EMAIL=...
+```
+
+That value builds the default `findMyDreamCollege/<version> (+contact: <email>)`.
+With no contact, the UA remains product/version-only and preflight warns; a
+non-empty `FMD_USER_AGENT` is a full override, takes precedence over
+`FMD_CONTACT_EMAIL`, and must include its own real contact. Missing or placeholder
+contacts produce a warning rather than an error so dry-runs, tests and local
+fixtures remain usable. Nothing in the codebase invents an address.

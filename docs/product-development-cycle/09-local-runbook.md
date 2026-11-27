@@ -17,6 +17,21 @@ cp .env.example .env      # optional: every value has a working default
 Compose works with **no** `.env` file. Credentials in `.env.example` are local
 development defaults, not secrets; `.env` is gitignored.
 
+Before the first public crawl, put this exact line in `.env`, replacing `...`
+with a real, monitored contact address:
+
+```dotenv
+FMD_CONTACT_EMAIL=...
+```
+
+The project supplies no address. With no explicit `FMD_USER_AGENT`, this builds
+the default `findMyDreamCollege/<version> (+contact: <email>)`; with an empty
+contact it uses the truthful product/version-only UA and the crawl preflight
+warns. A non-empty `FMD_USER_AGENT` is a full override and takes precedence over
+`FMD_CONTACT_EMAIL`, so it must carry its own real contact. The missing/placeholder
+warning is deliberately not fatal: `--dry-run`, tests and local fixtures remain
+usable.
+
 ## 1. Build
 
 ```bash

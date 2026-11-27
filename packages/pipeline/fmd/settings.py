@@ -9,9 +9,12 @@ infrastructure, not product data.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from fmd import __version__
 
 
 class Settings(BaseSettings):
@@ -25,15 +28,29 @@ class Settings(BaseSettings):
     migrations_dir: Path | None = Field(default=None, validation_alias="FMD_MIGRATIONS_DIR")
     snapshot_dir: Path | None = Field(default=None, validation_alias="FMD_SNAPSHOT_DIR")
     admin_token: str | None = Field(default=None, validation_alias="FMD_ADMIN_TOKEN")
-    user_agent: str = Field(
-        default="findMyDreamCollege/0.1 (+contact: set-me@example.com)",
-        validation_alias="FMD_USER_AGENT",
-    )
+    contact_email: str = Field(default="", validation_alias="FMD_CONTACT_EMAIL")
+    user_agent: str = Field(default="", validation_alias="FMD_USER_AGENT")
     default_rps: float = Field(default=1.0, validation_alias="FMD_DEFAULT_RPS")
     max_pages_per_domain_per_day: int = Field(
         default=200, validation_alias="FMD_MAX_PAGES_PER_DOMAIN_PER_DAY"
     )
     cors_origins: str = Field(default="http://localhost:3000", validation_alias="FMD_CORS_ORIGINS")
+
+    @model_validator(mode="after")
+    def _build_default_user_agent(self) -> Self:
+        """Build the default UA without inventing an operator contact.
+
+        A non-empty FMD_USER_AGENT is an explicit full override and wins over
+        FMD_CONTACT_EMAIL. With no contact configured, the UA still identifies
+        the crawler truthfully; the public-crawl preflight warns about the
+        missing contact instead of fabricating one.
+        """
+        if not self.user_agent:
+            self.user_agent = f"findMyDreamCollege/{__version__}"
+            contact_email = self.contact_email.strip()
+            if contact_email:
+                self.user_agent += f" (+contact: {contact_email})"
+        return self
 
 
 def get_settings() -> Settings:

@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -818,23 +819,44 @@ def _orchestrator(args: argparse.Namespace):
     return Orchestrator(registry=registry, database=database), database
 
 
+_CONTACT_IN_USER_AGENT = re.compile(r"\(\+contact:\s*([^)]*)\)", re.IGNORECASE)
+_PLACEHOLDER_CONTACT_MARKERS = (
+    "set-me",
+    "example.com",
+    "example.net",
+    "example.org",
+    "your-email",
+    "changeme",
+)
+
+
 def _warn_placeholder_user_agent() -> None:
-    """Public crawls must present a truthful UA with a real contact
-    (invariant 9). The shipped default still carries the placeholder, so
-    warn loudly and name the fix; never invent an address for the operator.
-    A warning (not an error) keeps dry-runs and tests usable."""
+    """Warn when the effective crawler UA lacks a real contact (invariant 9).
+
+    FMD_CONTACT_EMAIL supplies the default UA's contact; FMD_USER_AGENT is a
+    full override. Missing and placeholder contacts are warnings, not errors,
+    so dry-runs, tests and local fixtures remain usable. No address is invented.
+    """
     from fmd.settings import get_settings
 
     user_agent = get_settings().user_agent
-    lowered = user_agent.lower()
-    if "set-me" in lowered or "example.com" in lowered:
-        print(
-            "WARNING: FMD_USER_AGENT still contains a placeholder contact "
-            f"({user_agent}). Public crawls must present a real contact "
-            "address — set FMD_USER_AGENT in .env before pointing the "
-            "crawler at the public web.",
-            file=sys.stderr,
-        )
+    match = _CONTACT_IN_USER_AGENT.search(user_agent)
+    contact = match.group(1).strip() if match else ""
+    if not contact:
+        problem = "does not contain a contact address"
+    elif any(marker in contact.lower() for marker in _PLACEHOLDER_CONTACT_MARKERS):
+        problem = "still contains a placeholder contact"
+    else:
+        return
+
+    print(
+        f"WARNING: crawler User-Agent {problem} ({user_agent}). "
+        "Public crawls must present a real contact address — set "
+        "FMD_CONTACT_EMAIL=... in .env when FMD_USER_AGENT is unset, or set "
+        "a full FMD_USER_AGENT with a real contact. FMD_USER_AGENT takes "
+        "precedence over FMD_CONTACT_EMAIL.",
+        file=sys.stderr,
+    )
 
 
 def _cmd_crawl(args: argparse.Namespace) -> int:
@@ -1251,6 +1273,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_worker(args: argparse.Namespace) -> int:
+    _warn_placeholder_user_agent()
     orchestrator, database = _orchestrator(args)
     summaries: list[Any] = []
     try:
