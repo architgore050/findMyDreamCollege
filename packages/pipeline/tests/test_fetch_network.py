@@ -21,12 +21,8 @@ import pytest
 from fmd.fetch.ladder import (
     FetchLadder,
     HttpxFetcher,
-    PatchrightFetcher,
-    _browser_child_pids,
-    _domain_lock,
-    _kill_new_browser_children,
 )
-from fmd.fetch.politeness import PolitenessManager, registrable_domain
+from fmd.fetch.politeness import PolitenessManager
 from fmd.fetch.robots import RobotsCache
 from fmd.fetch.types import FetchRequest
 from fmd.net.policy import (
@@ -453,20 +449,13 @@ def test_browser_policy_is_env_driven() -> None:
     )
 
 
-def test_browser_fetches_are_serialized_per_domain() -> None:
-    assert _domain_lock(registrable_domain("https://a.ac.in/x")) is _domain_lock(
-        registrable_domain("https://a.ac.in/y")
-    )
-    assert _domain_lock("a.ac.in") is not _domain_lock("b.ac.in")
+def test_mcp_browser_refuses_post_before_any_server_call() -> None:
+    from fmd.fetch.mcp_browser import InvisiblePlaywrightMCPFetcher
 
+    def _no_session() -> None:
+        raise AssertionError("no session may be created for a non-GET request")
 
-def test_browser_child_kill_is_a_noop_without_new_children() -> None:
-    before = _browser_child_pids()
-    assert _kill_new_browser_children(before, reason="test") == []
-
-
-def test_patchright_refuses_post_before_any_browser_launch() -> None:
-    tier = PatchrightFetcher(policy=BrowserPolicy.from_env({}))
+    tier = InvisiblePlaywrightMCPFetcher(session_factory=_no_session)
     with pytest.raises(Exception) as excinfo:
         tier.fetch(FetchRequest(url="https://x.example/", method="POST", body=b"x"))
     assert "cannot faithfully replay" in str(excinfo.value)

@@ -147,6 +147,21 @@ class Orchestrator:
         )
 
     # ------------------------------------------------------------------ helpers
+    def close(self) -> None:
+        """Release the fetch ladder's pooled resources (clients, MCP server).
+
+        Best-effort and idempotent: an injected fetcher without ``close`` (the
+        offline test fakes) is skipped, and a failing close is logged, never
+        raised — shutdown must not mask the stage's own outcome.
+        """
+        closer = getattr(self.fetcher, "close", None)
+        if not callable(closer):
+            return
+        try:
+            closer()
+        except Exception as exc:  # noqa: BLE001 - shutdown must never raise
+            logger.warning("fetcher close failed: %s", exc)
+
     def _require_database(self, repo: type) -> Any:
         if self.database is None:
             raise OrchestrationError(
@@ -593,6 +608,9 @@ class Orchestrator:
         finally:
             restore()
             self._heartbeat(ticks, None, stopped=True)
+            # The stealth tiers own external processes (the MCP browser server);
+            # a stopped worker must not leave them running.
+            self.close()
         return last_tick
 
     def _heartbeat(self, tick: int, summary: RunSummary | None, *, stopped: bool = False) -> None:

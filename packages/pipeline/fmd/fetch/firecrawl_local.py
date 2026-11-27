@@ -137,11 +137,13 @@ class FirecrawlLocalClient:
         max_age: int | None = None,
         client: Any | None = None,
     ) -> None:
-        self.base_url = (base_url or os.environ.get("FIRECRAWL_LOCAL_URL", "") or DEFAULT_LOCAL_URL).rstrip("/")
+        raw_url = base_url or os.environ.get("FIRECRAWL_LOCAL_URL", "") or DEFAULT_LOCAL_URL
+        self.base_url = raw_url.rstrip("/")
         try:
-            self.timeout = float(
-                timeout if timeout is not None else os.environ.get("FIRECRAWL_LOCAL_TIMEOUT_S", DEFAULT_TIMEOUT_S)
+            raw_timeout = timeout if timeout is not None else os.environ.get(
+                "FIRECRAWL_LOCAL_TIMEOUT_S", DEFAULT_TIMEOUT_S
             )
+            self.timeout = float(raw_timeout)
         except ValueError:
             self.timeout = DEFAULT_TIMEOUT_S
         self._enabled_override = enabled

@@ -140,13 +140,13 @@ def test_cf_mitigated_header_escalates() -> None:
 def test_unavailable_tier_is_skipped() -> None:
     clock = FakeClock()
     httpx_tier = FakeTier("httpx", [403])
-    patchright = FakeTier("patchright", [200])
-    ladder = make_ladder([httpx_tier, UnavailableTier(), patchright], clock)
+    browser = FakeTier("invisible_playwright_mcp", [200])
+    ladder = make_ladder([httpx_tier, UnavailableTier(), browser], clock)
 
     result = ladder.fetch("https://college.ac.in/page")
 
     assert result.status == 200
-    assert result.fetcher_tier == "patchright"
+    assert result.fetcher_tier == "invisible_playwright_mcp"
 
 
 def test_all_tiers_unavailable_raises_clear_error() -> None:

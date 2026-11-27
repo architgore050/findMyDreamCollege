@@ -1,8 +1,8 @@
 """Fetch-ladder replay tests: method/body/headers survive every tier.
 
 Offline only: httpx uses ``MockTransport``, curl_cffi is replaced in
-``sys.modules`` with a recording stand-in, and the patchright tier refuses a
-non-GET before it ever imports a browser. This is the regression suite for the
+``sys.modules`` with a recording stand-in, and the MCP browser tier refuses a
+non-GET before it ever talks to the server. This is the regression suite for the
 GET-only ladder that served NABH page 1 for every POST page.
 """
 
@@ -17,7 +17,8 @@ from urllib.parse import urlencode
 import httpx
 import pytest
 
-from fmd.fetch.ladder import CurlCffiFetcher, FetchLadder, HttpxFetcher, PatchrightFetcher
+from fmd.fetch.ladder import CurlCffiFetcher, FetchLadder, HttpxFetcher
+from fmd.fetch.mcp_browser import InvisiblePlaywrightMCPFetcher
 from fmd.fetch.politeness import PolitenessManager
 from fmd.fetch.robots import RobotsCache
 from fmd.fetch.types import FetchRequest, FetchResult, UnsupportedReplay
@@ -229,23 +230,28 @@ def test_curl_cffi_tier_replays_post(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen["content-type"] == "application/json"
 
 
-# ----------------------------------------------------------------- patchright tier
-def test_patchright_refuses_post_instead_of_downgrading() -> None:
-    tier = PatchrightFetcher()
+# ----------------------------------------------------------------- mcp browser tier
+def test_mcp_browser_refuses_post_instead_of_downgrading() -> None:
+    tier = InvisiblePlaywrightMCPFetcher(enabled=True, session_factory=_no_session)
     with pytest.raises(UnsupportedReplay, match="cannot faithfully replay POST"):
         tier.fetch(FetchRequest(url=URL, method="POST", body=b"action=x&page=2"))
 
 
+def _no_session() -> None:
+    raise AssertionError("no session may be created for a non-GET request")
+
+
 def test_ladder_records_unsupported_replay_instead_of_serving_page_one() -> None:
     clock = FakeClock()
-    ladder = make_ladder([PatchrightFetcher()], clock)
+    tier = InvisiblePlaywrightMCPFetcher(enabled=True, session_factory=_no_session)
+    ladder = make_ladder([tier], clock)
 
     result = ladder.fetch(FetchRequest(url=URL, method="POST", body=b"action=x&page=2"))
 
     assert result.status == 0
     assert result.method == "POST"
     assert result.error is not None and result.error.startswith("unsupported_replay:")
-    assert "patchright" in (result.error or "")
+    assert "invisible_playwright_mcp" in (result.error or "")
 
 
 def test_result_method_is_exposed_for_orchestration() -> None:
