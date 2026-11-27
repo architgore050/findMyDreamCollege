@@ -89,6 +89,15 @@ def navigate_ok(url: str, status: int = 200, final_url: str | None = None) -> To
     )
 
 
+def navigate_timeout() -> ToolAnswer:
+    """A tool-level networkidle timeout, like upstream reports it."""
+    return ToolAnswer(
+        structured=None,
+        text="TimeoutError: page.waitForNavigation: timeout 30000ms exceeded (networkidle)",
+        is_error=True,
+    )
+
+
 def read_html(html: str) -> ToolAnswer:
     return ToolAnswer(structured=None, text=html)
 
@@ -115,7 +124,7 @@ def test_fetch_call_order_is_open_navigate_read_html() -> None:
         "browser_read_html",
     ]
     assert session.calls[0] == ("browser_open", {})
-    assert session.calls[1] == ("browser_navigate", {"url": url, "wait_until": "domcontentloaded"})
+    assert session.calls[1] == ("browser_navigate", {"url": url, "wait_until": "networkidle"})
     assert session.calls[2] == ("browser_read_html", {"mode": "full"})
     assert result.status == 200
     assert result.ok
@@ -266,6 +275,134 @@ def test_navigate_sentence_with_a_relative_url_falls_back_to_field_parsing() -> 
     assert result.final_url == "https://college.ac.in/page"
 
 
+# ------------------------------------------------------------------- wait strategy (JS race)
+
+
+def test_navigate_waits_for_networkidle_by_default() -> None:
+    """2026-11-27 real-host finding: domcontentloaded + immediate read
+    returned the stale static shell in 1 of 10 JS fetches. The default wait
+    strategy must be networkidle so the network settles before reading."""
+    url = "https://college.ac.in/js"
+    session = FakeSession([open_ok(), navigate_ok(url), read_html("<html>rendered</html>")])
+    fetcher = make_fetcher(session)
+
+    result = fetcher.fetch(FetchRequest(url=url))
+
+    assert session.calls[1] == ("browser_navigate", {"url": url, "wait_until": "networkidle"})
+    assert result.body == b"<html>rendered</html>"
+
+
+def test_wait_until_is_configurable_via_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FMD_BROWSER_MCP_WAIT_UNTIL", "load")
+    url = "https://college.ac.in/page"
+    session = FakeSession([open_ok(), navigate_ok(url), read_html("<html>x</html>")])
+    fetcher = make_fetcher(session)
+
+    fetcher.fetch(FetchRequest(url=url))
+
+    assert session.calls[1] == ("browser_navigate", {"url": url, "wait_until": "load"})
+
+
+def test_invalid_wait_until_is_a_preflight_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(TierUnavailable, match="FMD_BROWSER_MCP_WAIT_UNTIL"):
+        InvisiblePlaywrightMCPFetcher(session_factory=lambda: FakeSession([]), wait_until="bogus")
+
+    monkeypatch.setenv("FMD_BROWSER_MCP_WAIT_UNTIL", "bogus")
+    with pytest.raises(TierUnavailable, match="FMD_BROWSER_MCP_WAIT_UNTIL"):
+        InvisiblePlaywrightMCPFetcher(session_factory=lambda: FakeSession([]))
+
+
+def test_networkidle_timeout_falls_back_to_domcontentloaded_once() -> None:
+    """A networkidle timeout (tool error or transport) triggers exactly one
+    explicit fallback navigation with domcontentloaded, then the read — the
+    page is re-navigated, never silently accepted as a stale shell."""
+    url = "https://college.ac.in/js"
+    session = FakeSession(
+        [
+            open_ok(),
+            navigate_timeout(),
+            navigate_ok(url),
+            read_html("<html>rendered late</html>"),
+        ]
+    )
+    fetcher = make_fetcher(session)
+
+    result = fetcher.fetch(FetchRequest(url=url))
+
+    wait_strategies = [
+        call[1]["wait_until"] for call in session.calls if call[0] == "browser_navigate"
+    ]
+    assert wait_strategies == ["networkidle", "domcontentloaded"]
+    assert result.status == 200
+    assert result.body == b"<html>rendered late</html>"
+
+
+def test_networkidle_transport_error_falls_back_too() -> None:
+    """The same fallback covers a raised timeout (e.g. the call-level
+    timeout), not only isError tool answers."""
+
+    class TimeoutSession(FakeSession):
+        def call_tool(self, name: str, arguments: dict | None = None) -> ToolAnswer:
+            first_navigate = name == "browser_navigate" and not any(
+                call[0] == "browser_navigate" for call in self.calls
+            )
+            if first_navigate:
+                # Record the attempt like the base would, then fail at the
+                # transport layer (the fetcher never sees an answer).
+                self.calls.append((name, dict(arguments or {})))
+                raise TimeoutError("browser MCP tool 'browser_navigate' timed out")
+            return super().call_tool(name, arguments)
+
+    url = "https://college.ac.in/js"
+    session = TimeoutSession([open_ok(), navigate_ok(url), read_html("<html>rendered</html>")])
+    fetcher = make_fetcher(session)
+
+    result = fetcher.fetch(FetchRequest(url=url))
+
+    wait_strategies = [
+        call[1]["wait_until"] for call in session.calls if call[0] == "browser_navigate"
+    ]
+    assert wait_strategies == ["networkidle", "domcontentloaded"]
+    assert result.ok
+
+
+def test_fallback_is_bounded_to_one_retry() -> None:
+    """The fallback never loops: a second failure propagates as the honest
+    browser error (exactly two navigations, no third call)."""
+    from fmd.fetch.ladder import BrowserNavigationError
+
+    url = "https://college.ac.in/js"
+    session = FakeSession([open_ok(), navigate_timeout(), navigate_timeout()])
+    fetcher = make_fetcher(session)
+
+    with pytest.raises(BrowserNavigationError):
+        fetcher.fetch(FetchRequest(url=url))
+
+    assert len([call for call in session.calls if call[0] == "browser_navigate"]) == 2
+
+
+def test_explicit_wait_until_gets_no_fallback() -> None:
+    """An operator-configured wait_until is honoured as chosen: its failure
+    propagates immediately instead of a surprise domcontentloaded retry."""
+    from fmd.fetch.ladder import BrowserNavigationError
+
+    url = "https://college.ac.in/page"
+    session = FakeSession([open_ok(), navigate_timeout()])
+    fetcher = make_fetcher(session, wait_until="load")
+
+    with pytest.raises(BrowserNavigationError):
+        fetcher.fetch(FetchRequest(url=url))
+
+    wait_strategies = [
+        call[1]["wait_until"] for call in session.calls if call[0] == "browser_navigate"
+    ]
+    assert wait_strategies == ["load"]
+
+
 # ------------------------------------------------------------------- honesty
 
 
@@ -340,10 +477,15 @@ def test_navigate_tool_error_still_raises_a_browser_navigation_error() -> None:
     from fmd.fetch.ladder import BrowserNavigationError
 
     url = "https://college.ac.in/page"
+    # The first refusal triggers the one bounded fallback; the SECOND refusal
+    # is the honest raise (and proves the fallback is bounded).
     session = FakeSession(
         [
             open_ok(),
             ToolAnswer(structured=None, text="net::ERR_CONNECTION_REFUSED at login", is_error=True),
+            ToolAnswer(
+                structured=None, text="net::ERR_CONNECTION_REFUSED at login again", is_error=True
+            ),
         ]
     )
     fetcher = make_fetcher(session)

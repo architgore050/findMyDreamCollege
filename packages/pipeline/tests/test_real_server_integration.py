@@ -35,7 +35,18 @@ def _flag(name: str) -> bool:
 
 
 class _OriginHandler(http.server.BaseHTTPRequestHandler):
-    """Tiny deterministic origin: /ok, /redirect (302 -> /ok), /missing."""
+    """Tiny deterministic origin: /ok, /redirect (302 -> /ok), /missing, /js.
+
+    ``/js`` renders its real content 250ms after load via setTimeout — the
+    stale-shell race from the 2026-11-27 real-host matrix (domcontentloaded
+    returned the static shell 1 of 10 times) as a repeatable fixture.
+    """
+
+    JS_PAGE = (
+        b"<html><body><p>static shell</p><script>"
+        b"setTimeout(function(){document.body.innerHTML='<p>rendered js page</p>';},250);"
+        b"</script></body></html>"
+    )
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib API naming
         if self.path == "/redirect":
@@ -46,6 +57,9 @@ class _OriginHandler(http.server.BaseHTTPRequestHandler):
         if self.path == "/missing":
             body = b"<html><body>404 page</body></html>"
             status = 404
+        elif self.path == "/js":
+            body = self.JS_PAGE
+            status = 200
         else:
             body = b"<html><body>ok page</body></html>"
             status = 200
@@ -99,6 +113,26 @@ def test_real_mcp_server_navigate_contract() -> None:
 
             missing = fetcher.fetch(FetchRequest(url=origin.url("/missing")))
             assert missing.status == 404 and missing.terminal
+        finally:
+            fetcher.close()
+
+
+@pytest.mark.skipif(not _flag("FMD_MCP_INTEGRATION"), reason="opt-in: set FMD_MCP_INTEGRATION=1")
+def test_real_mcp_server_renders_delayed_js_every_time() -> None:
+    """The JS read race (2026-11-27 real-host matrix, 1 of 10 stale shells):
+    a page rendering 250ms after load must be read RENDERED on every fetch
+    with the networkidle default — never the static shell."""
+    pytest.importorskip("mcp", reason="the official mcp SDK (crawl extra) is not installed")
+    with _Origin() as origin:
+        fetcher = InvisiblePlaywrightMCPFetcher(call_timeout_s=300.0)
+        try:
+            for attempt in range(1, 11):
+                result = fetcher.fetch(FetchRequest(url=origin.url("/js")))
+                assert result.status == 200 and result.ok
+                assert b"rendered js page" in result.body, (
+                    f"stale static shell on fetch {attempt}/10 — the wait strategy lost the JS race"
+                )
+                assert b"static shell" not in result.body
         finally:
             fetcher.close()
 

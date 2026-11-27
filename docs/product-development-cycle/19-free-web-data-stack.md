@@ -41,7 +41,11 @@ with the official `mcp` SDK — this process never launches a browser.
   sentence — `navigated to <final-url> (HTTP <status>)` — in the text
   blocks and `structuredContent.result`, so 404s and login-wall redirects
   are visible to the ladder (explicit `status:`/`url:` field answers are
-  still parsed for older shapes).
+  still parsed for older shapes). The navigation waits for `networkidle`
+  by default (`FMD_BROWSER_MCP_WAIT_UNTIL`:
+  `domcontentloaded|load|networkidle`) so a JS-rendered page is read after
+  the network settles, never as its static shell; a networkidle timeout
+  falls back ONCE to `domcontentloaded` (logged, never silent).
 - The server is stateful with one page, so every MCP call is serialized with a
   lock. `FetchLadder.close()` (and the orchestrator/CLI shutdown paths)
   terminates it.
