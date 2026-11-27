@@ -146,10 +146,10 @@ Command: (with SearXNG + Firecrawl Local + MCP running per
 cd packages/pipeline && set -a && . ../../.env && set +a
 scripts/serve_local.sh start && scripts/serve_local.sh probe
 uv run python -m fmd.cli eval --eval-kind verdict --stream verdict-live \
-  --audit-sample 0.2 --report-out reports/eval-verdict-live-<ts>.json
+  --audit-sample 0.4 --report-out ../../reports/eval-verdict-live-<ts>.json
 scripts/serve_local.sh stop
 # operator: complete operator_agreement in the worksheet for the sampled cases
-uv run python -m fmd.cli eval --eval-kind verdict --audit-score reports/audit-verdict-live-<ts>.json
+uv run python -m fmd.cli eval --eval-kind verdict --audit-score ../../reports/audit-verdict-live-<ts>.json
 ```
 Expected: live verdict report; operator agreement ≥70% on the audited subset;
 circularity guard (≥1 external source) passes on every audited case.
