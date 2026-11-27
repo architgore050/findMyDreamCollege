@@ -229,6 +229,22 @@ risks).
   to get the web image build to pass; committed separately. Report committed:
   `reports/acceptance.json`.
 
+- **LQ-9 — live verdict variant with the free web stack** (2026-11-27).
+  Real 26B + headed invisible MCP + SearXNG + Firecrawl Local (cloud off),
+  5 profiles: **10 searches, 0 maps, 0 provider errors**; cases 1–4 cite
+  external evidence and pass the circularity guard, case 5 has no citation;
+  all 5 verdicts are `unknown` because every run hit the 12-turn cap before
+  `emit_verdict` (harness degraded honestly). Infrastructure PASS; product
+  quality not yet proven. Report + empty operator worksheet committed:
+  `reports/eval-verdict-live-20261127T172435Z.json`,
+  `reports/audit-verdict-live-20261127T172435Z.json`. **Human audit pending.**
+- **Real fetch-ladder smoke** (2026-11-27): AIIMS homepage → 200/httpx;
+  PGIMER → `robots_disallowed`; CMC undergraduate page → 404/httpx. Failure
+  records appended to `data/scrape-failures/failures-202611.jsonl`.
+- **CI** (2026-11-27): `.github/workflows/test.yml` test run #1 green —
+  pipeline+DB+golden 1m49s, web 54s. Local full gates also green: offline
+  1653/99, DB 1746/6, web 14 files/71 tests, golden provenance 1.0.
+
 ## In-PR
 
 - (none)

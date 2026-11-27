@@ -132,20 +132,27 @@ re-verifies; naac-proxy report with non-trivial coverage (currently honest unkno
 Commit back: `data/truth/naac/**` + `reports/eval-naac-proxy-*.json`.
 Blocks: naac-proxy signal, slow-stream ladder step 2. Do NOT fabricate grades.
 
-### LQ-9: verdict live variant + human-audit gate (needs a live-backend wave first)
+### LQ-9: verdict live variant + human-audit gate
+**Status (2026-11-27):** live run completed with the free web stack; report +
+worksheet committed (`reports/eval-verdict-live-20261127T172435Z.json`,
+`reports/audit-verdict-live-20261127T172435Z.json`). Infrastructure PASS;
+all 5 verdicts `unknown` at the 12-turn cap, 4/5 evidence audits pass.
+**Operator human audit is still pending.**
 Why local: real 26B model + real web research + operator judgment; the ≥70%
 human-agreement gate (docs/v1/eval/04-verdict-audit-protocol.md) is an operator act.
-Precondition: `fmd/eval/verdict.py` ships only `MockVerdictRouter`; a live
-`VerdictBackend` implementation is a small cloud wave (scoring code is untouched by design).
-Command: (after the live-backend wave)
+Command: (with SearXNG + Firecrawl Local + MCP running per
+`docs/v1/eval/09-free-web-discovery-runbook.md`)
 ```
 cd packages/pipeline && set -a && . ../../.env && set +a
 scripts/serve_local.sh start && scripts/serve_local.sh probe
-uv run python -m fmd.cli eval --eval-kind verdict --stream verdict-live --report-out reports/eval-verdict-live-<ts>.json
+uv run python -m fmd.cli eval --eval-kind verdict --stream verdict-live \
+  --audit-sample 0.2 --report-out reports/eval-verdict-live-<ts>.json
 scripts/serve_local.sh stop
-# operator: spot-check a random 10-20% of verdicts against their evidence graphs
+# operator: complete operator_agreement in the worksheet for the sampled cases
+uv run python -m fmd.cli eval --eval-kind verdict --audit-score reports/audit-verdict-live-<ts>.json
 ```
 Expected: live verdict report; operator agreement ≥70% on the audited subset;
-circularity guard (≥1 external source) passes on every case.
+circularity guard (≥1 external source) passes on every audited case.
 Commit back: `reports/eval-verdict-live-*.json` + audit notes in `docs/v1/STATE.md`.
-Blocks: verdict stream becoming a product-quality signal (today it proves plumbing only).
+Blocks: verdict stream becoming a product-quality signal (human agreement + a
+non-unknown verdict distribution still need to be demonstrated).

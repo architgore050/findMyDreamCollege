@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "stream": "verdict-live",
+  "generated_at": "2026-11-27T17:27:44Z",
+  "seed": 13,
+  "fraction_requested": 0.2,
+  "fraction_used": 0.2,
+  "gate": 0.7,
+  "sampling_rule": "all incorrect/partially_correct verdicts + seeded random fill up to the clamped 10-20% target (docs/v1/eval/04-verdict-audit-protocol.md \u00a72.1)",
+  "n_cases": 5,
+  "entries": [
+    {
+      "profile_id": "canary-02-partially-correct",
+      "verdict": "unknown",
+      "rationale": "Live research stopped before producing a citable verdict (stop_reason: turn_cap_reached). No score is invented for incomplete research; the verdict stays unknown per the anti-hallucination rules.",
+      "reference_top3": [],
+      "selected_programmes": [],
+      "evidence": [
+        {
+          "url": "https://www.pw.live/nursing/exams/aiims-paramedical-courses-2026",
+          "title": "AIIMS Paramedical Courses 2026, List, Fees Structure, Eligibility ...",
+          "quote": "AIIMS Paramedical Courses 2026",
+          "sha256": "b86e715d93508e818568ac72feeccfba138bc513683eeaaf29779fa662bc8521",
+          "fetched_at": "2026-11-27T17:26:10Z",
+          "source_kind": "press",
+          "external": true
+        }
+      ],
+      "audit_failures": [],
+      "reverify_failures": [],
+      "fetch_ledger": [
+        {
+          "url": "https://www.shiksha.com/medicine-health-sciences/paramedical/colleges/medical-laboratory-technology-colleges-india",
+          "final_url": "https://www.shiksha.com/medicine-health-sciences/paramedical/colleges/medical-laboratory-technology-colleges-india",
+          "status": 200,
+          "sha256": "cf5fa49dc946666c198c542316366362173fe761d76ad2770688a212e8df74a1",
+          "fetched_at": "2026-11-27T17:25:54Z",
+          "n_bytes": 70051
+        },
+        {
+          "url": "https://www.aiimsexams.ac.in/advertisement/69c7bcb19edaf0a2bc4ca013",
+          "final_url": "https://www.aiimsexams.ac.in/advertisement/69c7bcb19edaf0a2bc4ca013",
+          "status": 200,
+          "sha256": "be6bc00c6a883ca261b5e996301be7e706119fceec699ef01042e3835f1b81bc",
+          "fetched_at": "2026-11-27T17:25:58Z",
+          "n_bytes": 26815
+        },
+        {
+          "url": "https://www.pw.live/nursing/exams/aiims-paramedical-courses-2026",
+          "final_url": "https://www.pw.live/nursing/exams/aiims-paramedical-courses-2026",
+          "status": 200,
+          "sha256": "b86e715d93508e818568ac72feeccfba138bc513683eeaaf29779fa662bc8521",
+          "fetched_at": "2026-11-27T17:26:10Z",
+          "n_bytes": 480394
+        }
+      ],
+      "unknown_aspects": [
+        "stop_reason: turn_cap_reached",
+        "research incomplete: the reference top-3 was never derived"
+      ],
+      "as_of": "2026-11-22",
+      "operator_agreement": null
+    }
+  ]
+}

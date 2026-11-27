@@ -1,0 +1,549 @@
+{
+  "aggregate": {
+    "agreement_rate": 0.0,
+    "audit_failures": 1,
+    "incorrect_rate": 0.0,
+    "maps_used": 0,
+    "n_cases": 5,
+    "n_fetches_mean": 3.6,
+    "n_profiles": 5,
+    "n_turns_mean": 12.0,
+    "partial_rate": 0.0,
+    "provider_errors": 0,
+    "reverify_failures": 0,
+    "schema_violations": 0,
+    "searches_used": 10,
+    "top3_overlap_mean": 0.0,
+    "unknown_coverage": 1.0
+  },
+  "backend": {
+    "map_provider": "firecrawl_local",
+    "max_fetches": 6,
+    "max_maps": 2,
+    "max_searches": 2,
+    "max_turns": 12,
+    "mode": "live",
+    "provider": "local",
+    "purpose": "verdict_live",
+    "search_provider": "searxng",
+    "sessions_dir": null
+  },
+  "cases": [
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:25:38Z",
+            "quote": "Top Medical Laboratory Technology Colleges in Delhi 2026",
+            "sha256": "ae390e0f8107ba3baed60e4121075c6a9e2da0f40d4f3a8f02efabef68ec46b6",
+            "source_kind": "ranking",
+            "title": "Top Medical Laboratory Technology Colleges in Delhi 2026",
+            "url": "https://medicine.careers360.com/colleges/list-of-medical-laboratory-technology-colleges-in-delhi"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:25:38Z",
+            "quote": "Top Medical Laboratory Technology Colleges in Delhi 2026",
+            "sha256": "ae390e0f8107ba3baed60e4121075c6a9e2da0f40d4f3a8f02efabef68ec46b6",
+            "source_kind": "ranking",
+            "title": "Top Medical Laboratory Technology Colleges in Delhi 2026 \u2013 Courses, Fees, Admission, Rank",
+            "url": "https://medicine.careers360.com/colleges/list-of-medical-laboratory-technology-colleges-in-delhi"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:25:38Z",
+            "quote": "Top Medical Laboratory Technology Colleges in Delhi 2026 \u2013 Courses, Fees, Admission, Rank",
+            "sha256": "ae390e0f8107ba3baed60e4121075c6a9e2da0f40d4f3a8f02efabef68ec46b6",
+            "source_kind": "ranking",
+            "title": "Top Medical Laboratory Technology Colleges in Delhi 2026",
+            "url": "https://medicine.careers360.com/colleges/list-of-medical-laboratory-technology-colleges-in-delhi"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:25:38Z",
+            "quote": "Top Medical Laboratory Technology Colleges in Delhi 2026 \u2013 Courses, Fees, Admission, Rank",
+            "sha256": "ae390e0f8107ba3baed60e4121075c6a9e2da0f40d4f3a8f02efabef68ec46b6",
+            "source_kind": "ranking",
+            "title": "Top Medical Laboratory Technology Colleges in Delhi 2026",
+            "url": "https://medicine.careers360.com/colleges/list-of-medical-laboratory-technology-colleges-in-delhi"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:25:38Z",
+            "quote": "Top Medical Laboratory Technology Colleges in Delhi 2026 \u2013 Courses, Fees, Admission, Rank",
+            "sha256": "ae390e0f8107ba3baed60e4121075c6a9e2da0f40d4f3a8f02efabef68ec46b6",
+            "source_kind": "ranking",
+            "title": "Top Medical Laboratory Technology Colleges in Delhi 2026",
+            "url": "https://medicine.careers360.com/colleges/list-of-medical-laboratory-technology-colleges-in-delhi"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 5,
+        "n_external": 5,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 5,
+        "fetches_used": 4,
+        "maps_used": 0,
+        "profile_id": "canary-01-correct",
+        "provider_errors": 0,
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "searches_used": 2,
+        "stop_reason": "turn_cap_reached",
+        "turns_used": 12
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-27T17:24:56Z",
+          "final_url": "https://www.shiksha.com/medicine-health-sciences/paramedical/colleges/medical-laboratory-technology-colleges-india",
+          "n_bytes": 70608,
+          "sha256": "7ee805a8c0b0d68162a7dba25e272f9518f3882a8ff4992ac62674a64fdeeb81",
+          "status": 200,
+          "url": "https://www.shiksha.com/medicine-health-sciences/paramedical/colleges/medical-laboratory-technology-colleges-india"
+        },
+        {
+          "fetched_at": "2026-11-27T17:25:14Z",
+          "final_url": "https://collegedunia.com/bmlt-colleges",
+          "n_bytes": 74323,
+          "sha256": "4c156966f1720452a9e0b68ec9851c21801e096db8f3919975460d47a8103040",
+          "status": 200,
+          "url": "https://collegedunia.com/bmlt-colleges"
+        },
+        {
+          "fetched_at": "2026-11-27T17:25:38Z",
+          "final_url": "https://medicine.careers360.com/colleges/list-of-medical-laboratory-technology-colleges-in-delhi",
+          "n_bytes": 878139,
+          "sha256": "ae390e0f8107ba3baed60e4121075c6a9e2da0f40d4f3a8f02efabef68ec46b6",
+          "status": 200,
+          "url": "https://medicine.careers360.com/colleges/list-of-medical-laboratory-technology-colleges-in-delhi"
+        }
+      ],
+      "product_top3": [
+        "All India Institute of Medical Sciences, Delhi",
+        "Post Graduate Institute of Medical Education and Research",
+        "Christian Medical College"
+      ],
+      "profile_id": "canary-01-correct",
+      "rationale": "Live research stopped before producing a citable verdict (stop_reason: turn_cap_reached). No score is invented for incomplete research; the verdict stays unknown per the anti-hallucination rules.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 5
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "stop_reason: turn_cap_reached",
+        "research incomplete: the reference top-3 was never derived"
+      ],
+      "verdict": "unknown"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:10Z",
+            "quote": "AIIMS Paramedical Courses 2026",
+            "sha256": "b86e715d93508e818568ac72feeccfba138bc513683eeaaf29779fa662bc8521",
+            "source_kind": "press",
+            "title": "AIIMS Paramedical Courses 2026, List, Fees Structure, Eligibility ...",
+            "url": "https://www.pw.live/nursing/exams/aiims-paramedical-courses-2026"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 1,
+        "n_external": 1,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 1,
+        "fetches_used": 6,
+        "maps_used": 0,
+        "profile_id": "canary-02-partially-correct",
+        "provider_errors": 0,
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "searches_used": 2,
+        "stop_reason": "turn_cap_reached",
+        "turns_used": 12
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-27T17:25:54Z",
+          "final_url": "https://www.shiksha.com/medicine-health-sciences/paramedical/colleges/medical-laboratory-technology-colleges-india",
+          "n_bytes": 70051,
+          "sha256": "cf5fa49dc946666c198c542316366362173fe761d76ad2770688a212e8df74a1",
+          "status": 200,
+          "url": "https://www.shiksha.com/medicine-health-sciences/paramedical/colleges/medical-laboratory-technology-colleges-india"
+        },
+        {
+          "fetched_at": "2026-11-27T17:25:58Z",
+          "final_url": "https://www.aiimsexams.ac.in/advertisement/69c7bcb19edaf0a2bc4ca013",
+          "n_bytes": 26815,
+          "sha256": "be6bc00c6a883ca261b5e996301be7e706119fceec699ef01042e3835f1b81bc",
+          "status": 200,
+          "url": "https://www.aiimsexams.ac.in/advertisement/69c7bcb19edaf0a2bc4ca013"
+        },
+        {
+          "fetched_at": "2026-11-27T17:26:10Z",
+          "final_url": "https://www.pw.live/nursing/exams/aiims-paramedical-courses-2026",
+          "n_bytes": 480394,
+          "sha256": "b86e715d93508e818568ac72feeccfba138bc513683eeaaf29779fa662bc8521",
+          "status": 200,
+          "url": "https://www.pw.live/nursing/exams/aiims-paramedical-courses-2026"
+        }
+      ],
+      "product_top3": [
+        "Vidya Institute of Allied Health Sciences",
+        "All India Institute of Medical Sciences, Delhi",
+        "City Care Paramedical College, Hyderabad"
+      ],
+      "profile_id": "canary-02-partially-correct",
+      "rationale": "Live research stopped before producing a citable verdict (stop_reason: turn_cap_reached). No score is invented for incomplete research; the verdict stays unknown per the anti-hallucination rules.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 1
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "stop_reason: turn_cap_reached",
+        "research incomplete: the reference top-3 was never derived"
+      ],
+      "verdict": "unknown"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:24Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:24Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:24Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:24Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:24Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:24Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:24Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:24Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 8,
+        "n_external": 8,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 8,
+        "fetches_used": 1,
+        "maps_used": 0,
+        "profile_id": "canary-03-incorrect",
+        "provider_errors": 0,
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "searches_used": 2,
+        "stop_reason": "turn_cap_reached",
+        "turns_used": 12
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-27T17:26:24Z",
+          "final_url": "https://www.sunriseuniversity.in/department-of-para-medical-science",
+          "n_bytes": 128134,
+          "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+          "status": 200,
+          "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+        }
+      ],
+      "product_top3": [
+        "Sunrise Institute of Paramedical Sciences",
+        "City Care Paramedical College, Hyderabad",
+        "Vidya Institute of Allied Health Sciences"
+      ],
+      "profile_id": "canary-03-incorrect",
+      "rationale": "Live research stopped before producing a citable verdict (stop_reason: turn_cap_reached). No score is invented for incomplete research; the verdict stays unknown per the anti-hallucination rules.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 8
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "stop_reason: turn_cap_reached",
+        "research incomplete: the reference top-3 was never derived"
+      ],
+      "verdict": "unknown"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:45Z",
+            "quote": "Malabar Medical College Institute of Allied and Health Sciences, Kozhikode: private self-financing Allied Health Sciences college (KUHS). 1 course incl.",
+            "sha256": "c88978906c30ac66797368caba55ecd8a41f4cc998674c1df575056d1046db7a",
+            "source_kind": "institution",
+            "title": "Malabar Med. Coll. Inst., Kozhikode: Allied Health Courses 2026",
+            "url": "https://mycollegepath.in/malabar-medical-college-institute-of-allied-and-health-kerala-allied-health-courses-admission-kozhikode.html"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:45Z",
+            "quote": "Malabar Medical College Institute of Allied and Health Sciences, Kozhikode: private self-financing Allied Health Sciences college (KUHS). 1 course incl.",
+            "sha256": "c88978906c30ac66797368caba55ecd8a41f4cc998674c1df575056d1046db7a",
+            "source_kind": "institution",
+            "title": "Malabar Med. Coll. Inst., Kozhikode: Allied Health Courses 2026",
+            "url": "https://mycollegepath.in/malabar-medical-college-institute-of-allied-and-health-kerala-allied-health-courses-admission-kozhikode.html"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:45Z",
+            "quote": "Malabar Medical College Institute of Allied and Health Sciences, Kozhikode: private self-financing Allied Health Sciences college (KUHS). 1 course incl.",
+            "sha256": "c88978906c30ac66797368caba55ecd8a41f4cc998674c1df575056d1046db7a",
+            "source_kind": "institution",
+            "title": "Malabar Med. Coll. Inst., Kozhikode: Allied Health Courses 2026",
+            "url": "https://mycollegepath.in/malabar-medical-college-institute-of-allied-and-health-kerala-allied-health-courses-admission-kozhikode.html"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:45Z",
+            "quote": "Malabar Medical College Institute of Allied and Health Sciences, Kozhikode: private self-financing Allied Health Sciences college (KUHS). 1 course incl.",
+            "sha256": "c88978906c30ac66797368caba55ecd8a41f4cc998674c1df575056d1046db7a",
+            "source_kind": "institution",
+            "title": "Malabar Med. Coll. Inst., Kozhikode: Allied Health Courses 2026",
+            "url": "https://mycollegepath.in/malabar-medical-college-institute-of-allied-and-health-kerala-allied-health-courses-admission-kozhikode.html"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:45Z",
+            "quote": "Malabar Medical College Institute of Allied and Health Sciences, Kozhikode: private self-financing Allied Health Sciences college (KUHS). 1 course incl.",
+            "sha256": "c88978906c30ac66797368caba55ecd8a41f4cc998674c1df575056d1046db7a",
+            "source_kind": "institution",
+            "title": "Malabar Med. Coll. Inst., Kozhikode: Allied Health Courses 2026",
+            "url": "https://mycollegepath.in/malabar-medical-college-institute-of-allied-and-health-kerala-allied-health-courses-admission-kozhikode.html"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:45Z",
+            "quote": "Malabar Medical College Institute of Allied and Health Sciences, Kozhikode: private self-financing Allied Health Sciences college (KUHS). 1 course incl.",
+            "sha256": "c88978906c30ac66797368caba55ecd8a41f4cc998674c1df575056d1046db7a",
+            "source_kind": "institution",
+            "title": "Malabar Med. Coll. Inst., Kozhikode: Allied Health Courses 2026",
+            "url": "https://mycollegepath.in/malabar-medical-college-institute-of-allied-and-health-kerala-allied-health-courses-admission-kozhikode.html"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-27T17:26:45Z",
+            "quote": "Malabar Medical College Institute of Allied and Health Sciences, Kozhikode: private self-financing Allied Health Sciences college (KUHS). 1 course incl.",
+            "sha256": "c88978906c30ac66797368caba55ecd8a41f4cc998674c1df575056d1046db7a",
+            "source_kind": "institution",
+            "title": "Malabar Med. Coll. Inst., Kozhikode: Allied Health Courses 2026",
+            "url": "https://mycollegepath.in/malabar-medical-college-institute-of-allied-and-health-kerala-allied-health-courses-admission-kozhikode.html"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 7,
+        "n_external": 7,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 7,
+        "fetches_used": 2,
+        "maps_used": 0,
+        "profile_id": "canary-04-unknown",
+        "provider_errors": 0,
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "searches_used": 2,
+        "stop_reason": "turn_cap_reached",
+        "turns_used": 12
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-27T17:26:41Z",
+          "final_url": "https://www.shiksha.com/medicine-health-sciences/paramedical/colleges/medical-laboratory-technology-colleges-kerala",
+          "n_bytes": 75877,
+          "sha256": "16b01ad143aa0a4bd315585f8ce81b11ce6f2f404d93154c1937e6d7e0aec9fe",
+          "status": 200,
+          "url": "https://www.shiksha.com/medicine-health-sciences/paramedical/colleges/medical-laboratory-technology-colleges-kerala"
+        },
+        {
+          "fetched_at": "2026-11-27T17:26:45Z",
+          "final_url": "https://mycollegepath.in/malabar-medical-college-institute-of-allied-and-health-kerala-allied-health-courses-admission-kozhikode.html",
+          "n_bytes": 42287,
+          "sha256": "c88978906c30ac66797368caba55ecd8a41f4cc998674c1df575056d1046db7a",
+          "status": 200,
+          "url": "https://mycollegepath.in/malabar-medical-college-institute-of-allied-and-health-kerala-allied-health-courses-admission-kozhikode.html"
+        }
+      ],
+      "product_top3": [
+        "Malabar Allied Health Academy, Kozhikode",
+        "Coastal Institute of Health Sciences",
+        "Backwater Paramedical College"
+      ],
+      "profile_id": "canary-04-unknown",
+      "rationale": "Live research stopped before producing a citable verdict (stop_reason: turn_cap_reached). No score is invented for incomplete research; the verdict stays unknown per the anti-hallucination rules.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 7
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "stop_reason: turn_cap_reached",
+        "research incomplete: the reference top-3 was never derived"
+      ],
+      "verdict": "unknown"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [],
+        "failures": [
+          "circularity guard: verdict cites no source outside the product's ingested evidence (needs >= 1 external source)"
+        ],
+        "n_evidence": 0,
+        "n_external": 0,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 0,
+        "fetches_used": 5,
+        "maps_used": 0,
+        "profile_id": "canary-05-correct-thin-negative",
+        "provider_errors": 0,
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "searches_used": 2,
+        "stop_reason": "turn_cap_reached",
+        "turns_used": 12
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-27T17:27:06Z",
+          "final_url": "https://www.shiksha.com/medicine-health-sciences/paramedical/colleges/medical-laboratory-technology-colleges-india",
+          "n_bytes": 70099,
+          "sha256": "f6e2e61b19da7b84cfe0947463917d2d4523a04683306593275bbfff4565a307",
+          "status": 200,
+          "url": "https://www.shiksha.com/medicine-health-sciences/paramedical/colleges/medical-laboratory-technology-colleges-india"
+        },
+        {
+          "fetched_at": "2026-11-27T17:27:14Z",
+          "final_url": "https://collegedunia.com/medical/medical-laboratory-technology-colleges",
+          "n_bytes": 76807,
+          "sha256": "2810a14b4593021ac80e4a43c3f3ff201a32523aeb0e4bd74e76498ccf93a907",
+          "status": 200,
+          "url": "https://collegedunia.com/medical/medical-laboratory-technology-colleges"
+        },
+        {
+          "fetched_at": "2026-11-27T17:27:42Z",
+          "final_url": "https://www.aiimsexams.ac.in/advertisement/69c7bcb19edaf0a2bc4ca013",
+          "n_bytes": 26815,
+          "sha256": "be6bc00c6a883ca261b5e996301be7e706119fceec699ef01042e3835f1b81bc",
+          "status": 200,
+          "url": "https://www.aiimsexams.ac.in/advertisement/69c7bcb19edaf0a2bc4ca013"
+        },
+        {
+          "fetched_at": "2026-11-27T17:27:36Z",
+          "final_url": "https://docs.aiimsexams.ac.in/sites/final%20B.Sc.%202025%20-V2.pdf",
+          "n_bytes": 16171304,
+          "sha256": "da37e964b53f1801e30cadcc213e3ac486230f354fc47ca0e5dbc3cccc03c774",
+          "status": 200,
+          "url": "https://docs.aiimsexams.ac.in/sites/final%20B.Sc.%202025%20-V2.pdf"
+        }
+      ],
+      "product_top3": [
+        "Post Graduate Institute of Medical Education and Research",
+        "All India Institute of Medical Sciences, Delhi",
+        "Lakeview Institute of Paramedical Education"
+      ],
+      "profile_id": "canary-05-correct-thin-negative",
+      "rationale": "Live research stopped before producing a citable verdict (stop_reason: turn_cap_reached). No score is invented for incomplete research; the verdict stays unknown per the anti-hallucination rules.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 0
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "stop_reason: turn_cap_reached",
+        "research incomplete: the reference top-3 was never derived"
+      ],
+      "verdict": "unknown"
+    }
+  ],
+  "eval_kind": "product",
+  "generated_at": "2026-11-27T17:27:44Z",
+  "ok": true,
+  "proxy_label": null,
+  "schema_version": 1,
+  "stream": "verdict-live",
+  "truth": {}
+}
