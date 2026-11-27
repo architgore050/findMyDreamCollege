@@ -39,6 +39,7 @@ A data-mining + scoring tool that inventories bachelor's-level Medical Laborator
 4. `config/` — the registry. If behaviour is not driven by config, it is probably wrong.
 5. `docs/product-development-cycle/18-scrape-failures.md` — reading the scraping-failure log (what we lose to blocked/failed fetches).
 6. `docs/product-development-cycle/14-deferred-items.md` — deferred/future items (e.g. the prompt-injection prevention pass, §E); consult when starting new work.
+7. `docs/product-development-cycle/20-future-paid-web-services.md` — the paid-service OPPORTUNITY list (Firecrawl Cloud, Tavily, proxies, Alexandria, …): read it so you know what exists, but DO NOT implement any of it by default — invariant 10 keeps the code free/self-hosted; the implemented path is `19-free-web-data-stack.md`.
 
 ## Invariants (a PR that violates one is rejected)
 
