@@ -16,7 +16,8 @@ NON-NEGOTIABLE SCOPE: FREE / SELF-HOSTED ONLY
 - Paid/managed future opportunities go in a DOC only (Task D), never in code.
 
 BRANCHING
-1. `git switch -c v1/free-web-stack` from main at the base SHA; verify `git rev-parse HEAD`.
+1. `git switch -c v1/free-web-stack` from main at the base SHA; verify `git rev-parse HEAD`;
+   if it differs from BASE SHA, set BASE SHA := `git rev-parse HEAD` (the true base for this run).
 2. `git push origin v1/free-web-stack` immediately.
 3. Commit + push after every logical step. Subagents branch off this branch and PR into it.
 4. End: PR `v1/free-web-stack` → `main`.
