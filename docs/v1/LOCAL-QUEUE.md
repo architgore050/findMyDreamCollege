@@ -133,11 +133,12 @@ Commit back: `data/truth/naac/**` + `reports/eval-naac-proxy-*.json`.
 Blocks: naac-proxy signal, slow-stream ladder step 2. Do NOT fabricate grades.
 
 ### LQ-9: verdict live variant + human-audit gate
-**Status (2026-11-27):** live run completed with the free web stack; report +
-worksheet committed (`reports/eval-verdict-live-20261127T172435Z.json`,
-`reports/audit-verdict-live-20261127T172435Z.json`). Infrastructure PASS;
-all 5 verdicts `unknown` at the 12-turn cap, 4/5 evidence audits pass.
-**Operator human audit is still pending.**
+**Status (2026-11-28):** post-fix2 live run completed: **4/5 emitted,
+0 turn-cap stops**, 5 searches / 4 maps, schema retries work, no paid fallback.
+Two cases still failed the external-citation audit; all labels are `unknown`.
+A **scoreable 2-entry worksheet** (`canary-01`, `canary-02`) is ready at
+`reports/audit-verdict-live-post-fix2.json`; `operator_agreement` is empty.
+**Operator human audit is pending.**
 Why local: real 26B model + real web research + operator judgment; the ≥70%
 human-agreement gate (docs/v1/eval/04-verdict-audit-protocol.md) is an operator act.
 Command: (with SearXNG + Firecrawl Local + MCP running per

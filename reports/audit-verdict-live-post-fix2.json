@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "stream": "verdict-live",
+  "generated_at": "2026-11-27T20:52:02Z",
+  "seed": 13,
+  "fraction_requested": 0.4,
+  "fraction_used": 0.2,
+  "gate": 0.7,
+  "sampling_rule": "all incorrect/partially_correct verdicts + seeded random fill up to the clamped 10-20% target, with a minimum of min(2, n_cases) entries (docs/v1/eval/04-verdict-audit-protocol.md \u00a72.1)",
+  "n_cases": 5,
+  "entries": [
+    {
+      "profile_id": "canary-01-correct",
+      "verdict": "unknown",
+      "rationale": "While the product's shortlist includes prestigious Indian medical institutions like AIIMS Delhi, PGIMER, and CMC, I have been unable to verify the specific availability or curriculum of the 'B.Sc. Medical Laboratory Technology' programme at these institutions through the provided research. The only fetched page (aiims.edu) provided a homepage excerpt without specific course details, and the search budget was exhausted before I could confirm the existence of this exact degree title at the ranked institutions.",
+      "reference_top3": [],
+      "selected_programmes": [],
+      "evidence": [
+        {
+          "url": "https://www.aiims.edu",
+          "title": "AIIMS - All India Institute Of Medical Science",
+          "quote": "All India Institute Of Medical Science",
+          "sha256": "5450c03dc1a6d25e739d906d2e7e24cf59a38fff4ba9bf51ac67a20c44f8a5d8",
+          "fetched_at": "2026-11-27T20:50:26Z",
+          "source_kind": "institution",
+          "external": true
+        }
+      ],
+      "audit_failures": [],
+      "reverify_failures": [],
+      "fetch_ledger": [
+        {
+          "url": "https://www.aiims.edu",
+          "final_url": "https://www.aiims.edu/index.php/en",
+          "status": 200,
+          "sha256": "5450c03dc1a6d25e739d906d2e7e24cf59a38fff4ba9bf51ac67a20c44f8a5d8",
+          "fetched_at": "2026-11-27T20:50:26Z",
+          "n_bytes": 226209
+        }
+      ],
+      "unknown_aspects": [
+        "verification of B.Sc. Medical Laboratory Technology programme availability at AIIMS Delhi",
+        "verification of B.Sc. Medical Laboratory Technology programme availability at PGIMER",
+        "verification of B.Sc. Medical Laboratory Technology programme availability at CMC"
+      ],
+      "as_of": "2026-11-22",
+      "operator_agreement": null
+    },
+    {
+      "profile_id": "canary-02-partially-correct",
+      "verdict": "unknown",
+      "rationale": "The research was unable to verify the existence of the specific 'B.Sc. Medical Laboratory Technology' programme at the listed institutions. While the AIIMS website was fetched, the attempt to access the academic programs page resulted in a 404 error, and the site map yielded no direct links to the course. Consequently, I cannot confirm if the product's shortlist matches the actual course offerings for the target field in India.",
+      "reference_top3": [],
+      "selected_programmes": [],
+      "evidence": [
+        {
+          "url": "https://www.aiims.edu",
+          "title": "AIIMS Home Page",
+          "quote": "AIIMS - All India Institute Of Medical Science",
+          "sha256": "5450c03dc1a6d25e739d906d2e7e24cf59a38fff4ba9bf51ac67a20c44f8a5d8",
+          "fetched_at": "2026-11-27T20:50:43Z",
+          "source_kind": "institution",
+          "external": true
+        }
+      ],
+      "audit_failures": [],
+      "reverify_failures": [],
+      "fetch_ledger": [
+        {
+          "url": "https://www.aiims.edu",
+          "final_url": "https://www.aiims.edu/index.php/en",
+          "status": 200,
+          "sha256": "5450c03dc1a6d25e739d906d2e7e24cf59a38fff4ba9bf51ac67a20c44f8a5d8",
+          "fetched_at": "2026-11-27T20:50:43Z",
+          "n_bytes": 226209
+        }
+      ],
+      "unknown_aspects": [
+        "existence of B.Sc. Medical Laboratory Technology at Vidya Institute of Allied Health Sciences",
+        "existence of B.Sc. Medical Laboratory Technology at All India Institute of Medical Sciences, Delhi",
+        "existence of B.Sc. Medical Laboratory Technology at City Care Paramedical College, Hyderabad"
+      ],
+      "as_of": "2026-11-22",
+      "operator_agreement": null
+    }
+  ]
+}
