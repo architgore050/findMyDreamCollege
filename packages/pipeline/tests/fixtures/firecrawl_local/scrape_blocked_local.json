@@ -1,0 +1,16 @@
+{
+  "comment": "Real /v2/scrape answer (Firecrawl Local 0.1.1, local real-server matrix 2026-11-27) for a blocked target with the server running FIRECRAWL_CLOUD=off: data.source=local, blocked=true, metadata.statusCode=403. This is an honest LOCAL block, not a cloud hand-off: the adapter must surface the real status (target_blocked) so the ladder can escalate or quarantine, never return content, and never confuse it with cloud taint.",
+  "success": true,
+  "data": {
+    "source": "local",
+    "blocked": true,
+    "metadata": {
+      "sourceURL": "http://127.0.0.1:18765/forbidden",
+      "url": "http://127.0.0.1:18765/forbidden",
+      "statusCode": 403,
+      "error": "Forbidden by target site policy"
+    },
+    "html": "",
+    "markdown": ""
+  }
+}

@@ -160,19 +160,61 @@ def test_cloud_source_fails_closed_and_is_recorded_as_a_failure() -> None:
     assert result.body == b""
 
 
-def test_blocked_flag_fails_closed_wherever_it_appears() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
+def test_local_blocked_target_is_an_honest_403_target_blocked() -> None:
+    """Real 0.1.1 shape (finding #5): data.source=local, blocked=true,
+    metadata.statusCode=403. Honest failure so the ladder can escalate or
+    quarantine — NOT a cloud hand-off, and never content."""
+    client = fixture_client("scrape_blocked_local.json")
+
+    result = client.scrape("http://127.0.0.1:18765/forbidden")
+
+    assert result.status == 403
+    assert result.error == "target_blocked"
+    assert result.body == b""
+    assert result.blocked  # the ladder's BLOCK_STATUSES escalation signal
+    assert not result.ok
+    client.close()
+
+
+def test_blocked_flag_in_metadata_or_data_is_an_honest_target_blocked() -> None:
+    def handler_data(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=scrape_payload(data_extra={"blocked": True}))
 
-    client = make_client(handler)
-    with pytest.raises(FirecrawlCloudHandoffForbidden):
-        client.scrape("https://college.ac.in/fees")
+    result = make_client(handler_data).scrape("https://college.ac.in/fees")
+    assert result.status == 200  # the declared statusCode is kept honestly
+    assert result.error == "target_blocked"
+    assert result.body == b""
 
     def handler_meta(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=scrape_payload(metadata={"blocked": True}))
 
-    with pytest.raises(FirecrawlCloudHandoffForbidden):
-        make_client(handler_meta).scrape("https://college.ac.in/fees")
+    result = make_client(handler_meta).scrape("https://college.ac.in/fees")
+    assert result.error == "target_blocked"
+    assert result.body == b""
+
+
+def test_blocked_without_a_declared_status_defaults_to_403() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = scrape_payload(data_extra={"blocked": True})
+        del payload["data"]["metadata"]["statusCode"]
+        return httpx.Response(200, json=payload)
+
+    result = make_client(handler).scrape("https://college.ac.in/fees")
+    assert result.status == 403
+    assert result.error == "target_blocked"
+
+
+def test_cloud_taint_wins_over_a_local_block_and_fails_closed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=scrape_payload(
+                metadata={"source": "firecrawl-cloud"}, data_extra={"blocked": True}
+            ),
+        )
+
+    with pytest.raises(FirecrawlCloudHandoffForbidden, match="cloud_handoff_forbidden"):
+        make_client(handler).scrape("https://college.ac.in/fees")
 
 
 def test_bad_responses_are_typed() -> None:

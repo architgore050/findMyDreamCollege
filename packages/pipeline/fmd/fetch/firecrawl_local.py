@@ -7,12 +7,16 @@ Scrape/crawl/map/PDF parsing all run locally.
 
 **The no-cloud invariant.** The upstream server sends *search* and
 blocked-page fallbacks to Firecrawl Cloud by default. This client refuses any
-answer that came from the cloud: if the response metadata says
-``source == "firecrawl-cloud"`` or ``blocked == true``, the result fails closed
+answer that came from the cloud: if any provenance field (top level, ``data``
+or ``metadata``) says ``source == "firecrawl-cloud"``, the result fails closed
 with :class:`FirecrawlCloudHandoffForbidden` — a typed error, recorded in the
-scrape-failure log, never silently accepted. Operators must start the server
-with ``FIRECRAWL_CLOUD=off`` (``scripts/firecrawl_local.sh`` does exactly
-that); an unrecognized ``FIRECRAWL_CLOUD`` value also means "off" upstream.
+scrape-failure log, never silently accepted. A **local** block
+(``blocked == true`` with a local source) is different: it is reported
+honestly as ``target_blocked`` with the real status so the ladder can escalate
+or quarantine — it is never treated as content, and never as cloud taint.
+Operators must start the server with ``FIRECRAWL_CLOUD=off``
+(``scripts/firecrawl_local.sh`` does exactly that); an unrecognized
+``FIRECRAWL_CLOUD`` value also means "off" upstream.
 
 httpx only — the ``firecrawl`` SDK is deliberately not used (it is cloud-first
 and would blur the local-only guarantee).
@@ -108,16 +112,37 @@ def _first_dict(payload: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {}
 
 
-def _is_cloud_or_blocked(data: dict[str, Any], metadata: dict[str, Any]) -> bool:
-    """Cloud answers are recognizable in two places; treat either as fatal."""
-    for container in (metadata, data):
-        source = str(container.get("source", "") or "").strip().lower()
-        if source == CLOUD_SOURCE:
-            return True
-        blocked = container.get("blocked")
-        if blocked is True or str(blocked or "").strip().lower() == "true":
-            return True
-    return False
+def _scan_provenance(payload: Any, *, _depth: int = 0) -> tuple[bool, bool]:
+    """Scan a v2 answer for cloud taint and block flags, wherever they hide.
+
+    Returns ``(cloud, blocked)``. The walk covers the top level, ``data``,
+    ``metadata`` and nested known containers (dict/list values, small depth
+    cap), so a top-level ``source`` or a flag inside ``data.metadata`` cannot
+    slip past the guard (defense in depth over the documented v2 shapes).
+    """
+    if _depth > 4:
+        return False, False
+    if isinstance(payload, dict):
+        cloud = False
+        blocked = False
+        source = payload.get("source")
+        if isinstance(source, str) and source.strip().lower() == CLOUD_SOURCE:
+            cloud = True
+        flag = payload.get("blocked")
+        if flag is True or (isinstance(flag, str) and flag.strip().lower() == "true"):
+            blocked = True
+        children = list(payload.values())
+    elif isinstance(payload, list):
+        cloud = False
+        blocked = False
+        children = list(payload)
+    else:
+        return False, False
+    for child in children:
+        sub_cloud, sub_blocked = _scan_provenance(child, _depth=_depth + 1)
+        cloud = cloud or sub_cloud
+        blocked = blocked or sub_blocked
+    return cloud, blocked
 
 
 class FirecrawlLocalClient:
@@ -241,17 +266,34 @@ class FirecrawlLocalClient:
         data = _first_dict(payload, "data")
         if not data:
             raise FirecrawlBadResponse("firecrawl_bad_response: scrape response has no data object")
-        metadata = _first_dict(data, "metadata")
-        if _is_cloud_or_blocked(data, metadata):
+        cloud, blocked = _scan_provenance(payload)
+        if cloud:
             raise FirecrawlCloudHandoffForbidden(
                 "cloud_handoff_forbidden: Firecrawl Local answer came from firecrawl-cloud "
-                "or was blocked by the cloud fallback; refusing it (start the server with "
+                "(top level, data or metadata); refusing it (start the server with "
                 "FIRECRAWL_CLOUD=off)"
             )
+        metadata = _first_dict(data, "metadata")
         status_raw = metadata.get("statusCode")
+        final_url = self._final_url(metadata, url)
+        if blocked:
+            # A LOCAL block (data.source=local, blocked=true — the real 0.1.1
+            # shape for a forbidden target) is an honest target failure, not a
+            # cloud hand-off: surface the real status so the ladder can
+            # escalate or quarantine, and never return content.
+            status = int(status_raw) if status_raw is not None else 403
+            return FetchResult(
+                url=url,
+                final_url=final_url,
+                status=status,
+                headers={},
+                body=b"",
+                fetcher_tier=TIER_FIRECRAWL_LOCAL,
+                error="target_blocked",
+                method="GET",
+            )
         if status_raw is None:
             raise FirecrawlBadResponse("firecrawl_bad_response: scrape metadata has no statusCode")
-        final_url = self._final_url(metadata, url)
         html = data.get("html")
         body = html if isinstance(html, str) and html else data.get("markdown") or ""
         if not isinstance(body, str):  # defensive: v2 always returns strings here
