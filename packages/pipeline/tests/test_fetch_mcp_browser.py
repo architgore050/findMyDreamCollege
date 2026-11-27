@@ -521,6 +521,34 @@ def test_passthrough_env_forwards_display_vars_and_prefixes(
     assert env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
 
 
+def test_passthrough_env_defaults_headless_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-11-27 real-host finding: upstream's own default when the variable
+    is UNSET is headless=1, which needs Xvfb and failed with
+    mcp_browser_no_display. The spawn env must make the documented headed
+    default real."""
+    from fmd.fetch.mcp_browser import _passthrough_env
+
+    monkeypatch.delenv("STEALTHFOX_HEADLESS", raising=False)
+
+    env = _passthrough_env()
+
+    assert env["STEALTHFOX_HEADLESS"] == "0"
+
+
+def test_passthrough_env_keeps_explicit_headless_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fmd.fetch.mcp_browser import _passthrough_env
+
+    monkeypatch.setenv("STEALTHFOX_HEADLESS", "1")
+    assert _passthrough_env()["STEALTHFOX_HEADLESS"] == "1"
+
+    monkeypatch.setenv("STEALTHFOX_HEADLESS", "0")
+    assert _passthrough_env()["STEALTHFOX_HEADLESS"] == "0"
+
+
 def test_passthrough_env_drops_unset_and_empty_display_vars(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
