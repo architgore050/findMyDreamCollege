@@ -1,0 +1,82 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: fmd
+          POSTGRES_PASSWORD: fmd
+          POSTGRES_DB: fmd
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fmd -d fmd"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://fmd:fmd@localhost:5432/fmd
+      FMD_EXTRACT_PROVIDER: mock
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install pipeline dependencies
+        working-directory: packages/pipeline
+        run: uv sync --all-extras
+      - name: Lint Python
+        working-directory: packages/pipeline
+        run: uv run ruff check .
+      - name: Check shell syntax
+        run: |
+          find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+      - name: Apply database migrations
+        working-directory: packages/pipeline
+        run: uv run python -m fmd.cli migrate
+      - name: Pipeline tests (including DB)
+        working-directory: packages/pipeline
+        run: uv run pytest -q
+      - name: Golden eval / provenance gate
+        working-directory: packages/pipeline
+        run: uv run python -m fmd.cli eval --golden ../../data/golden
+
+  web:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install web dependencies
+        working-directory: apps/web
+        run: pnpm install --frozen-lockfile
+      - name: Lint web
+        working-directory: apps/web
+        run: pnpm lint
+      - name: Test web
+        working-directory: apps/web
+        run: pnpm test
+      - name: Build web
+        working-directory: apps/web
+        run: pnpm build
