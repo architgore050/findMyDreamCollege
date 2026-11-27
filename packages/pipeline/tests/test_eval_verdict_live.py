@@ -141,7 +141,7 @@ def test_loop_terminates_at_turn_and_fetch_cap() -> None:
     session = sessions["live-cap-turn-loop"]
     profile = inline_profile("live-cap-turn-loop", [])
     verdict, backend = run_one(profile, session)
-    assert backend.last_run["turns_used"] == 8  # hard model-turn cap
+    assert backend.last_run["turns_used"] == 12  # hard model-turn cap (default)
     assert backend.last_run["fetches_used"] == 6  # hard fetch cap (12 were requested)
     assert backend.last_run["stop_reason"] == "turn_cap_reached"
     assert verdict.verdict == "unknown"  # degraded honestly, never guessed
@@ -418,6 +418,288 @@ def test_cite_source_only_accepts_fetched_pages_with_verbatim_quotes() -> None:
     assert verdict.evidence[0].quote == "only this text"
     pointer = verdict.evidence[0]
     assert pointer.sha256 == backend.ledger_for("live-bad-cite")[pointer.url].sha256
+
+
+# ------------------------------------------------------------------- discovery (free, leads-only)
+
+
+class FakeSearchProvider:
+    """Free SearXNG stand-in: DocumentRef-shaped leads from one fixture query."""
+
+    name = "searxng"
+
+    def __init__(self, results: list | Exception | None = None) -> None:
+        self.results = results
+        self.queries: list[str] = []
+
+    def search(self, query: str) -> list:
+        self.queries.append(query)
+        if isinstance(self.results, Exception):
+            raise self.results
+        return list(self.results or [])
+
+
+class FakeMapProvider:
+    """Free Firecrawl Local stand-in: MapLink-shaped links, or a typed error."""
+
+    name = "firecrawl_local"
+
+    def __init__(self, results: list | Exception | None = None) -> None:
+        self.results = results
+        self.calls: list[tuple[str, str | None]] = []
+
+    def map(self, url: str, *, query: str | None = None, limit: int = 50) -> list:
+        self.calls.append((url, query))
+        if isinstance(self.results, Exception):
+            raise self.results
+        return list(self.results or [])
+
+
+class _Lead:
+    def __init__(self, url: str, title: str, engine: str = "duckduckgo") -> None:
+        self.url = url
+        self.title = title
+        self.metadata = {"title": title, "engine": engine, "score": 1.0}
+
+
+class _Link:
+    def __init__(self, url: str, title: str, description: str = "") -> None:
+        self.url = url
+        self.title = title
+        self.description = description
+
+
+def discovery_session(profile_id: str) -> LiveSession:
+    """Fetch the mapped page, cite it, emit: proves leads need fetch_url+cite."""
+    return session_from_turns(
+        profile_id,
+        [{"url": "https://aiims.edu/academics/mlt", "body": "<html>BSc MLT prospectus</html>"}],
+        [
+            {
+                "action": "search_web",
+                "query": "AIIMS BSc MLT admission",
+                "note": "find official page",
+            },
+            {"action": "map_site", "url": "https://aiims.edu", "query": "MLT", "note": "site map"},
+            {"action": "fetch_url", "url": "https://aiims.edu/academics/mlt"},
+            {
+                "action": "cite_source",
+                "url": "https://aiims.edu/academics/mlt",
+                "quote": "BSc MLT prospectus",
+                "title": "AIIMS academics",
+                "source_kind": "institution",
+            },
+            {
+                "action": "emit_verdict",
+                "verdict": {
+                    "profile_id": profile_id,
+                    "verdict": "unknown",
+                    "rationale": "discovery helped; verdict stays honest",
+                    "unknown_aspects": ["reference not derivable from one page"],
+                    "as_of": "2026-11-22",
+                },
+            },
+        ],
+    )
+
+
+def backend_with_providers(
+    session: LiveSession,
+    *,
+    search: FakeSearchProvider | None,
+    maps: FakeMapProvider | None,
+    **kwargs,
+):
+    return LiveVerdictBackend(
+        ScriptedModelRouter(session),
+        ScriptedPageFetcher(session.pages),
+        search_provider=search,
+        map_provider=maps,
+        **kwargs,
+    )
+
+
+def test_search_and_map_turns_journal_leads_and_leave_the_ledger_clean() -> None:
+    session = discovery_session("live-discovery-ok")
+    search = FakeSearchProvider([_Lead("https://aiims.edu/academics/mlt", "AIIMS academics")])
+    maps = FakeMapProvider([_Link("https://aiims.edu/academics/mlt", "MLT", "BSc syllabus")])
+    backend = backend_with_providers(session, search=search, maps=maps)
+    profile = inline_profile("live-discovery-ok", [])
+
+    verdict = backend.respond(profile)
+    stats = backend.last_run
+    assert stats["searches_used"] == 1 and stats["maps_used"] == 1
+    assert stats["provider_errors"] == 0
+    # discovery output reached the journal as leads (title | url | engine)
+    assert not verdict.evidence or all(
+        pointer.url == "https://aiims.edu/academics/mlt" for pointer in verdict.evidence
+    )
+    ledger = backend.ledger_for("live-discovery-ok")
+    assert list(ledger) == ["https://aiims.edu/academics/mlt"], (
+        "the ledger must hold ONLY the fetched page, never a bare lead"
+    )
+    assert verdict.verdict == "unknown" and verdict.evidence
+    # the map provider received the query focus
+    assert maps.calls == [("https://aiims.edu", "MLT")]
+
+
+def test_search_and_map_caps_are_enforced() -> None:
+    session = session_from_turns(
+        "live-discovery-cap",
+        [{"url": "https://fixture.invalid/live/d/page", "body": "<html>p</html>"}],
+        [
+            {"action": "search_web", "query": "one"},
+            {"action": "search_web", "query": "two"},
+            {"action": "search_web", "query": "three — over the cap"},
+            {"action": "map_site", "url": "https://fixture.invalid/a"},
+            {"action": "map_site", "url": "https://fixture.invalid/b"},
+            {"action": "map_site", "url": "https://fixture.invalid/c"},
+        ],
+    )
+    search = FakeSearchProvider([_Lead("https://fixture.invalid/x", "x")])
+    maps = FakeMapProvider([_Link("https://fixture.invalid/y", "y")])
+    backend = backend_with_providers(session, search=search, maps=maps)
+    profile = inline_profile("live-discovery-cap", [])
+
+    backend.respond(profile)
+
+    stats = backend.last_run
+    assert stats["searches_used"] == backend.max_searches == 2
+    assert stats["maps_used"] == backend.max_maps == 2
+    assert search.queries == ["one", "two"]
+    assert [url for url, _ in maps.calls] == ["https://fixture.invalid/a", "https://fixture.invalid/b"]
+
+
+def test_provider_unavailable_is_an_honest_journal_note_not_a_crash() -> None:
+    session = session_from_turns(
+        "live-discovery-missing",
+        [],
+        [
+            {"action": "search_web", "query": "who knows"},
+            {"action": "map_site", "url": "https://fixture.invalid/nowhere"},
+            {
+                "action": "emit_verdict",
+                "verdict": {
+                    "profile_id": "live-discovery-missing",
+                    "verdict": "unknown",
+                    "rationale": "no providers, no guesses",
+                    "unknown_aspects": ["no discovery, no evidence"],
+                    "as_of": "2026-11-22",
+                },
+            },
+        ],
+    )
+    # No providers at all (replay mode default): the loop journals and moves on.
+    backend = backend_with_providers(session, search=None, maps=None)
+    profile = inline_profile("live-discovery-missing", [])
+
+    verdict = backend.respond(profile)
+
+    assert verdict.verdict == "unknown"
+    assert backend.last_run["searches_used"] == 0
+    assert backend.last_run["maps_used"] == 0
+    assert backend.last_run["provider_errors"] == 0
+    assert backend.last_run["stop_reason"] == "emitted_verdict"
+
+
+def test_provider_errors_are_counted_and_discovery_stays_free() -> None:
+    session = session_from_turns(
+        "live-discovery-errors",
+        [],
+        [
+            {"action": "search_web", "query": "boom search"},
+            {"action": "map_site", "url": "https://fixture.invalid/boom"},
+            {
+                "action": "emit_verdict",
+                "verdict": {
+                    "profile_id": "live-discovery-errors",
+                    "verdict": "unknown",
+                    "rationale": "providers failed honestly; no paid fallback was tried",
+                    "unknown_aspects": ["discovery unavailable"],
+                    "as_of": "2026-11-22",
+                },
+            },
+        ],
+    )
+    search = FakeSearchProvider(RuntimeError("searxng down"))
+    maps = FakeMapProvider(RuntimeError("firecrawl local unreachable"))
+    backend = backend_with_providers(session, search=search, maps=maps)
+    profile = inline_profile("live-discovery-errors", [])
+
+    verdict = backend.respond(profile)
+
+    assert backend.last_run["provider_errors"] == 2
+    assert backend.last_run["searches_used"] == 1
+    assert backend.last_run["maps_used"] == 1
+    assert verdict.evidence == []
+
+
+def test_firecrawl_cloud_handoff_is_an_honest_failure_with_no_evidence() -> None:
+    from fmd.fetch.firecrawl_local import FirecrawlCloudHandoffForbidden
+
+    session = session_from_turns(
+        "live-discovery-cloud",
+        [{"url": "https://fixture.invalid/live/cloud/page", "body": "<html>real page</html>"}],
+        [
+            {"action": "map_site", "url": "https://fixture.invalid/cloud-site"},
+            {"action": "fetch_url", "url": "https://fixture.invalid/live/cloud/page"},
+            {
+                "action": "emit_verdict",
+                "verdict": {
+                    "profile_id": "live-discovery-cloud",
+                    "verdict": "unknown",
+                    "rationale": "the map provider tried to hand off to the cloud; refused",
+                    "unknown_aspects": ["site map unavailable locally"],
+                    "as_of": "2026-11-22",
+                },
+            },
+        ],
+    )
+    maps = FakeMapProvider(
+        FirecrawlCloudHandoffForbidden(
+            "cloud_handoff_forbidden: Firecrawl Local answer came from firecrawl-cloud"
+        )
+    )
+    backend = backend_with_providers(session, search=FakeSearchProvider([]), maps=maps)
+    profile = inline_profile("live-discovery-cloud", [])
+
+    verdict = backend.respond(profile)
+
+    assert backend.last_run["provider_errors"] == 1
+    assert backend.last_run["stop_reason"] == "emitted_verdict"
+    # the cloud-tainted answer contributed NOTHING to the evidence graph
+    assert [pointer.url for pointer in verdict.evidence] == []
+
+
+def test_research_action_requires_query_or_url_for_discovery() -> None:
+    with pytest.raises(ValidationError, match="search_web needs a query"):
+        ResearchAction.model_validate({"action": "search_web"})
+    with pytest.raises(ValidationError, match="map_site needs a url"):
+        ResearchAction.model_validate({"action": "map_site", "query": "x"})
+    action = ResearchAction.model_validate(
+        {"action": "map_site", "url": "https://aiims.edu", "query": "MLT"}
+    )
+    assert action.query == "MLT"
+
+
+def test_cli_verdict_live_reports_discovery_fields(mock_provider, tmp_path: Path) -> None:
+    report_path = tmp_path / "eval-verdict-live.json"
+    code = main(
+        [
+            "eval", "--eval-kind", "verdict", "--stream", "verdict-live",
+            "--report-out", str(report_path),
+            "--max-searches", "3", "--max-maps", "1",
+        ]
+    )
+    assert code == 0
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    backend = report["backend"]
+    assert backend["max_searches"] == 3 and backend["max_maps"] == 1
+    assert backend["search_provider"] == "none"  # replay mode stays offline
+    assert backend["map_provider"] == "none"
+    aggregate = report["aggregate"]
+    assert aggregate["searches_used"] == 0 and aggregate["maps_used"] == 0
+    assert aggregate["provider_errors"] == 0
 
 
 # ------------------------------------------------------------------- audit tooling

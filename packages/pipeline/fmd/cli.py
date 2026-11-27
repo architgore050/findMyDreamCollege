@@ -7,7 +7,9 @@ with a non-zero exit and a pointer to the brief rather than pretending to run.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -398,14 +400,26 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument(
         "--max-turns",
         type=int,
-        default=8,
-        help="verdict-live: hard cap on model turns per profile (default 8)",
+        default=12,
+        help="verdict-live: hard cap on model turns per profile (default 12)",
     )
     eval_parser.add_argument(
         "--max-fetches",
         type=int,
         default=6,
         help="verdict-live: hard cap on fetches per profile (default 6)",
+    )
+    eval_parser.add_argument(
+        "--max-searches",
+        type=int,
+        default=2,
+        help="verdict-live: hard cap on free SearXNG searches per profile (default 2)",
+    )
+    eval_parser.add_argument(
+        "--max-maps",
+        type=int,
+        default=2,
+        help="verdict-live: hard cap on free Firecrawl Local site maps per profile (default 2)",
     )
 
     score_parser = subparsers.add_parser(
@@ -1604,6 +1618,36 @@ def _cmd_eval_audit_score(args: argparse.Namespace) -> int:
     return 3 if outcome["result"] == "INSUFFICIENT" else 1
 
 
+def _verdict_live_discovery_providers() -> tuple[Any | None, Any | None]:
+    """Free, env-only discovery providers for verdict-live (no API keys).
+
+    SearXNG: ``SEARXNG_URL`` if set, else ``http://127.0.0.1:${SEARXNG_PORT:-8888}``
+    (the compose service). Firecrawl Local: ``FIRECRAWL_LOCAL_URL`` (default
+    ``http://127.0.0.1:3002``); the client starts disabled until the operator
+    sets ``FIRECRAWL_LOCAL_ENABLED=1``. Construction never touches the network —
+    an unreachable provider surfaces as an honest provider_error in the run
+    journal, never a crash and never a paid fallback.
+    """
+    search_provider = None
+    map_provider = None
+    try:
+        from fmd.discover.searxng import SearxngClient
+
+        searxng_url = os.environ.get("SEARXNG_URL", "").strip() or (
+            f"http://127.0.0.1:{os.environ.get('SEARXNG_PORT', '8888')}"
+        )
+        search_provider = SearxngClient(searxng_url)
+    except Exception as exc:  # noqa: BLE001 - a broken provider is a journal note
+        print(f"fmd eval: SearXNG provider unavailable: {exc}", file=sys.stderr)
+    try:
+        from fmd.fetch.firecrawl_local import FirecrawlLocalClient
+
+        map_provider = FirecrawlLocalClient.from_env()
+    except Exception as exc:  # noqa: BLE001 - a broken provider is a journal note
+        print(f"fmd eval: Firecrawl Local provider unavailable: {exc}", file=sys.stderr)
+    return search_provider, map_provider
+
+
 def _cmd_eval_verdict_live(args: argparse.Namespace) -> int:
     """verdict-live: the bounded live-research backend (replay in CI, live on host).
 
@@ -1666,6 +1710,13 @@ def _cmd_eval_verdict_live(args: argparse.Namespace) -> int:
         return 1
     replay_mode = provider_cfg.kind == "replay"
 
+    # Free discovery providers (env-only, no API keys). Replay mode stays fully
+    # offline: no providers, so scripted sessions journal honest unavailability.
+    search_provider = map_provider = None
+    ladder = None
+    if not replay_mode:
+        search_provider, map_provider = _verdict_live_discovery_providers()
+
     try:
         if replay_mode:
             sessions = load_live_sessions(sessions_dir)
@@ -1687,6 +1738,8 @@ def _cmd_eval_verdict_live(args: argparse.Namespace) -> int:
                     fetcher,
                     max_turns=args.max_turns,
                     max_fetches=args.max_fetches,
+                    max_searches=args.max_searches,
+                    max_maps=args.max_maps,
                 )
                 for profile in profiles
             ]
@@ -1704,11 +1757,16 @@ def _cmd_eval_verdict_live(args: argparse.Namespace) -> int:
                 return 1
             from fmd.fetch.ladder import FetchLadder
 
+            ladder = FetchLadder()
             backend = LiveVerdictBackend(
                 router,
-                FetchLadder(),
+                ladder,
                 max_turns=args.max_turns,
                 max_fetches=args.max_fetches,
+                max_searches=args.max_searches,
+                max_maps=args.max_maps,
+                search_provider=search_provider,
+                map_provider=map_provider,
             )
             backends = [backend] * len(profiles)
             mode = "live"
@@ -1719,6 +1777,17 @@ def _cmd_eval_verdict_live(args: argparse.Namespace) -> int:
     except (VerdictError, LLMError, RuntimeError) as exc:
         print(f"fmd eval: verdict-live failed: {exc}", file=sys.stderr)
         return 1
+    finally:
+        # The live ladder owns pooled tiers (MCP browser server, clients); the
+        # search provider owns an httpx pool. Release both, best-effort.
+        if ladder is not None:
+            with contextlib.suppress(Exception):
+                ladder.close()
+        for provider in (search_provider, map_provider):
+            closer = getattr(provider, "close", None)
+            if callable(closer):
+                with contextlib.suppress(Exception):
+                    closer()
 
     report = build_product_report("verdict-live", cases)
     report["proxy_label"] = None
@@ -1729,6 +1798,10 @@ def _cmd_eval_verdict_live(args: argparse.Namespace) -> int:
         "purpose": VERDICT_LIVE_PURPOSE,
         "max_turns": args.max_turns,
         "max_fetches": args.max_fetches,
+        "max_searches": args.max_searches,
+        "max_maps": args.max_maps,
+        "search_provider": "searxng" if search_provider is not None else "none",
+        "map_provider": "firecrawl_local" if map_provider is not None else "none",
         "sessions_dir": str(sessions_dir) if replay_mode else None,
     }
     if replay_mode:
