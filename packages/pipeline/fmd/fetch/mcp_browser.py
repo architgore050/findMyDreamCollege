@@ -30,9 +30,14 @@ concurrent fetches would race each other's navigation.
 
 Config (env, no secrets): ``FMD_BROWSER_MCP_ENABLED`` (default ``1``),
 ``FMD_BROWSER_MCP_COMMAND`` (default ``uvx``), ``FMD_BROWSER_MCP_ARGS``
-(default ``invisible-playwright-mcp``). ``STEALTHFOX_*`` and
-``INVISIBLE_MCP_HOME`` env vars are passed through to the spawned server
-unchanged.
+(default ``invisible-playwright-mcp==0.74.0`` — the version the
+2026-11-27 real-server matrix validated; upgrade deliberately).
+``STEALTHFOX_*`` and ``INVISIBLE_MCP_HOME`` env vars are passed through to
+the spawned server unchanged, plus the display/session vars a headed
+browser needs (``DISPLAY``, ``XAUTHORITY``, ``WAYLAND_DISPLAY``,
+``XDG_RUNTIME_DIR``, ``DBUS_SESSION_BUS_ADDRESS``). The committed default
+is headed (``STEALTHFOX_HEADLESS=0``); an explicit headless=1 without
+Xvfb fails a preflight naming the fix.
 """
 
 from __future__ import annotations
@@ -332,7 +337,7 @@ class InvisiblePlaywrightMCPFetcher:
         if args is not None:
             self._args = [str(part) for part in args]
         else:
-            raw_args = os.environ.get("FMD_BROWSER_MCP_ARGS", "invisible-playwright-mcp")
+            raw_args = os.environ.get("FMD_BROWSER_MCP_ARGS", "invisible-playwright-mcp==0.74.0")
             self._args = [part for part in str(raw_args).split() if part]
         self._session_factory = session_factory
         self._call_timeout_s = call_timeout_s
