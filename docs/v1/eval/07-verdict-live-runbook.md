@@ -46,9 +46,16 @@ uv run python -m fmd.cli eval --eval-kind verdict --stream verdict-live \
   --audit-sample 0.15 --audit-seed 13
 ```
 
-- Hard caps: `--max-turns 8` model turns and `--max-fetches 6` fetches per profile (defaults).
-  They are enforced in code; raise them only with a reason recorded next to the report (doc 01
-  §3.5: cost and audit hours are the limiting factors, not compute).
+- Hard caps (defaults): `--max-turns 12` model turns, `--max-fetches 6` fetches,
+  `--max-searches 1` free SearXNG search, and `--max-maps 2` Firecrawl Local site
+  maps per profile. They are enforced in code; raise them only with a reason
+  recorded next to the report (doc 01 §3.5: cost and audit hours are the limiting
+  factors, not compute).
+- The final model turn is reserved for `emit_verdict`. Its prompt explicitly
+  forbids `search_web`, `map_site`, `fetch_url`, and `cite_source`, and asks for a
+  verdict now using the evidence and citations already collected (or an honest
+  `unknown` if they are insufficient). If the model disobeys, the hard turn cap
+  still degrades the case to `unknown`; the directive never bypasses validation.
 - Every fetch the model requests goes through the fetch ladder (robots.txt honoured, per-domain
   rate limits, truthful UA with contact). If a fetch is refused or fails, the model is told and
   the page cannot be cited.

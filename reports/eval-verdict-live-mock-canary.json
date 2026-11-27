@@ -20,14 +20,14 @@
     "map_provider": "none",
     "max_fetches": 6,
     "max_maps": 2,
-    "max_searches": 2,
+    "max_searches": 1,
     "max_turns": 12,
     "mode": "replay",
     "note": "replay path (committed scripted sessions, offline); the live stream has NEVER run against a real model yet \u2014 the first real run is the operator's (LQ-9)",
     "provider": "mock",
     "purpose": "verdict_live",
     "search_provider": "none",
-    "sessions_dir": "/home/z/my-project/repo/packages/pipeline/tests/fixtures/eval_verdict/live/sessions"
+    "sessions_dir": "/tmp/opencode/verdict-tuning/wt/packages/pipeline/tests/fixtures/eval_verdict/live/sessions"
   },
   "cases": [
     {
@@ -36,7 +36,7 @@
         "evidence": [
           {
             "external": false,
-            "fetched_at": "2026-11-27T03:53:16Z",
+            "fetched_at": "2026-11-27T19:46:41Z",
             "quote": "All India Institute of Medical Sciences, Delhi - Rank 1",
             "sha256": "467e509157b198ad81c217c4548b2826ce30057072d8234947d8c4311f55f4b3",
             "source_kind": "ranking",
@@ -45,7 +45,7 @@
           },
           {
             "external": true,
-            "fetched_at": "2026-11-27T03:53:16Z",
+            "fetched_at": "2026-11-27T19:46:41Z",
             "quote": "The B.Sc. Medical Laboratory Technology programme runs 4 years with a 12-month internship.",
             "sha256": "68d3c9da6cee07df7489a7d038655ff1444af01c74aac1474f05d8ff70586883",
             "source_kind": "institution",
@@ -54,7 +54,7 @@
           },
           {
             "external": true,
-            "fetched_at": "2026-11-27T03:53:16Z",
+            "fetched_at": "2026-11-27T19:46:41Z",
             "quote": "Admissions to allied health sciences are through the institution's own entrance process.",
             "sha256": "102b6f72640b8ad5a2d29f6be3933eac9531b705dbcaf8b90f97b21fc4c9556e",
             "source_kind": "institution",
@@ -92,7 +92,7 @@
       },
       "fetch_ledger": [
         {
-          "fetched_at": "2026-11-27T03:53:16Z",
+          "fetched_at": "2026-11-27T19:46:41Z",
           "final_url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
           "n_bytes": 494,
           "sha256": "467e509157b198ad81c217c4548b2826ce30057072d8234947d8c4311f55f4b3",
@@ -100,7 +100,7 @@
           "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html"
         },
         {
-          "fetched_at": "2026-11-27T03:53:16Z",
+          "fetched_at": "2026-11-27T19:46:41Z",
           "final_url": "https://fixture.invalid/live/canary-01/aiims-curriculum",
           "n_bytes": 367,
           "sha256": "68d3c9da6cee07df7489a7d038655ff1444af01c74aac1474f05d8ff70586883",
@@ -108,7 +108,7 @@
           "url": "https://fixture.invalid/live/canary-01/aiims-curriculum"
         },
         {
-          "fetched_at": "2026-11-27T03:53:16Z",
+          "fetched_at": "2026-11-27T19:46:41Z",
           "final_url": "https://fixture.invalid/live/canary-01/cmc-allied-health",
           "n_bytes": 267,
           "sha256": "102b6f72640b8ad5a2d29f6be3933eac9531b705dbcaf8b90f97b21fc4c9556e",
@@ -142,7 +142,7 @@
         "evidence": [
           {
             "external": true,
-            "fetched_at": "2026-11-27T03:53:16Z",
+            "fetched_at": "2026-11-27T19:46:41Z",
             "quote": "The Vidya Institute of Allied Health Sciences is not listed in the state council's recognised institutions register.",
             "sha256": "10ee8b8a2df93ea74d9f94d96a3112e4ee05c39a8d653741355f77dd7c417c84",
             "source_kind": "official",
@@ -151,7 +151,7 @@
           },
           {
             "external": false,
-            "fetched_at": "2026-11-27T03:53:16Z",
+            "fetched_at": "2026-11-27T19:46:41Z",
             "quote": "All India Institute of Medical Sciences, Delhi - Rank 1",
             "sha256": "467e509157b198ad81c217c4548b2826ce30057072d8234947d8c4311f55f4b3",
             "source_kind": "ranking",
@@ -194,7 +194,7 @@
       },
       "fetch_ledger": [
         {
-          "fetched_at": "2026-11-27T03:53:16Z",
+          "fetched_at": "2026-11-27T19:46:41Z",
           "final_url": "https://fixture.invalid/live/canary-02/vidya-recognition",
           "n_bytes": 316,
           "sha256": "10ee8b8a2df93ea74d9f94d96a3112e4ee05c39a8d653741355f77dd7c417c84",
@@ -202,7 +202,7 @@
           "url": "https://fixture.invalid/live/canary-02/vidya-recognition"
         },
         {
-          "fetched_at": "2026-11-27T03:53:16Z",
+          "fetched_at": "2026-11-27T19:46:41Z",
           "final_url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
           "n_bytes": 494,
           "sha256": "467e509157b198ad81c217c4548b2826ce30057072d8234947d8c4311f55f4b3",
@@ -236,7 +236,7 @@
         "evidence": [
           {
             "external": false,
-            "fetched_at": "2026-11-27T03:53:16Z",
+            "fetched_at": "2026-11-27T19:46:41Z",
             "quote": "All India Institute of Medical Sciences, Delhi - Rank 1",
             "sha256": "467e509157b198ad81c217c4548b2826ce30057072d8234947d8c4311f55f4b3",
             "source_kind": "ranking",
@@ -245,7 +245,7 @@
           },
           {
             "external": true,
-            "fetched_at": "2026-11-27T03:53:16Z",
+            "fetched_at": "2026-11-27T19:46:41Z",
             "quote": "No record of recognition was found for the Sunrise Institute of Paramedical Sciences in the 2025 register.",
             "sha256": "48a6803dc2f1b2c1a172b7906ce71117027b9b89eafe9a241709b3b25e29b84d",
             "source_kind": "official",
@@ -254,7 +254,7 @@
           },
           {
             "external": true,
-            "fetched_at": "2026-11-27T03:53:16Z",
+            "fetched_at": "2026-11-27T19:46:41Z",
             "quote": "AIIMS Delhi offers the B.Sc. (Hons.) in Medical Laboratory Technology through its own entrance examination.",
             "sha256": "32acf8631aa100f776f5bb178023f6da7044e20048a49ccc91851d5b857e57ab",
             "source_kind": "institution",
@@ -297,7 +297,7 @@
       },
       "fetch_ledger": [
         {
-          "fetched_at": "2026-11-27T03:53:16Z",
+          "fetched_at": "2026-11-27T19:46:41Z",
           "final_url": "https://www.nirfindia.org/Rankings/2025/OverallRanking.html",
           "n_bytes": 494,
           "sha256": "467e509157b198ad81c217c4548b2826ce30057072d8234947d8c4311f55f4b3",
@@ -305,7 +305,7 @@
           "url": "https://www.nirfindia.org/Rankings/2025/OverallRanking.html"
         },
         {
-          "fetched_at": "2026-11-27T03:53:16Z",
+          "fetched_at": "2026-11-27T19:46:41Z",
           "final_url": "https://fixture.invalid/live/canary-03/sunrise-recognition",
           "n_bytes": 271,
           "sha256": "48a6803dc2f1b2c1a172b7906ce71117027b9b89eafe9a241709b3b25e29b84d",
@@ -313,7 +313,7 @@
           "url": "https://fixture.invalid/live/canary-03/sunrise-recognition"
         },
         {
-          "fetched_at": "2026-11-27T03:53:16Z",
+          "fetched_at": "2026-11-27T19:46:41Z",
           "final_url": "https://fixture.invalid/live/canary-03/aiims-programme",
           "n_bytes": 263,
           "sha256": "32acf8631aa100f776f5bb178023f6da7044e20048a49ccc91851d5b857e57ab",
@@ -347,7 +347,7 @@
         "evidence": [
           {
             "external": true,
-            "fetched_at": "2026-11-27T03:53:16Z",
+            "fetched_at": "2026-11-27T19:46:41Z",
             "quote": "The district register lists three paramedical colleges, and none of them matches the names on the product's shortlist.",
             "sha256": "e29c41b7f8c494d0eaf0f67e238521ed57ab9696b35e640a686152e0d16e002b",
             "source_kind": "official",
@@ -374,7 +374,7 @@
       },
       "fetch_ledger": [
         {
-          "fetched_at": "2026-11-27T03:53:16Z",
+          "fetched_at": "2026-11-27T19:46:41Z",
           "final_url": "https://fixture.invalid/live/canary-04/state-list-search",
           "n_bytes": 376,
           "sha256": "e29c41b7f8c494d0eaf0f67e238521ed57ab9696b35e640a686152e0d16e002b",
@@ -408,7 +408,7 @@
         "evidence": [
           {
             "external": false,
-            "fetched_at": "2026-11-27T03:53:16Z",
+            "fetched_at": "2026-11-27T19:46:41Z",
             "quote": "Post Graduate Institute of Medical Education and Research - Rank 2",
             "sha256": "467e509157b198ad81c217c4548b2826ce30057072d8234947d8c4311f55f4b3",
             "source_kind": "ranking",
@@ -417,7 +417,7 @@
           },
           {
             "external": true,
-            "fetched_at": "2026-11-27T03:53:16Z",
+            "fetched_at": "2026-11-27T19:46:41Z",
             "quote": "The B.Sc. Medical Laboratory Technology programme at PGIMER includes a 12-month rotary internship.",
             "sha256": "cb6cd8332804a92a45a179a178c8d1fce3c100c66a822df17277cf28fffbd02e",
             "source_kind": "institution",
@@ -426,7 +426,7 @@
           },
           {
             "external": true,
-            "fetched_at": "2026-11-27T03:53:16Z",
+            "fetched_at": "2026-11-27T19:46:41Z",
             "quote": "No NIRF or state-council record was found for the Lakeview Institute of Paramedical Education.",
             "sha256": "2db82a6a3973a314b76636b49d9eed3c350c90e1f6ad65fd2cec86ef85aa029b",
             "source_kind": "official",
@@ -464,7 +464,7 @@
       },
       "fetch_ledger": [
         {
-          "fetched_at": "2026-11-27T03:53:16Z",
+          "fetched_at": "2026-11-27T19:46:41Z",
           "final_url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html",
           "n_bytes": 494,
           "sha256": "467e509157b198ad81c217c4548b2826ce30057072d8234947d8c4311f55f4b3",
@@ -472,7 +472,7 @@
           "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html"
         },
         {
-          "fetched_at": "2026-11-27T03:53:16Z",
+          "fetched_at": "2026-11-27T19:46:41Z",
           "final_url": "https://fixture.invalid/live/canary-05/pgimer-internship",
           "n_bytes": 263,
           "sha256": "cb6cd8332804a92a45a179a178c8d1fce3c100c66a822df17277cf28fffbd02e",
@@ -480,7 +480,7 @@
           "url": "https://fixture.invalid/live/canary-05/pgimer-internship"
         },
         {
-          "fetched_at": "2026-11-27T03:53:16Z",
+          "fetched_at": "2026-11-27T19:46:41Z",
           "final_url": "https://fixture.invalid/live/canary-05/lakeview-no-record",
           "n_bytes": 260,
           "sha256": "2db82a6a3973a314b76636b49d9eed3c350c90e1f6ad65fd2cec86ef85aa029b",
@@ -510,7 +510,7 @@
     }
   ],
   "eval_kind": "product",
-  "generated_at": "2026-11-27T03:53:16Z",
+  "generated_at": "2026-11-27T19:46:41Z",
   "ok": true,
   "proxy_label": null,
   "schema_version": 1,

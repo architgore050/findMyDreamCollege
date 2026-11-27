@@ -9,6 +9,11 @@ degraded all five canaries to `unknown`: the agent guessed course URLs (404s),
 tried to fetch Google search pages (robots), and hit the 8-turn budget. This
 runbook is the re-run sequence with the free discovery stack enabled.
 
+The 2026-11-27 live run (`reports/eval-verdict-live-20261127T172435Z.json`)
+then reached `max_turns=12` on all five profiles: each used two searches, no
+maps, and cases 1–4 cited external evidence without emitting a verdict. The
+final-turn directive and one-search default below address that failure mode.
+
 ## 1. Preconditions (host)
 
 - Model server per doc 07 §1–2 (`scripts/serve_local.sh start && … probe`).
@@ -43,17 +48,29 @@ The tool schema the model works with (enforced in code, never negotiable):
 | Action | Free backend | Cap (default) | Output |
 | --- | --- | --- | --- |
 | `fetch_url` | fetch ladder (httpx → curl_cffi → MCP browser → Firecrawl Local) | `--max-fetches 6` | stored page (ledger) |
-| `search_web` | SearXNG (`SEARXNG_URL`) | `--max-searches 2` | title/url/engine leads |
+| `search_web` | SearXNG (`SEARXNG_URL`) | `--max-searches 1` | title/url/engine leads |
 | `map_site` | Firecrawl Local (`FIRECRAWL_LOCAL_URL`) | `--max-maps 2` | url/title/description links |
 | `cite_source` | — | — | verbatim-verified citation |
 | `emit_verdict` | — | — | structured verdict |
 
 `--max-turns` defaults to **12** (was 8; the diagnosis showed the budget too
-tight once discovery actions are in the mix). Discovery results are **leads
-only**: they never enter the evidence ledger, and a cited URL must still be
-`fetch_url`-ed in the same run (`sha256` + verbatim audit unchanged). The
-prompt also forbids constructing Google/search-engine URLs and any paid or
-cloud call; a missing provider produces an honest journal note instead.
+tight once discovery actions are in the mix). The **final turn is reserved for
+`emit_verdict`**: its prompt forbids further `search_web`, `map_site`,
+`fetch_url`, or `cite_source` actions and asks the model to emit from the
+evidence and citations already collected, including an honest `unknown` when
+they are insufficient. A model that ignores the directive still hits the hard
+cap and degrades to `unknown`; the directive does not relax any validation.
+
+`--max-searches` now defaults to **1** (was 2) so discovery cannot consume the
+emit turn; `--max-maps` remains **2**. Both remain overridable with the CLI
+flags. After `search_web` identifies an official institution domain — or one
+is visible in `ingested_evidence_urls` — call `map_site` on that domain with
+the programme name as the query **before guessing course paths**, then fetch a
+returned programme link. Discovery results are **leads only**: they never
+enter the evidence ledger, and a cited URL must still be `fetch_url`-ed in
+the same run (`sha256` + verbatim audit unchanged). The prompt also forbids
+constructing Google/search-engine URLs and any paid or cloud call; a missing
+provider produces an honest journal note instead.
 
 ## 3. Run
 
@@ -68,8 +85,8 @@ uv run python -m fmd.cli eval --eval-kind verdict --stream verdict-live \
 The command prints, among the usual lines:
 
 ```
-  limits: max_turns 12 max_fetches 6 max_searches 2 max_maps 2 (hard, enforced in code)
-  discovery (free providers): searches 2 maps 1 provider_errors 0 (search: searxng, map: firecrawl_local; no paid services)
+  limits: max_turns 12 max_fetches 6 max_searches 1 max_maps 2 (hard, enforced in code)
+  discovery (free providers): searches 1 maps 1 provider_errors 0 (search: searxng, map: firecrawl_local; no paid services)
 ```
 
 ## 4. Reading the report
@@ -78,8 +95,11 @@ Per case (`cases[].backend_run`) and in the aggregate:
 
 - `searches_used` / `maps_used` — how often the agent spent its discovery
   budget. Persistent 0s with an available provider usually mean the model
-  ignored the guidance; many caps hit (`SEARCH/MAP BUDGET EXHAUSTED` in the
-  journal) mean the caps, not the stack, are the limiting factor.
+  ignored the guidance. One search is the default and may be followed by
+  `SEARCH BUDGET EXHAUSTED`; that is expected, not a provider failure. Use
+  `map_site` on the discovered official domain, then fetch/cite or emit.
+  `turn_cap_reached` after the FINAL TURN directive means the model did not
+  emit and the harness kept the honest `unknown` degradation.
 - `provider_errors` — SearXNG/Firecrawl failures (typed, e.g.
   `cloud_handoff_forbidden`, `SearxngUnavailable`). Everything is free, so an
   error is an infrastructure problem to fix, never a billing problem. A
@@ -90,7 +110,7 @@ Per case (`cases[].backend_run`) and in the aggregate:
   `[]`.
 
 Interpretation guidance: `agreement_rate` and `unknown_coverage` are read
-exactly as in doc 07. The honest expectation for a first discovery-enabled
+exactly as in doc 07. The honest expectation for the next discovery-enabled
 run is fewer guessed-URL 404s (leads replace guesses) and fewer
 `turn_cap_reached` stops, not perfect verdicts.
 
@@ -99,6 +119,8 @@ run is fewer guessed-URL 404s (leads replace guesses) and fewer
 | Symptom | Cause / fix |
 | --- | --- |
 | `SEARCH UNAVAILABLE` in every journal | SearXNG not running or `SEARXNG_URL` wrong; probe the `/search?format=json` route |
+| `SEARCH BUDGET EXHAUSTED` after one search | Expected with the default cap; map the official institution domain, then fetch/cite or emit rather than searching again |
+| `turn_cap_reached` after a FINAL TURN directive | The model did not emit on its last turn; keep the honest `unknown`, inspect the journal, and retune before another live run |
 | `MAP UNAVAILABLE` | `FIRECRAWL_LOCAL_ENABLED=0` or server down; `scripts/firecrawl_local.sh start` |
 | `SEARCH FAILED (SearxngUnavailable)` | upstream engines rate-limited; retry later or add engines in `infra/searxng/settings.yml` |
 | `MAP FAILED (… cloud_handoff_forbidden)` | server started without `FIRECRAWL_CLOUD=off`; restart via the script |

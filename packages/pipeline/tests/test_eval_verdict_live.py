@@ -25,6 +25,7 @@ from fmd.eval.verdict import (
     load_profile_fixtures,
 )
 from fmd.eval.verdict_live import (
+    SYSTEM_PROMPT,
     AuditWorksheet,
     LiveSession,
     LiveVerdictBackend,
@@ -167,6 +168,50 @@ def test_max_turns_and_fetches_must_be_sane() -> None:
             ScriptedModelRouter(session), ScriptedPageFetcher(session.pages), max_turns=0
         )
         _ = profile  # profile unused here; construction fails first
+
+
+def test_final_turn_directive_appears_only_on_the_last_turn() -> None:
+    session = load_live_sessions(SESSIONS_DIR)["live-cap-turn-loop"]
+    backend = make_backend(session, max_turns=3)
+    profile = inline_profile("live-final-turn-prompt", [])
+
+    prompts = [
+        backend._build_user_prompt(profile, [f"turn {turn}"], [], turns_used=turn)
+        for turn in (1, 2, 3)
+    ]
+
+    assert all("FINAL TURN" not in prompt for prompt in prompts[:-1])
+    assert "FINAL TURN (3/3)" in prompts[-1]
+    assert "emit now with the evidence and citations already collected" in prompts[-1]
+    assert "Do NOT call search_web, map_site, fetch_url, or cite_source" in prompts[-1]
+    assert "emit_verdict" in prompts[-1] and "unknown" in prompts[-1]
+
+
+def test_ignored_final_turn_directive_still_degrades_honestly() -> None:
+    url = "https://fixture.invalid/live/final-disobedience/page"
+    session = session_from_turns(
+        "live-final-disobedience",
+        [{"url": url, "body": "<html>verbatim evidence</html>"}],
+        [
+            {"action": "fetch_url", "url": url},
+            {
+                "action": "cite_source",
+                "url": url,
+                "quote": "verbatim evidence",
+                "title": "Fetched fixture",
+                "source_kind": "institution",
+            },
+        ],
+    )
+    profile = inline_profile("live-final-disobedience", [])
+
+    verdict, backend = run_one(profile, session, max_turns=2)
+
+    assert backend.last_run["turns_used"] == 2
+    assert backend.last_run["stop_reason"] == "turn_cap_reached"
+    assert verdict.verdict == "unknown"
+    assert len(verdict.evidence) == 1
+    assert reverify_evidence(backend, profile, verdict) == []
 
 
 # ------------------------------------------------------------------- sha256 re-verification
@@ -423,6 +468,16 @@ def test_cite_source_only_accepts_fetched_pages_with_verbatim_quotes() -> None:
 # ------------------------------------------------------------------- discovery (free, leads-only)
 
 
+def test_system_prompt_requires_map_site_before_guessing_course_paths() -> None:
+    prompt = " ".join(SYSTEM_PROMPT.lower().split())
+
+    assert "after search_web identifies an official institution domain" in prompt
+    assert "ingested_evidence_urls" in prompt
+    assert "before guessing course paths" in prompt
+    assert '"action": "map_site"' in prompt
+    assert '"query": "b.sc. medical laboratory technology"' in prompt
+
+
 class FakeSearchProvider:
     """Free SearXNG stand-in: DocumentRef-shaped leads from one fixture query."""
 
@@ -503,6 +558,70 @@ def discovery_session(profile_id: str) -> LiveSession:
     )
 
 
+def test_scripted_search_fetch_cite_session_emits_on_final_turn() -> None:
+    class PromptRecordingRouter(ScriptedModelRouter):
+        def __init__(self, session: LiveSession) -> None:
+            super().__init__(session)
+            self.user_prompts: list[str] = []
+
+        def call(self, purpose, schema, system, user, input_ref):
+            self.user_prompts.append(user)
+            return super().call(purpose, schema, system, user, input_ref)
+
+    profile_id = "live-final-turn-emit"
+    url = "https://aiims.edu/academics/mlt"
+    session = session_from_turns(
+        profile_id,
+        [{"url": url, "body": "<html>BSc MLT prospectus</html>"}],
+        [
+            {"action": "search_web", "query": "AIIMS BSc MLT"},
+            {"action": "fetch_url", "url": url},
+            {
+                "action": "cite_source",
+                "url": url,
+                "quote": "BSc MLT prospectus",
+                "title": "AIIMS MLT programme",
+                "source_kind": "institution",
+            },
+            {
+                "action": "emit_verdict",
+                "verdict": {
+                    "profile_id": profile_id,
+                    "verdict": "unknown",
+                    "rationale": "one programme page is not enough to rank the shortlist",
+                    "unknown_aspects": ["recognition and admissions evidence for the shortlist"],
+                    "as_of": "2026-11-22",
+                },
+            },
+        ],
+    )
+    search = FakeSearchProvider([_Lead(url, "AIIMS MLT programme")])
+    router = PromptRecordingRouter(session)
+    backend = LiveVerdictBackend(
+        router,
+        ScriptedPageFetcher(session.pages),
+        max_turns=4,
+        search_provider=search,
+    )
+    profile = inline_profile(profile_id, [])
+
+    verdict = backend.respond(profile)
+
+    assert verdict.verdict == "unknown"
+    assert verdict.evidence and reverify_evidence(backend, profile, verdict) == []
+    assert backend.last_run["turns_used"] == 4
+    assert backend.last_run["searches_used"] == 1
+    assert backend.last_run["fetches_used"] == 1
+    assert backend.last_run["citations"] == 1
+    assert backend.last_run["stop_reason"] == "emitted_verdict"
+    assert ["FINAL TURN" in prompt for prompt in router.user_prompts] == [
+        False,
+        False,
+        False,
+        True,
+    ]
+
+
 def backend_with_providers(
     session: LiveSession,
     *,
@@ -564,10 +683,41 @@ def test_search_and_map_caps_are_enforced() -> None:
     backend.respond(profile)
 
     stats = backend.last_run
-    assert stats["searches_used"] == backend.max_searches == 2
+    assert stats["searches_used"] == backend.max_searches == 1
     assert stats["maps_used"] == backend.max_maps == 2
+    assert search.queries == ["one"]
+    assert [url for url, _ in maps.calls] == [
+        "https://fixture.invalid/a",
+        "https://fixture.invalid/b",
+    ]
+
+
+def test_search_cap_override_is_allowed_and_still_enforced() -> None:
+    session = session_from_turns(
+        "live-discovery-search-override",
+        [],
+        [
+            {"action": "search_web", "query": "one"},
+            {"action": "search_web", "query": "two"},
+            {"action": "search_web", "query": "three — over the overridden cap"},
+        ],
+    )
+    search = FakeSearchProvider([_Lead("https://fixture.invalid/x", "x")])
+    backend = backend_with_providers(
+        session,
+        search=search,
+        maps=None,
+        max_turns=3,
+        max_searches=2,
+    )
+    profile = inline_profile("live-discovery-search-override", [])
+
+    backend.respond(profile)
+
+    assert backend.max_searches == 2
+    assert backend.last_run["searches_used"] == 2
     assert search.queries == ["one", "two"]
-    assert [url for url, _ in maps.calls] == ["https://fixture.invalid/a", "https://fixture.invalid/b"]
+    assert backend.last_run["stop_reason"] == "turn_cap_reached"
 
 
 def test_provider_unavailable_is_an_honest_journal_note_not_a_crash() -> None:
@@ -686,9 +836,17 @@ def test_cli_verdict_live_reports_discovery_fields(mock_provider, tmp_path: Path
     report_path = tmp_path / "eval-verdict-live.json"
     code = main(
         [
-            "eval", "--eval-kind", "verdict", "--stream", "verdict-live",
-            "--report-out", str(report_path),
-            "--max-searches", "3", "--max-maps", "1",
+            "eval",
+            "--eval-kind",
+            "verdict",
+            "--stream",
+            "verdict-live",
+            "--report-out",
+            str(report_path),
+            "--max-searches",
+            "3",
+            "--max-maps",
+            "1",
         ]
     )
     assert code == 0
@@ -808,14 +966,21 @@ def test_cli_verdict_live_runs_end_to_end_on_mock_provider(
     report_path = tmp_path / "eval-verdict-live.json"
     code = main(
         [
-            "eval", "--eval-kind", "verdict", "--stream", "verdict-live",
-            "--report-out", str(report_path),
+            "eval",
+            "--eval-kind",
+            "verdict",
+            "--stream",
+            "verdict-live",
+            "--report-out",
+            str(report_path),
         ]
     )
     assert code == 0
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["stream"] == "verdict-live"
     assert report["backend"]["mode"] == "replay"
+    assert report["backend"]["max_searches"] == 1
+    assert report["backend"]["max_maps"] == 2
     assert report["aggregate"]["n_profiles"] == 5
     assert report["aggregate"]["audit_failures"] == 0
     assert all(case["reverify"]["failures"] == [] for case in report["cases"])
@@ -827,8 +992,16 @@ def test_cli_verdict_live_runs_end_to_end_on_mock_provider(
 def test_cli_verdict_live_dry_run_and_limits_parse(mock_provider, capsys) -> None:
     code = main(
         [
-            "eval", "--eval-kind", "verdict", "--stream", "verdict-live",
-            "--dry-run", "--max-turns", "5", "--max-fetches", "3",
+            "eval",
+            "--eval-kind",
+            "verdict",
+            "--stream",
+            "verdict-live",
+            "--dry-run",
+            "--max-turns",
+            "5",
+            "--max-fetches",
+            "3",
         ]
     )
     assert code == 0
@@ -844,8 +1017,14 @@ def test_cli_verdict_live_missing_session_fails_honestly(
     shutil.copy(PROFILES / "canary-01-correct.json", profiles_dir / "canary-01-correct.json")
     code = main(
         [
-            "eval", "--eval-kind", "verdict", "--stream", "verdict-live",
-            "--fixture-path", str(profiles_dir), "--dry-run",
+            "eval",
+            "--eval-kind",
+            "verdict",
+            "--stream",
+            "verdict-live",
+            "--fixture-path",
+            str(profiles_dir),
+            "--dry-run",
         ]
     )
     assert code == 1
@@ -864,9 +1043,17 @@ def test_cli_audit_sample_writes_worksheet_and_audit_score_round_trip(
     report_path = tmp_path / "eval-verdict-live.json"
     code = main(
         [
-            "eval", "--eval-kind", "verdict", "--stream", "verdict-live",
-            "--report-out", str(report_path),
-            "--audit-sample", "0.15", "--audit-seed", "13",
+            "eval",
+            "--eval-kind",
+            "verdict",
+            "--stream",
+            "verdict-live",
+            "--report-out",
+            str(report_path),
+            "--audit-sample",
+            "0.15",
+            "--audit-seed",
+            "13",
         ]
     )
     assert code == 0
@@ -884,12 +1071,22 @@ def test_cli_audit_sample_writes_worksheet_and_audit_score_round_trip(
 
 def test_cli_audit_score_pass_and_fail_exit_codes(tmp_path: Path, capsys, mock_provider) -> None:
     report_path = tmp_path / "eval-verdict-live.json"
-    assert main(
-        [
-            "eval", "--eval-kind", "verdict", "--stream", "verdict-live",
-            "--report-out", str(report_path), "--audit-sample", "0.15",
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "eval",
+                "--eval-kind",
+                "verdict",
+                "--stream",
+                "verdict-live",
+                "--report-out",
+                str(report_path),
+                "--audit-sample",
+                "0.15",
+            ]
+        )
+        == 0
+    )
     worksheet_path = tmp_path / "audit-verdict-live.json"
     worksheet = AuditWorksheet.model_validate(
         json.loads(worksheet_path.read_text(encoding="utf-8"))

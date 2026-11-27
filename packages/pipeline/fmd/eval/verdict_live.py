@@ -93,8 +93,14 @@ Hard rules:
      search (hard cap below). Results carry title + url only; they are LEADS.
      You must fetch_url a lead before you can cite it.
    - {"action": "map_site", "url": "...", "query": "optional focus", "note": "why"} —
-     free Firecrawl Local site map of one domain (hard cap below). Prefer it on
-     an institution's own domain instead of guessing course URLs.
+     free Firecrawl Local site map of one domain (hard cap below). After
+     search_web identifies an official institution domain, or a domain is
+     visible in ingested_evidence_urls, call map_site on that domain with the
+     programme name as query BEFORE guessing course paths. Concrete example:
+     {"action": "map_site", "url": "https://aiims.edu",
+      "query": "B.Sc. Medical Laboratory Technology",
+      "note": "find the official programme page before guessing paths"}.
+     Then fetch_url a returned programme link; map results are LEADS, not evidence.
    - {"action": "cite_source", "url": "...", "quote": "verbatim snippet",
       "title": "short page title", "source_kind": "official|ranking|institution|press"} —
      the quote must appear verbatim in the stored content of a fetched page;
@@ -118,7 +124,9 @@ Hard rules:
    verbatim quote relevant to the profile's institutions when you emit, cite
    the most relevant fetched page (even a partial listing page) before
    emitting. A verdict emitted with zero citations is a defect — use another
-   turn to add a citation, or emit "unknown" with the pages cited.
+   turn to add a citation, or emit "unknown" with the pages cited. Exception:
+   when the user prompt explicitly marks the last turn, do not spend it citing;
+   emit from the citations already collected, using "unknown" if none are sufficient.
 8. DISCOVERY ONLY: search_web and map_site results never enter the evidence
    ledger — they are leads. Evidence still requires fetch_url + cite_source.
 9. NEVER construct a Google (or any other search-engine) search URL and fetch
@@ -458,7 +466,7 @@ class LiveVerdictBackend:
         purpose: str = VERDICT_LIVE_PURPOSE,
         max_turns: int = 12,
         max_fetches: int = 6,
-        max_searches: int = 2,
+        max_searches: int = 1,
         max_maps: int = 2,
         search_provider: VerdictSearchProvider | None = None,
         map_provider: VerdictMapProvider | None = None,
@@ -500,7 +508,9 @@ class LiveVerdictBackend:
                     self.purpose,
                     ResearchAction,
                     SYSTEM_PROMPT,
-                    self._build_user_prompt(profile, journal, citations),
+                    self._build_user_prompt(
+                        profile, journal, citations, turns_used=stats.turns_used
+                    ),
                     f"verdict-live:{profile.profile_id}:turn-{stats.turns_used}",
                 )
             except ProviderError as exc:
@@ -530,9 +540,7 @@ class LiveVerdictBackend:
                 continue
 
             if action.action == "cite_source":
-                journal.append(
-                    self._handle_cite(action, profile, ledger, citations, stats)
-                )
+                journal.append(self._handle_cite(action, profile, ledger, citations, stats))
                 continue
 
             verdict, problems = self._finalize(action.verdict, profile, ledger, citations)
@@ -564,9 +572,7 @@ class LiveVerdictBackend:
     def _now(self) -> str:
         return self._clock().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    def _handle_fetch(
-        self, url: str, stats: BackendRunStats, ledger: dict[str, StoredPage]
-    ) -> str:
+    def _handle_fetch(self, url: str, stats: BackendRunStats, ledger: dict[str, StoredPage]) -> str:
         url = url.strip()
         if stats.fetches_used >= self.max_fetches:
             return (
@@ -630,9 +636,7 @@ class LiveVerdictBackend:
         ]
         for ref in refs[: self._SEARCH_JOURNAL_LIMIT]:
             url = getattr(ref, "url", "")
-            lines.append(
-                f"- {_result_title(ref)} | {url} | engine={_result_engine(ref)}"
-            )
+            lines.append(f"- {_result_title(ref)} | {url} | engine={_result_engine(ref)}")
         if len(refs) > self._SEARCH_JOURNAL_LIMIT:
             lines.append(f"- … {len(refs) - self._SEARCH_JOURNAL_LIMIT} more leads not shown")
         if not refs:
@@ -716,8 +720,7 @@ class LiveVerdictBackend:
         stats.citations = len(citations)
         external = url not in profile.ingested_evidence_urls
         return (
-            f"CITED: {url} ({action.source_kind}, "
-            f"{'external' if external else 'product-ingested'})"
+            f"CITED: {url} ({action.source_kind}, {'external' if external else 'product-ingested'})"
         )
 
     def _finalize(
@@ -809,6 +812,8 @@ class LiveVerdictBackend:
         profile: ProfileFixture,
         journal: list[str],
         citations: list[Citation],
+        *,
+        turns_used: int,
     ) -> str:
         lines = [
             "PROFILE CONTEXT (synthetic eval fixture; runtime input, never user data)",
@@ -836,6 +841,8 @@ class LiveVerdictBackend:
         )
         if journal:
             lines.extend(f"- {entry}" for entry in journal)
+        elif turns_used == self.max_turns:
+            lines.append("- (empty: no research actions were taken)")
         else:
             lines.append("- (empty: this is turn 1; start with fetch_url)")
         lines.append("")
@@ -846,12 +853,29 @@ class LiveVerdictBackend:
         else:
             lines.append("- (none yet)")
         lines.append("")
-        lines.append(
-            "NEXT ACTION: respond with exactly one schema-valid action object "
-            "(fetch_url | search_web | map_site | cite_source | emit_verdict). "
-            "Prefer search_web / map_site on institution domains over guessing URLs; "
-            "if the evidence is thin, emit_verdict with verdict \"unknown\"."
-        )
+        if turns_used == self.max_turns:
+            lines.append(
+                f"FINAL TURN ({turns_used}/{self.max_turns}): emit now with the evidence "
+                "and citations already collected above. This final-turn rule overrides "
+                "the earlier discovery and citation-before-emit guidance."
+            )
+            lines.append(
+                "Do NOT call search_web, map_site, fetch_url, or cite_source; no further "
+                "research actions are allowed on this turn."
+            )
+            lines.append(
+                "NEXT ACTION: respond with exactly one schema-valid emit_verdict action "
+                "now. If the collected evidence is thin, contradictory, or insufficient "
+                'for a scored verdict, emit verdict "unknown" and name unknown_aspects. '
+                "If you do not emit now, the harness will keep the verdict unknown."
+            )
+        else:
+            lines.append(
+                "NEXT ACTION: respond with exactly one schema-valid action object "
+                "(fetch_url | search_web | map_site | cite_source | emit_verdict). "
+                "Prefer search_web / map_site on institution domains over guessing URLs; "
+                'if the evidence is thin, emit_verdict with verdict "unknown".'
+            )
         return "\n".join(lines)
 
 

@@ -413,8 +413,8 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument(
         "--max-searches",
         type=int,
-        default=2,
-        help="verdict-live: hard cap on free SearXNG searches per profile (default 2)",
+        default=1,
+        help="verdict-live: hard cap on free SearXNG searches per profile (default 1)",
     )
     eval_parser.add_argument(
         "--max-maps",
