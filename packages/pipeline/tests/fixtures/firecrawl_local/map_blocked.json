@@ -1,0 +1,8 @@
+{
+  "comment": "Real /v2/map shape (2026-11-27 finding #7) when the target site blocked the mapping request while the server runs FIRECRAWL_CLOUD=off: blocked=true, no cloud taint. The leads must be refused (typed target_blocked), never returned as discovery output.",
+  "success": true,
+  "blocked": true,
+  "links": [
+    {"url": "https://college.ac.in/fees", "title": "Fees"}
+  ]
+}

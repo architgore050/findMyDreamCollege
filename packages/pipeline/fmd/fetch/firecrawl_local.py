@@ -73,6 +73,13 @@ class FirecrawlCloudHandoffForbidden(FirecrawlLocalError):
     blocked by the cloud fallback). It is never accepted."""
 
 
+class FirecrawlTargetBlocked(FirecrawlLocalError):
+    """The LOCAL server answered, but the target site blocked the request
+    (``blocked == true`` with no cloud taint). Honest refusal — for ``map``
+    the leads are rejected outright; for ``scrape`` the client reports the
+    real status on the FetchResult instead."""
+
+
 class FirecrawlBadResponse(FirecrawlLocalError):
     """The server answered but the payload is not a usable v2 shape."""
 
@@ -343,6 +350,17 @@ class FirecrawlLocalClient:
         if body.get("success") is not True and "links" not in body:
             warning = str(body.get("warning") or body.get("error") or "unknown error")
             raise FirecrawlBadResponse(f"firecrawl_bad_response: map failed: {warning}")
+        cloud, blocked = _scan_provenance(body)
+        if cloud:
+            raise FirecrawlCloudHandoffForbidden(
+                "cloud_handoff_forbidden: /v2/map answer came from firecrawl-cloud "
+                "(top level, data or metadata); refusing the leads (start the server "
+                "with FIRECRAWL_CLOUD=off)"
+            )
+        if blocked:
+            raise FirecrawlTargetBlocked(
+                "target_blocked: /v2/map answer reports blocked=true; refusing the leads"
+            )
         links = body.get("links")
         if links is None and isinstance(body.get("data"), dict):
             links = body["data"].get("links")
