@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -79,6 +80,17 @@ _OPEN_CAUSES = (
 #: Env var names passed through to the spawned MCP server, unchanged.
 _PASSTHROUGH_ENV_PREFIXES = ("STEALTHFOX_", "INVISIBLE_MCP_")
 
+#: Display/session env vars a headed browser needs on top of the prefixes
+#: above. Without them a headed server loses DISPLAY and Firefox reports
+#: "no display" (2026-11-27 real-host finding #3).
+_DISPLAY_ENV_VARS = (
+    "DISPLAY",
+    "XAUTHORITY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+)
+
 #: Upstream 0.74.0 answers ``browser_navigate`` with one sentence in the text
 #: blocks and in ``structuredContent.result``: "navigated to <url> (HTTP <n>)".
 #: Strict on purpose: the final URL (no spaces) and exactly a three-digit
@@ -117,7 +129,32 @@ def _passthrough_env() -> dict[str, str]:
     for key, value in os.environ.items():
         if key.startswith(_PASSTHROUGH_ENV_PREFIXES) and value != "":
             env[key] = value
+    for key in _DISPLAY_ENV_VARS:
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
     return env
+
+
+def _preflight_display() -> None:
+    """STEALTHFOX_HEADLESS=1 runs the browser under a virtual display.
+
+    Upstream headless still needs Xvfb; without it the server dies with a
+    bare browser error. Fail *before* spawning, with the actual fix. Only an
+    explicitly requested headless mode triggers this — the committed default
+    is headed (``STEALTHFOX_HEADLESS=0``), so tests and display-less hosts
+    that never opted in are unaffected.
+    """
+    raw = os.environ.get("STEALTHFOX_HEADLESS", "").strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        return
+    if shutil.which("Xvfb") is not None or shutil.which("xvfb-run") is not None:
+        return
+    raise TierUnavailable(
+        "browser MCP tier preflight: STEALTHFOX_HEADLESS=1 requires Xvfb and none "
+        "is installed. Install xvfb (e.g. `apt install xvfb`) or set "
+        "STEALTHFOX_HEADLESS=0 to run headed on the operator's display."
+    )
 
 
 def _structured_field(structured: dict[str, Any] | None, names: tuple[str, ...]) -> Any:
@@ -317,6 +354,7 @@ class InvisiblePlaywrightMCPFetcher:
         if self._session_factory is not None:
             self._session = self._session_factory()
             return self._session
+        _preflight_display()
         session = RealMcpSession(
             command=self._command, args=self._args, call_timeout_s=self._call_timeout_s
         )
