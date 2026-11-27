@@ -1,0 +1,12 @@
+{
+  "comment": "browser_navigate to a missing page, same 0.74.0 sentence shape: a 404 is a normal page answer (no isError), so the ladder can treat it as terminal instead of a browser failure.",
+  "tool": "browser_navigate",
+  "requested_url": "http://127.0.0.1:18765/missing",
+  "content": [
+    {"type": "text", "text": "navigated to http://127.0.0.1:18765/missing (HTTP 404)"}
+  ],
+  "structuredContent": {
+    "result": "navigated to http://127.0.0.1:18765/missing (HTTP 404)"
+  },
+  "isError": false
+}

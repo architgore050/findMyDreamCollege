@@ -13,10 +13,12 @@ Contract highlights (docs/mcp-server.md of the pinned upstream):
   ``profile_locked | no_display | missing_libraries | sandbox_blocked |
   launch_failed | downloading | download_failed``. Every ``opened=false`` is
   reported honestly (``mcp_browser_<cause>``); nothing is retried in silence.
-* ``browser_navigate(url, wait_until)`` answers with the HTTP status and the
-  final URL (``structuredContent``; text fallback), so redirects and 404s are
-  visible. ``wait_until="domcontentloaded"`` keeps the page from waiting out a
-  dead analytics beacon.
+* ``browser_navigate(url, wait_until)`` answers with one sentence —
+  ``navigated to <final-url> (HTTP <status>)`` — in the text blocks and in
+  ``structuredContent.result`` (the 0.74.0 wire shape; an explicit
+  ``status``/``url`` field answer is still parsed for older shapes), so
+  redirects and 404s are visible. ``wait_until="domcontentloaded"`` keeps the
+  page from waiting out a dead analytics beacon.
 * ``browser_read_html(mode="full")`` returns the page HTML (structure, noise
   removed, uncapped).
 
@@ -37,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -61,6 +64,12 @@ _OPEN_FAILURE_PREFIX = "mcp_browser_"
 
 #: Env var names passed through to the spawned MCP server, unchanged.
 _PASSTHROUGH_ENV_PREFIXES = ("STEALTHFOX_", "INVISIBLE_MCP_")
+
+#: Upstream 0.74.0 answers ``browser_navigate`` with one sentence in the text
+#: blocks and in ``structuredContent.result``: "navigated to <url> (HTTP <n>)".
+#: Strict on purpose: the final URL (no spaces) and exactly a three-digit
+#: status; anything else falls through to the explicit-field shape below.
+_NAVIGATION_SENTENCE = re.compile(r"navigated to (?P<url>\S+) \(HTTP (?P<status>\d{3})\)")
 
 
 @dataclass(frozen=True)
@@ -359,6 +368,23 @@ class InvisiblePlaywrightMCPFetcher:
 
     @staticmethod
     def _parse_navigation(answer: ToolAnswer, url: str) -> tuple[int, str]:
+        """Extract ``(status, final_url)`` from a ``browser_navigate`` answer.
+
+        The pinned upstream (0.74.0) speaks a sentence — "navigated to <url>
+        (HTTP <status>)" — in the text blocks and under
+        ``structuredContent.result``; it carries no explicit status/url
+        fields. That sentence is parsed first. The older explicit-field shape
+        (``status:``/``url:`` keys) stays supported for backward
+        compatibility, and an answer that carries neither is the honest
+        browser error it always was.
+        """
+        match = _NAVIGATION_SENTENCE.search(answer.text)
+        if match is None:
+            result_field = _structured_field(answer.structured, ("result",))
+            if isinstance(result_field, str):
+                match = _NAVIGATION_SENTENCE.search(result_field)
+        if match is not None and match.group("url").startswith(("http://", "https://")):
+            return int(match.group("status")), match.group("url")
         status_raw = _answer_field(
             answer, ("status", "http_status", "status_code", "httpstatuscode")
         )
