@@ -15,14 +15,23 @@ runbook is the re-run sequence with the free discovery stack enabled.
 - Free discovery, all local:
   - SearXNG: `make up` (or the compose service) — `${SEARXNG_PORT:-8888}:8080`,
     JSON format enabled. Probe: `curl -s 'http://127.0.0.1:8888/search?q=test&format=json' | head -c 300`.
-  - Firecrawl Local (optional but recommended):
-    `cargo install firecrawl-local` (Rust/cargo required), then
-    `scripts/firecrawl_local.sh start` — it always starts the server with
-    `FIRECRAWL_CLOUD=off` and waits for `GET /health` on :3002.
+  - Firecrawl Local (optional but recommended): install the tested version
+    (`cargo install --locked --version 0.1.1 firecrawl-local`, Rust/cargo
+    required), then `scripts/firecrawl_local.sh start` — it always starts
+    the server with `FIRECRAWL_CLOUD=off` and waits for `GET /health` on
+    :3002. Local PDF/DOCX parsing goes through **`/v2/scrape`** (parsed
+    text arrives as `data.markdown`); `/v2/parse` answers 501 `CLOUD_ONLY`
+    with the cloud off — do not use it.
   - MCP browser tier: `uv sync --all-extras`; the server
-    (`uvx invisible-playwright-mcp`) downloads its engine on first
-    `browser_open` (honest `mcp_browser_downloading` failure if a fetch races
-    the download; retry afterwards).
+    (`uvx invisible-playwright-mcp==0.74.0`, the tested version) downloads
+    its engine on first `browser_open` (honest `mcp_browser_downloading`
+    failure if a fetch races the download; retry afterwards). The tier is
+    **headed by default** (`STEALTHFOX_HEADLESS=0`): `DISPLAY`,
+    `XAUTHORITY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` and
+    `DBUS_SESSION_BUS_ADDRESS` are passed through to the server. For
+    headless (`STEALTHFOX_HEADLESS=1`) install `xvfb` first — without it
+    the tier fails a preflight naming that fix instead of a bare browser
+    error.
 - `.env`: keep `FMD_BROWSER_MCP_ENABLED=1`, set `FIRECRAWL_LOCAL_ENABLED=1`
   once the local server is up, `SEARXNG_URL=http://127.0.0.1:8888`
   (see `.env.example`). No API keys — none of these services take one.
@@ -95,6 +104,9 @@ run is fewer guessed-URL 404s (leads replace guesses) and fewer
 | `MAP FAILED (… cloud_handoff_forbidden)` | server started without `FIRECRAWL_CLOUD=off`; restart via the script |
 | `FETCH FAILED … mcp_browser_downloading` | engine still downloading on first use; run again |
 | `FETCH FAILED … mcp_browser_launch_failed` / `missing_libraries` | host can't run the browser; check `STEALTHFOX_*` env and system libs |
+| `FETCH FAILED … mcp_browser_no_display` | the server lost its display; keep the tier headed (`STEALTHFOX_HEADLESS=0`) and pass the display env through, or install `xvfb` for headless |
+| `FETCH FAILED … target_blocked` | the site blocked the local renderer (honest 403, no cloud involved); the ladder escalates or quarantines |
+| `MAP FAILED (target_blocked)` | the site blocked the mapping request; retry later or map a narrower domain |
 
 ## 6. What stays frozen
 
