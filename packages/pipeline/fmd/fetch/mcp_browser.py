@@ -35,8 +35,10 @@ Config (env, no secrets): ``FMD_BROWSER_MCP_ENABLED`` (default ``1``),
 ``STEALTHFOX_*`` and ``INVISIBLE_MCP_HOME`` env vars are passed through to
 the spawned server unchanged, plus the display/session vars a headed
 browser needs (``DISPLAY``, ``XAUTHORITY``, ``WAYLAND_DISPLAY``,
-``XDG_RUNTIME_DIR``, ``DBUS_SESSION_BUS_ADDRESS``). The committed default
-is headed (``STEALTHFOX_HEADLESS=0``); an explicit headless=1 without
+``XDG_RUNTIME_DIR``, ``DBUS_SESSION_BUS_ADDRESS``). The default is headed
+everywhere: ``STEALTHFOX_HEADLESS=0`` in ``.env.example`` AND a spawn-time
+``setdefault("STEALTHFOX_HEADLESS", "0")`` so an unset variable cannot
+fall back to upstream's own headless=1; an explicit headless=1 without
 Xvfb fails a preflight naming the fix.
 """
 
@@ -138,6 +140,12 @@ def _passthrough_env() -> dict[str, str]:
         value = os.environ.get(key)
         if value:
             env[key] = value
+    # Runtime default for the spawned server (2026-11-27 real-host finding):
+    # upstream itself defaults to headless=1 when the variable is unset, and
+    # that needs Xvfb — it failed with mcp_browser_no_display on a headed
+    # host whose .env was simply absent. Make the documented default real:
+    # explicit host values win, unset means headed (STEALTHFOX_HEADLESS=0).
+    env.setdefault("STEALTHFOX_HEADLESS", "0")
     return env
 
 
