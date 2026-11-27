@@ -7,6 +7,10 @@ Public surface:
 * :class:`~fmd.fetch.politeness.PolitenessManager` — per-domain rate limiting.
 * :class:`~fmd.fetch.failure_log.FetchFailure` — append-only scrape-failure log
   (``record_failure`` / ``read_failures`` / ``aggregate``, ``fmd failures``).
+* :class:`~fmd.fetch.mcp_browser.InvisiblePlaywrightMCPFetcher` — stealth browser
+  tier over the invisible-playwright-mcp server (stdio, official ``mcp`` SDK).
+* :class:`~fmd.fetch.firecrawl_local.FirecrawlLocalFetcher` — free, local-only
+  Firecrawl tier (``FIRECRAWL_CLOUD=off``; cloud answers fail closed).
 * :func:`~fmd.fetch.dedupe.sha256_hex` / ``simhash64`` — snapshot dedupe.
 """
 
@@ -28,13 +32,18 @@ from fmd.fetch.failure_log import (
     read_failures,
     record_failure,
 )
+from fmd.fetch.firecrawl_local import (
+    FirecrawlLocalClient,
+    FirecrawlLocalFetcher,
+    MapLink,
+)
 from fmd.fetch.ladder import (
     CurlCffiFetcher,
     FetchLadder,
     HttpxFetcher,
-    PatchrightFetcher,
     fetch,
 )
+from fmd.fetch.mcp_browser import InvisiblePlaywrightMCPFetcher, RealMcpSession
 from fmd.fetch.politeness import (
     PolitenessManager,
     registrable_domain,
@@ -60,9 +69,13 @@ __all__ = [
     "FetchLadder",
     "FetchRequest",
     "FetchResult",
+    "FirecrawlLocalClient",
+    "FirecrawlLocalFetcher",
     "HttpxFetcher",
-    "PatchrightFetcher",
+    "InvisiblePlaywrightMCPFetcher",
+    "MapLink",
     "PolitenessManager",
+    "RealMcpSession",
     "RobotsCache",
     "RobotsDecision",
     "TierFetcher",

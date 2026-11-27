@@ -1,20 +1,20 @@
-"""The fetch ladder: httpx -> curl_cffi -> patchright -> quarantine (brief §7).
+"""The fetch ladder: httpx -> curl_cffi -> MCP browser -> Firecrawl Local -> quarantine.
 
 Escalation happens **only** on a block signal (403/429/503 or a
 ``cf-mitigated`` response header). A 404/410 is terminal and is returned from
 the first tier. Every result carries the tier, elapsed time, final URL and the
 robots decision so the snapshot layer can record how a page was obtained.
+
+The stealth tiers are external processes, not in-process engines: the MCP
+browser tier (:mod:`fmd.fetch.mcp_browser`) drives ``invisible-playwright-mcp``
+over stdio, and the Firecrawl Local tier (:mod:`fmd.fetch.firecrawl_local`)
+talks to a locally served ``firecrawl-local`` with ``FIRECRAWL_CLOUD=off``.
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
-import os
-import signal
-import sys
-import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
@@ -32,7 +32,6 @@ from fmd.fetch.politeness import (
     PolitenessManager,
     SystemClock,
     parse_retry_after,
-    registrable_domain,
 )
 from fmd.fetch.robots import RobotsCache
 from fmd.fetch.types import (
@@ -46,13 +45,11 @@ from fmd.fetch.types import (
 from fmd.net.policy import (
     DEFAULT_RETRY,
     DEFAULT_TIMEOUTS,
-    BrowserPolicy,
     NetworkFault,
     NetworkGuard,
     NetworkUnavailable,
     RetryPolicy,
     Timeouts,
-    classify_browser_error,
     classify_exception,
     make_client,
     request_with_retries,
@@ -62,7 +59,8 @@ logger = logging.getLogger(__name__)
 
 TIER_HTTPX = "httpx"
 TIER_CURL_CFFI = "curl_cffi"
-TIER_PATCHRIGHT = "patchright"
+TIER_MCP_BROWSER = "invisible_playwright_mcp"
+TIER_FIRECRAWL_LOCAL = "firecrawl_local"
 TIER_QUARANTINE = "quarantine"
 TIER_ROBOTS = "robots"
 
@@ -299,279 +297,6 @@ class BrowserNavigationError(RuntimeError):
         super().__init__(f"{fault.kind}: {detail}")
 
 
-#: One in-flight browser navigation per registrable domain. Browser fetches are
-#: hundreds of KB each; running two on a hostel link starves both.
-_BROWSER_LOCKS: dict[str, threading.Lock] = {}
-_BROWSER_LOCKS_GUARD = threading.Lock()
-
-
-def _domain_lock(domain: str) -> threading.Lock:
-    with _BROWSER_LOCKS_GUARD:
-        lock = _BROWSER_LOCKS.get(domain)
-        if lock is None:
-            lock = threading.Lock()
-            _BROWSER_LOCKS[domain] = lock
-        return lock
-
-
-def _browser_child_pids() -> set[int]:
-    """Linux PIDs whose parent is this process and whose comm is a browser.
-
-    Playwright does not expose the Chromium PID portably. Reading ``/proc`` is
-    the honest fallback used only when a close deadline is exceeded: we kill
-    *new* children rather than every Chromium on the host.
-    """
-    if sys.platform != "linux":  # pragma: no cover - the host is Linux
-        return set()
-    parent = os.getpid()
-    found: set[int] = set()
-    try:
-        entries = os.listdir("/proc")
-    except OSError:  # pragma: no cover - /proc is expected
-        return set()
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        try:
-            with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as handle:
-                stat = handle.read()
-            with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as handle:
-                comm = handle.read().strip().lower()
-        except OSError:
-            continue
-        # `/proc/<pid>/stat`: fields after `comm` differ, so split on the last
-        # closing paren and take the first field (state), then ppid.
-        try:
-            tail = stat.rsplit(")", 1)[1].split()
-            ppid = int(tail[1])
-        except (IndexError, ValueError):
-            continue
-        if ppid == parent and ("chrom" in comm or "headless" in comm):
-            found.add(int(entry))
-    return found
-
-
-def _kill_new_browser_children(before: set[int], *, reason: str) -> list[int]:
-    """SIGKILL Chromium children spawned during a timed-out navigation."""
-    killed: list[int] = []
-    for pid in sorted(_browser_child_pids() - before):
-        try:
-            os.kill(pid, signal.SIGKILL)
-            killed.append(pid)
-        except OSError:  # pragma: no cover - already gone
-            continue
-    if killed:
-        logger.warning("browser zombies killed after %s: pids %s", reason, killed)
-    return killed
-
-
-def _close_with_deadline(obj: object, deadline_s: float) -> bool:
-    """Close a Playwright object in a daemon thread; False means it hung."""
-
-    def _close() -> None:
-        with contextlib.suppress(Exception):
-            obj.close()  # type: ignore[attr-defined]
-
-    thread = threading.Thread(target=_close, daemon=True)
-    thread.start()
-    thread.join(max(0.1, deadline_s))
-    return not thread.is_alive()
-
-
-class PatchrightFetcher:
-    """Third tier: a real Chromium under Xvfb. Headful, never headless.
-
-    Bounded by :class:`~fmd.net.policy.BrowserPolicy`: navigation, action,
-    selector and network-idle timeouts; optional asset blocking; a hard page
-    size cap; one navigation per domain; and a hard kill of Chromium children
-    when a close exceeds its deadline. Browser failures are mapped onto the
-    same taxonomy as HTTP failures (:func:`classify_browser_error`).
-    """
-
-    name = TIER_PATCHRIGHT
-
-    def __init__(
-        self,
-        *,
-        headless: bool = False,
-        timeout_ms: int | None = None,
-        policy: BrowserPolicy | None = None,
-        guard: NetworkGuard | None = None,
-    ) -> None:
-        self.headless = headless
-        self.policy = policy or BrowserPolicy.from_env()
-        self.timeout_ms = int(timeout_ms or self.policy.navigation_timeout_ms)
-        self.guard = guard
-
-    def _route(self, route) -> None:
-        """Block non-essential loads so one dead asset cannot stall the page."""
-        try:
-            if self.policy.block_assets and route.request.resource_type in {
-                "image",
-                "media",
-                "font",
-            }:
-                route.abort()
-                return
-            route.continue_()
-        except Exception:  # pragma: no cover - route can race a close
-            pass
-
-    def fetch(self, request: FetchRequest) -> FetchResult:
-        method = _method(request)
-        if method != "GET":
-            # `page.goto` only issues GET. Faking a POST by submitting a form
-            # would execute the page's own JavaScript and render whatever it
-            # decides, not replay the persisted request/body. Downgrading would
-            # also be invisible to the caller (HTTP 200, wrong page), so refuse
-            # explicitly and let the ladder record `unsupported_replay`.
-            raise UnsupportedReplay(
-                f"patchright cannot faithfully replay {method} requests; a browser "
-                "navigation only issues GET. Refusing rather than downgrading."
-            )
-        try:
-            from patchright.sync_api import sync_playwright
-        except ModuleNotFoundError as exc:  # pragma: no cover - depends on install
-            raise TierUnavailable(
-                "patchright tier is unavailable. Install the crawl extra and a "
-                "Chromium build: `uv sync --extra crawl && patchright install chromium`."
-            ) from exc
-
-        from fmd.settings import get_settings
-
-        if self.guard is not None:
-            self.guard.check()
-        headers = _merged_headers(request)
-        domain = registrable_domain(request.url) or request.url
-        lock = _domain_lock(domain)
-        with lock:
-            return self._navigate(
-                sync_playwright=sync_playwright,
-                request=request,
-                headers=headers,
-                user_agent=get_settings().user_agent,
-                method=method,
-            )
-
-    def _navigate(
-        self,
-        *,
-        sync_playwright,
-        request: FetchRequest,
-        headers: dict[str, str],
-        user_agent: str,
-        method: str,
-    ) -> FetchResult:
-        policy = self.policy
-        before = _browser_child_pids()
-        started = time.monotonic()
-        browser = None
-        context = None
-        try:
-            with sync_playwright() as pw:
-                launch_options: dict[str, object] = {
-                    "headless": self.headless,
-                    "timeout": policy.launch_timeout_ms,
-                    "args": ["--no-sandbox", "--disable-dev-shm-usage"],
-                }
-                if policy.profile_dir:
-                    # Persistent profile: an isolated copy per task is safer
-                    # than sharing one across concurrent fetches.
-                    context = pw.chromium.launch_persistent_context(
-                        policy.profile_dir, **launch_options
-                    )
-                    browser = None
-                else:
-                    browser = pw.chromium.launch(**launch_options)
-                    context = browser.new_context(
-                        user_agent=user_agent,
-                        extra_http_headers=headers or None,
-                    )
-                context.set_default_timeout(policy.action_timeout_ms)
-                context.set_default_navigation_timeout(self.timeout_ms)
-                if policy.block_assets:
-                    context.route("**/*", self._route)
-                page = context.new_page()
-                response = page.goto(
-                    request.url, wait_until="domcontentloaded", timeout=self.timeout_ms
-                )
-                if policy.wait_network_idle:
-                    try:
-                        page.wait_for_load_state(
-                            "networkidle", timeout=policy.network_idle_timeout_ms
-                        )
-                    except Exception as exc:
-                        logger.info(
-                            "network idle not reached for %s (%s); using domcontentloaded",
-                            request.url,
-                            exc,
-                        )
-                if response is None:
-                    raise BrowserNavigationError(
-                        NetworkFault(
-                            "browser_no_response",
-                            "browser_no_response",
-                            False,
-                            "browser: navigation produced no response",
-                        ),
-                        "navigation produced no response",
-                    )
-                status = response.status
-                response_headers = _lower_headers(response.headers)
-                body = page.content().encode("utf-8")
-                if len(body) > policy.max_page_bytes:
-                    raise BrowserNavigationError(
-                        NetworkFault(
-                            "page_too_large",
-                            "page_too_large",
-                            False,
-                            f"browser: page exceeded {policy.max_page_bytes} bytes",
-                        ),
-                        f"page is {len(body)} bytes (cap {policy.max_page_bytes})",
-                    )
-                final_url = page.url
-        except BrowserNavigationError as exc:
-            self._record_failure(request.url, exc.fault)
-            raise
-        except Exception as exc:
-            fault = classify_browser_error(str(exc))
-            self._record_failure(request.url, fault)
-            raise BrowserNavigationError(fault, str(exc)) from exc
-        finally:
-            # Never leave a Chromium tree behind: close with a deadline, then
-            # SIGKILL any *new* child this navigation spawned.
-            deadline_s = policy.hard_kill_grace_ms / 1000.0
-            closed = True
-            for obj in (context, browser):
-                if obj is not None:
-                    closed = _close_with_deadline(obj, deadline_s) and closed
-            if (
-                not closed
-                or time.monotonic() - started
-                > (self.timeout_ms + policy.hard_kill_grace_ms) / 1000.0
-            ):
-                _kill_new_browser_children(before, reason="navigation timeout")
-        if self.guard is not None:
-            self.guard.record_success()
-        return FetchResult(
-            url=request.url,
-            final_url=final_url,
-            status=status,
-            headers=response_headers,
-            body=body,
-            fetcher_tier=self.name,
-            method=method,
-        )
-
-    def _record_failure(self, url: str, fault: NetworkFault) -> None:
-        if self.guard is None:
-            return
-        self.guard.record_failure(url, fault)
-        # Raises NetworkUnavailable when the breaker trips; that propagates out
-        # of the ladder so the stage aborts instead of opening more browsers.
-        self.guard.check()
-
-
 def _attach_guard(fetchers: Iterable[TierFetcher], guard: NetworkGuard) -> None:
     """Share one outage breaker across every tier (and the robots cache)."""
     for fetcher in fetchers:
@@ -580,7 +305,17 @@ def _attach_guard(fetchers: Iterable[TierFetcher], guard: NetworkGuard) -> None:
 
 
 def default_fetchers() -> list[TierFetcher]:
-    return [HttpxFetcher(), CurlCffiFetcher(), PatchrightFetcher()]
+    """The tier order. The stealth tiers are lazy: importing and spawning both
+    happen on first use, so the base install still works without them."""
+    from fmd.fetch.firecrawl_local import FirecrawlLocalFetcher
+    from fmd.fetch.mcp_browser import InvisiblePlaywrightMCPFetcher
+
+    return [
+        HttpxFetcher(),
+        CurlCffiFetcher(),
+        InvisiblePlaywrightMCPFetcher(),
+        FirecrawlLocalFetcher(),
+    ]
 
 
 class FetchLadder:
@@ -642,6 +377,23 @@ class FetchLadder:
         )
 
     # -------------------------------------------------------------------- public
+    def close(self) -> None:
+        """Release every tier's pooled resources (clients, spawned servers).
+
+        Best-effort and idempotent: injected test fetchers without ``close``
+        are skipped; a failing close is logged and never raised. Long-running
+        callers (the orchestrator worker, the CLI verdict-live stream) call
+        this on shutdown so the MCP browser server does not outlive the run.
+        """
+        for fetcher in self.fetchers:
+            closer = getattr(fetcher, "close", None)
+            if not callable(closer):
+                continue
+            try:
+                closer()
+            except Exception as exc:  # noqa: BLE001 - shutdown must never raise
+                logger.info("tier %s close failed: %s", getattr(fetcher, "name", "?"), exc)
+
     def fetch(
         self,
         url: str | FetchRequest,
