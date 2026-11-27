@@ -181,6 +181,14 @@ risks).
 
 ## Merged to main (verified via GitHub API)
 
+- Local subagent branches `v1/crawler-contact-env` +
+  `v1/verdict-live-turn-budget`: `FMD_CONTACT_EMAIL` builds a truthful default
+  UA (explicit `FMD_USER_AGENT` still wins; crawl/worker warn on missing or
+  placeholder contact); verdict-live reserves the final turn for
+  `emit_verdict`, defaults `max_searches=1`, and gives concrete `map_site`
+  guidance. Combined gates: offline **1668/99**, DB **1761/6**, golden 1.0;
+  CI test #6 green.
+
 - PR #15 (free web stack: invisible-playwright-mcp browser tier + Firecrawl Local
   `FIRECRAWL_CLOUD=off` + SearXNG discovery) + PR #16 (real-provider contract
   fixes), verifier verdict approve after full local matrix: official MCP
