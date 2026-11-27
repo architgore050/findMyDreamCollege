@@ -546,12 +546,18 @@ def test_passthrough_env_drops_unset_and_empty_display_vars(
 def test_headless_without_xvfb_fails_preflight_naming_the_fix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Direct preflight contract, plus the real-spawn wiring: fetch() on the
+    actual spawn path (no session factory) must surface the preflight, not a
+    bare browser error."""
     from fmd.fetch import mcp_browser
 
     monkeypatch.setenv("STEALTHFOX_HEADLESS", "1")
     monkeypatch.setattr(mcp_browser.shutil, "which", lambda name: None)
-    fetcher = mcp_browser.InvisiblePlaywrightMCPFetcher(session_factory=lambda: FakeSession([]))
 
+    with pytest.raises(TierUnavailable, match="xvfb|STEALTHFOX_HEADLESS"):
+        mcp_browser._preflight_display()
+
+    fetcher = mcp_browser.InvisiblePlaywrightMCPFetcher(command="true", args=[])
     with pytest.raises(TierUnavailable, match="xvfb|STEALTHFOX_HEADLESS"):
         fetcher.fetch(FetchRequest(url="https://college.ac.in/page"))
 
@@ -565,11 +571,8 @@ def test_headless_with_xvfb_available_passes_preflight(
     monkeypatch.setattr(
         mcp_browser.shutil, "which", lambda name: "/usr/bin/Xvfb" if name == "Xvfb" else None
     )
-    url = "https://college.ac.in/page"
-    session = FakeSession([open_ok(), navigate_ok(url), read_html("<html>ok</html>")])
-    fetcher = mcp_browser.InvisiblePlaywrightMCPFetcher(session_factory=lambda: session)
 
-    assert fetcher.fetch(FetchRequest(url=url)).ok
+    assert mcp_browser._preflight_display() is None
 
 
 def test_preflight_only_triggers_for_explicit_headless(
@@ -579,12 +582,9 @@ def test_preflight_only_triggers_for_explicit_headless(
     from fmd.fetch import mcp_browser
 
     monkeypatch.setattr(mcp_browser.shutil, "which", lambda name: None)
-    url = "https://college.ac.in/page"
     for value in (None, "0"):
         if value is None:
             monkeypatch.delenv("STEALTHFOX_HEADLESS", raising=False)
         else:
             monkeypatch.setenv("STEALTHFOX_HEADLESS", value)
-        session = FakeSession([open_ok(), navigate_ok(url), read_html("<html>ok</html>")])
-        fetcher = mcp_browser.InvisiblePlaywrightMCPFetcher(session_factory=lambda: session)
-        assert fetcher.fetch(FetchRequest(url=url)).ok
+        assert mcp_browser._preflight_display() is None
