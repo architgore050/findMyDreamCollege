@@ -10,6 +10,7 @@ with deterministic content driven by the URL.
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -37,6 +38,17 @@ def page_for(url: str) -> str:
 
 def handle_call(name: str, arguments: dict) -> dict:
     if name == "browser_open":
+        # STEALTHFOX_-prefixed so the fetcher's env passthrough forwards it:
+        # set STEALTHFOX_FAKE_MCP_OPEN_ERROR=<cause> to make the first open
+        # fail with the REAL upstream error shape (isError + structured
+        # opened/cause) over the actual stdio wire.
+        cause = os.environ.get("STEALTHFOX_FAKE_MCP_OPEN_ERROR", "").strip()
+        if cause:
+            return {
+                "isError": True,
+                "text": f"Error: browser could not be opened ({cause})",
+                "structuredContent": {"opened": False, "cause": cause},
+            }
         return {"structuredContent": {"opened": True, "browser": "main"}, "text": "opened"}
     if name == "browser_navigate":
         url = str(arguments.get("url") or "")
