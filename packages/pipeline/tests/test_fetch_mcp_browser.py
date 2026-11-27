@@ -490,3 +490,101 @@ def test_real_session_refuses_a_missing_command_directly() -> None:
     session = RealMcpSession(command="/nonexistent/fmd-mcp-command", args=[], call_timeout_s=5)
     with pytest.raises(TierUnavailable, match="command not found|failed to initialize"):
         session.start()
+
+
+# ------------------------------------------------------------------- display env
+
+
+def test_passthrough_env_forwards_display_vars_and_prefixes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fmd.fetch.mcp_browser import _passthrough_env
+
+    monkeypatch.setenv("STEALTHFOX_HEADLESS", "0")
+    monkeypatch.setenv("STEALTHFOX_SEED", "abc123")
+    monkeypatch.setenv("INVISIBLE_MCP_HOME", "/opt/invisible")
+    monkeypatch.setenv("DISPLAY", ":1")
+    monkeypatch.setenv("XAUTHORITY", "/run/x/.Xauthority")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+
+    env = _passthrough_env()
+
+    assert env["STEALTHFOX_HEADLESS"] == "0"
+    assert env["STEALTHFOX_SEED"] == "abc123"
+    assert env["INVISIBLE_MCP_HOME"] == "/opt/invisible"
+    assert env["DISPLAY"] == ":1"
+    assert env["XAUTHORITY"] == "/run/x/.Xauthority"
+    assert env["WAYLAND_DISPLAY"] == "wayland-0"
+    assert env["XDG_RUNTIME_DIR"] == "/run/user/1000"
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+
+
+def test_passthrough_env_drops_unset_and_empty_display_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fmd.fetch.mcp_browser import _passthrough_env
+
+    for name in (
+        "DISPLAY",
+        "XAUTHORITY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DISPLAY", "")  # set but empty: not a usable display
+
+    env = _passthrough_env()
+
+    assert "DISPLAY" not in env
+    assert "XAUTHORITY" not in env
+    assert "WAYLAND_DISPLAY" not in env
+
+
+def test_headless_without_xvfb_fails_preflight_naming_the_fix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fmd.fetch import mcp_browser
+
+    monkeypatch.setenv("STEALTHFOX_HEADLESS", "1")
+    monkeypatch.setattr(mcp_browser.shutil, "which", lambda name: None)
+    fetcher = mcp_browser.InvisiblePlaywrightMCPFetcher(session_factory=lambda: FakeSession([]))
+
+    with pytest.raises(TierUnavailable, match="xvfb|STEALTHFOX_HEADLESS"):
+        fetcher.fetch(FetchRequest(url="https://college.ac.in/page"))
+
+
+def test_headless_with_xvfb_available_passes_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fmd.fetch import mcp_browser
+
+    monkeypatch.setenv("STEALTHFOX_HEADLESS", "1")
+    monkeypatch.setattr(
+        mcp_browser.shutil, "which", lambda name: "/usr/bin/Xvfb" if name == "Xvfb" else None
+    )
+    url = "https://college.ac.in/page"
+    session = FakeSession([open_ok(), navigate_ok(url), read_html("<html>ok</html>")])
+    fetcher = mcp_browser.InvisiblePlaywrightMCPFetcher(session_factory=lambda: session)
+
+    assert fetcher.fetch(FetchRequest(url=url)).ok
+
+
+def test_preflight_only_triggers_for_explicit_headless(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset or 0: no Xvfb required (the committed default is headed)."""
+    from fmd.fetch import mcp_browser
+
+    monkeypatch.setattr(mcp_browser.shutil, "which", lambda name: None)
+    url = "https://college.ac.in/page"
+    for value in (None, "0"):
+        if value is None:
+            monkeypatch.delenv("STEALTHFOX_HEADLESS", raising=False)
+        else:
+            monkeypatch.setenv("STEALTHFOX_HEADLESS", value)
+        session = FakeSession([open_ok(), navigate_ok(url), read_html("<html>ok</html>")])
+        fetcher = mcp_browser.InvisiblePlaywrightMCPFetcher(session_factory=lambda: session)
+        assert fetcher.fetch(FetchRequest(url=url)).ok
