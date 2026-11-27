@@ -1,0 +1,15 @@
+{
+  "comment": "Real /v2/scrape answer (Firecrawl Local 0.1.1, local real-server matrix 2026-11-27) for a DOCX: same contract as the PDF fixture — parsed markdown body, DOCX contentType in metadata.",
+  "success": true,
+  "data": {
+    "source": "local",
+    "metadata": {
+      "sourceURL": "https://college.ac.in/admission-policy.docx",
+      "url": "https://college.ac.in/admission-policy.docx",
+      "statusCode": 200,
+      "contentType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "title": "Admission Policy"
+    },
+    "markdown": "Admission Policy\n\nMerit list published on the notice board every July."
+  }
+}

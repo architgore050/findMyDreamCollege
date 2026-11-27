@@ -132,6 +132,63 @@ def test_scrape_without_metadata_url_keeps_the_sourceurl_fallback() -> None:
     client.close()
 
 
+# ------------------------------------------------------------------- content-type
+
+
+def test_scrape_pdf_fixture_returns_markdown_as_text_markdown() -> None:
+    """Real 0.1.1 shape (finding #6): local PDF parsing arrives as markdown
+    while metadata.contentType still says application/pdf."""
+    client = fixture_client("scrape_pdf.json")
+
+    result = client.scrape("https://college.ac.in/prospectus.pdf")
+
+    assert result.status == 200
+    assert result.ok
+    assert result.headers["content-type"] == "text/markdown"
+    assert result.body.startswith(b"# Prospectus 2026-27")
+    client.close()
+
+
+def test_scrape_docx_fixture_returns_markdown_as_text_markdown() -> None:
+    client = fixture_client("scrape_docx.json")
+
+    result = client.scrape("https://college.ac.in/admission-policy.docx")
+
+    assert result.status == 200
+    assert result.headers["content-type"] == "text/markdown"
+    client.close()
+
+
+def test_content_type_always_describes_the_bytes_actually_returned() -> None:
+    # Declared type matching an HTML body is kept verbatim (charset included).
+    def html_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=scrape_payload(metadata={"contentType": "text/html; charset=utf-8"}),
+        )
+
+    result = make_client(html_handler).scrape("https://college.ac.in/fees")
+    assert result.headers["content-type"] == "text/html; charset=utf-8"
+
+    # A declaration that lies about the bytes (application/pdf on an HTML
+    # body) is ignored: the derived type wins.
+    def mismatch_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=scrape_payload(metadata={"contentType": "application/pdf"}))
+
+    result = make_client(mismatch_handler).scrape("https://college.ac.in/fees")
+    assert result.headers["content-type"] == "text/html"
+
+    # Markdown fallback (empty html) is text/markdown, never the declared html.
+    def md_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=scrape_payload(html="", metadata={"contentType": "text/html"})
+        )
+
+    result = make_client(md_handler).scrape("https://college.ac.in/fees")
+    assert result.headers["content-type"] == "text/markdown"
+    assert result.body == b"# fees"
+
+
 def test_scrape_max_age_is_configurable() -> None:
     seen: dict = {}
 
