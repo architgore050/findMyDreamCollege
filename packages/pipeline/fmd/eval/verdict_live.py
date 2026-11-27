@@ -9,13 +9,14 @@ loop through the model router:
 1. system prompt + profile + the product shortlist rows go to the model;
 2. each model turn is ONE action from the tool schema: ``fetch_url`` (routed
    through the fetch layer — robots.txt, per-domain rate limits, truthful UA),
-   ``cite_source`` (url + verbatim quote of a page fetched *this run*), or
-   ``emit_verdict`` (the structured verdict object);
-3. hard limits are enforced in code: at most ``max_turns`` model turns and at
-   most ``max_fetches`` fetches per profile. When the loop stops before a
-   schema-valid verdict, the backend returns an honest ``unknown`` verdict
-   (UNKNOWN is a first-class output; the model is instructed to prefer it over
-   guessing).
+   ``search_web`` / ``map_site`` (FREE discovery via SearXNG / Firecrawl Local;
+   leads only, never evidence), ``cite_source`` (url + verbatim quote of a page
+   fetched *this run*), or ``emit_verdict`` (the structured verdict object);
+3. hard limits are enforced in code: at most ``max_turns`` model turns,
+   ``max_fetches`` fetches, ``max_searches`` searches and ``max_maps`` maps per
+   profile. When the loop stops before a schema-valid verdict, the backend
+   returns an honest ``unknown`` verdict (UNKNOWN is a first-class output; the
+   model is instructed to prefer it over guessing).
 
 Anti-hallucination stance:
 
@@ -88,6 +89,12 @@ Hard rules:
    - {"action": "fetch_url", "url": "...", "note": "why this page matters"} —
      the page is fetched by the harness (robots.txt and rate limits are its
      business, never yours). Only pages fetched in THIS run can be cited.
+   - {"action": "search_web", "query": "...", "note": "why"} — free SearXNG web
+     search (hard cap below). Results carry title + url only; they are LEADS.
+     You must fetch_url a lead before you can cite it.
+   - {"action": "map_site", "url": "...", "query": "optional focus", "note": "why"} —
+     free Firecrawl Local site map of one domain (hard cap below). Prefer it on
+     an institution's own domain instead of guessing course URLs.
    - {"action": "cite_source", "url": "...", "quote": "verbatim snippet",
       "title": "short page title", "source_kind": "official|ranking|institution|press"} —
      the quote must appear verbatim in the stored content of a fetched page;
@@ -112,6 +119,12 @@ Hard rules:
    the most relevant fetched page (even a partial listing page) before
    emitting. A verdict emitted with zero citations is a defect — use another
    turn to add a citation, or emit "unknown" with the pages cited.
+8. DISCOVERY ONLY: search_web and map_site results never enter the evidence
+   ledger — they are leads. Evidence still requires fetch_url + cite_source.
+9. NEVER construct a Google (or any other search-engine) search URL and fetch
+   it, and NEVER call a paid or cloud service: they are unavailable here. If a
+   discovery action fails or is out of budget, the journal says so honestly —
+   move on with fetch_url on a known domain or emit "unknown".
 """
 
 
@@ -123,16 +136,19 @@ class ResearchAction(BaseModel):
 
     ``extra="forbid"`` is the anti-score guard: a model output that carries a
     score, a hash, or any undeclared field cannot validate, and the turn is
-    rejected as a schema violation.
+    rejected as a schema violation. ``search_web`` / ``map_site`` are the free
+    discovery actions (SearXNG + Firecrawl Local); their results are leads,
+    never evidence.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["fetch_url", "cite_source", "emit_verdict"]
+    action: Literal["fetch_url", "search_web", "map_site", "cite_source", "emit_verdict"]
     url: str | None = None
     quote: str | None = None
     title: str | None = None
     note: str | None = None
+    query: str | None = None
     source_kind: Literal["official", "ranking", "institution", "press"] | None = None
     verdict: VerdictObject | None = None
 
@@ -140,6 +156,10 @@ class ResearchAction(BaseModel):
     def _action_rules(self) -> ResearchAction:
         if self.action == "fetch_url" and not (self.url or "").strip():
             raise ValueError("fetch_url needs a url")
+        if self.action == "search_web" and not (self.query or "").strip():
+            raise ValueError("search_web needs a query")
+        if self.action == "map_site" and not (self.url or "").strip():
+            raise ValueError("map_site needs a url")
         if self.action == "cite_source":
             if not (self.url or "").strip() or not (self.quote or "").strip():
                 raise ValueError("cite_source needs url + verbatim quote")
@@ -150,6 +170,57 @@ class ResearchAction(BaseModel):
         if self.action == "emit_verdict" and self.verdict is None:
             raise ValueError("emit_verdict needs the verdict object")
         return self
+
+
+# --------------------------------------------------------------------------- discovery providers
+
+
+class VerdictSearchProvider(Protocol):
+    """Free web-search surface (``fmd.discover.searxng.SearxngClient``).
+
+    Implementations raise their own typed "unavailable" errors; the backend
+    turns any failure into an honest journal note — never a guessed URL.
+    """
+
+    def search(self, query: str) -> list[Any]: ...
+
+
+class VerdictMapProvider(Protocol):
+    """Free site-map surface (``fmd.fetch.firecrawl_local.FirecrawlLocalClient``)."""
+
+    def map(self, url: str, *, query: str | None = None, limit: int = 50) -> list[Any]: ...
+
+
+def _item_field(item: Any, *names: str) -> str:
+    """Best-effort plain-string field off a search/map result object."""
+    for name in names:
+        value = getattr(item, name, None)
+        if value is None and isinstance(item, dict):
+            value = item.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _result_title(item: Any) -> str:
+    title = _item_field(item, "title", "source_title")
+    if title:
+        return title
+    metadata = getattr(item, "metadata", None)
+    if isinstance(metadata, dict):
+        value = metadata.get("title")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "(untitled)"
+
+
+def _result_engine(item: Any) -> str:
+    metadata = getattr(item, "metadata", None)
+    if isinstance(metadata, dict):
+        value = metadata.get("engine")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return _item_field(item, "engine") or "unknown"
 
 
 # --------------------------------------------------------------------------- model client
@@ -334,9 +405,12 @@ class BackendRunStats:
         self.profile_id = profile_id
         self.turns_used = 0
         self.fetches_used = 0
+        self.searches_used = 0
+        self.maps_used = 0
         self.citations = 0
         self.schema_violations = 0
         self.rejected_verdicts = 0
+        self.provider_errors = 0
         self.stop_reason = "turn_cap_reached"
 
     def as_dict(self) -> dict[str, Any]:
@@ -344,9 +418,12 @@ class BackendRunStats:
             "profile_id": self.profile_id,
             "turns_used": self.turns_used,
             "fetches_used": self.fetches_used,
+            "searches_used": self.searches_used,
+            "maps_used": self.maps_used,
             "citations": self.citations,
             "schema_violations": self.schema_violations,
             "rejected_verdicts": self.rejected_verdicts,
+            "provider_errors": self.provider_errors,
             "stop_reason": self.stop_reason,
         }
 
@@ -363,9 +440,12 @@ class LiveVerdictBackend:
 
     ``model_client`` is the provider-agnostic router (``fmd.llm.router``);
     ``page_fetcher`` is the fetch layer (``fmd.fetch.ladder.FetchLadder`` on the
-    operator's host, ``ScriptedPageFetcher`` offline). Hard limits:
-    ``max_turns`` model turns and ``max_fetches`` fetches per profile, enforced
-    in code, never negotiable by the model.
+    operator's host, ``ScriptedPageFetcher`` offline). ``search_provider`` /
+    ``map_provider`` are the FREE discovery backends (SearXNG, Firecrawl
+    Local); they are optional and their output is DISCOVERY ONLY — it never
+    enters the evidence ledger. Hard limits: ``max_turns`` model turns,
+    ``max_fetches`` fetches, ``max_searches`` searches and ``max_maps`` maps
+    per profile, enforced in code, never negotiable by the model.
     """
 
     name = "live_verdict_backend"
@@ -376,20 +456,29 @@ class LiveVerdictBackend:
         page_fetcher: VerdictPageFetcher,
         *,
         purpose: str = VERDICT_LIVE_PURPOSE,
-        max_turns: int = 8,
+        max_turns: int = 12,
         max_fetches: int = 6,
+        max_searches: int = 2,
+        max_maps: int = 2,
+        search_provider: VerdictSearchProvider | None = None,
+        map_provider: VerdictMapProvider | None = None,
         excerpt_chars: int = 480,
         clock: Any | None = None,
     ) -> None:
-        if max_turns < 1 or max_fetches < 0:
+        if max_turns < 1 or max_fetches < 0 or max_searches < 0 or max_maps < 0:
             raise VerdictError(
-                "verdict-live limits must be positive (max_turns>=1, max_fetches>=0)"
+                "verdict-live limits must be positive "
+                "(max_turns>=1, max_fetches>=0, max_searches>=0, max_maps>=0)"
             )
         self.model_client = model_client
         self.page_fetcher = page_fetcher
         self.purpose = purpose
         self.max_turns = max_turns
         self.max_fetches = max_fetches
+        self.max_searches = max_searches
+        self.max_maps = max_maps
+        self.search_provider = search_provider
+        self.map_provider = map_provider
         self.excerpt_chars = excerpt_chars
         self._clock = clock or (lambda: datetime.now(UTC))
         self._ledgers: dict[str, dict[str, StoredPage]] = {}
@@ -430,6 +519,14 @@ class LiveVerdictBackend:
 
             if action.action == "fetch_url":
                 journal.append(self._handle_fetch(str(action.url), stats, ledger))
+                continue
+
+            if action.action == "search_web":
+                journal.append(self._handle_search(action, stats))
+                continue
+
+            if action.action == "map_site":
+                journal.append(self._handle_map(action, stats))
                 continue
 
             if action.action == "cite_source":
@@ -497,6 +594,94 @@ class LiveVerdictBackend:
             f"FETCH FAILED: {url} status {result.status} "
             f"({result.error or 'transport error'}). It cannot be cited."
         )
+
+    _DISCOVERY_NOTE = "discovery only: fetch_url a lead before citing it"
+    _SEARCH_JOURNAL_LIMIT = 6
+    _MAP_JOURNAL_LIMIT = 8
+
+    def _handle_search(self, action: ResearchAction, stats: BackendRunStats) -> str:
+        """Free SearXNG discovery. Leads only — nothing enters the ledger."""
+        query = (action.query or "").strip()
+        if not query:  # schema guarantees presence; defensive honesty anyway
+            return "SEARCH REJECTED: search_web needs a non-empty query."
+        if stats.searches_used >= self.max_searches:
+            return (
+                f"SEARCH BUDGET EXHAUSTED ({self.max_searches} searches used). Work with the "
+                "pages you have: fetch_url on a known domain, or emit_verdict / emit unknown."
+            )
+        if self.search_provider is None:
+            return (
+                "SEARCH UNAVAILABLE: no search provider is configured for this run (free "
+                "SearXNG only; paid/cloud search is out of scope). Work from the institution "
+                "domains in the shortlist instead of guessing URLs."
+            )
+        stats.searches_used += 1
+        try:
+            refs = list(self.search_provider.search(query))
+        except Exception as exc:  # noqa: BLE001 - provider failures are journal notes
+            stats.provider_errors += 1
+            return (
+                f"SEARCH FAILED ({type(exc).__name__}): {exc}. Provider error recorded; there "
+                "is no paid fallback — continue with fetch_url on a known domain."
+            )
+        lines = [
+            f"SEARCH OK (free): {query!r} -> {len(refs)} lead(s). "
+            f"These are LEADS ({self._DISCOVERY_NOTE}):"
+        ]
+        for ref in refs[: self._SEARCH_JOURNAL_LIMIT]:
+            url = getattr(ref, "url", "")
+            lines.append(
+                f"- {_result_title(ref)} | {url} | engine={_result_engine(ref)}"
+            )
+        if len(refs) > self._SEARCH_JOURNAL_LIMIT:
+            lines.append(f"- … {len(refs) - self._SEARCH_JOURNAL_LIMIT} more leads not shown")
+        if not refs:
+            lines.append("- (no results — try map_site on an institution domain, or fetch_url)")
+        return "\n".join(lines)
+
+    def _handle_map(self, action: ResearchAction, stats: BackendRunStats) -> str:
+        """Free Firecrawl Local site map. Leads only — nothing enters the ledger."""
+        url = (action.url or "").strip()
+        query = (action.query or "").strip() or None
+        if not url:  # schema guarantees presence; defensive honesty anyway
+            return "MAP REJECTED: map_site needs a url."
+        if not url.startswith(("http://", "https://")):
+            return f"MAP REJECTED: {url!r} — only http(s) URLs; no auth or CAPTCHA bypass."
+        if stats.maps_used >= self.max_maps:
+            return (
+                f"MAP BUDGET EXHAUSTED ({self.max_maps} maps used). Work with the links you "
+                "have: fetch_url on them, or emit_verdict / emit unknown."
+            )
+        if self.map_provider is None:
+            return (
+                "MAP UNAVAILABLE: no map provider is configured for this run (free, "
+                "local-only Firecrawl Local; paid/cloud crawling is out of scope). Do not "
+                "guess course URLs — fetch_url the pages you can reach."
+            )
+        stats.maps_used += 1
+        try:
+            links = list(self.map_provider.map(url, query=query))
+        except Exception as exc:  # noqa: BLE001 - provider failures are journal notes
+            stats.provider_errors += 1
+            return (
+                f"MAP FAILED ({type(exc).__name__}): {exc}. Provider error recorded; there is "
+                "no paid fallback — continue with fetch_url on a known domain."
+            )
+        lines = [
+            f"MAP OK (free): {url} -> {len(links)} link(s)"
+            + (f" (focus {query!r})" if query else "")
+            + f". These are LEADS ({self._DISCOVERY_NOTE}):"
+        ]
+        for link in links[: self._MAP_JOURNAL_LIMIT]:
+            title = _item_field(link, "title") or "(untitled)"
+            description = _item_field(link, "description")
+            suffix = f" | {description}" if description else ""
+            lines.append(f"- {getattr(link, 'url', '')} | {title}{suffix}")
+        if len(links) > self._MAP_JOURNAL_LIMIT:
+            lines.append(f"- … {len(links) - self._MAP_JOURNAL_LIMIT} more links not shown")
+        if not links:
+            lines.append("- (no links — the site map came back empty; try fetch_url directly)")
+        return "\n".join(lines)
 
     def _handle_cite(
         self,
@@ -646,7 +831,8 @@ class LiveVerdictBackend:
         lines.append("")
         lines.append(
             f"RESEARCH JOURNAL (turn budget: {self.max_turns} model turns, "
-            f"{self.max_fetches} fetches):"
+            f"{self.max_fetches} fetches, {self.max_searches} searches, "
+            f"{self.max_maps} maps; discovery actions are free and leads-only):"
         )
         if journal:
             lines.extend(f"- {entry}" for entry in journal)
@@ -662,8 +848,9 @@ class LiveVerdictBackend:
         lines.append("")
         lines.append(
             "NEXT ACTION: respond with exactly one schema-valid action object "
-            "(fetch_url | cite_source | emit_verdict). If the evidence is thin, "
-            "emit_verdict with verdict \"unknown\"."
+            "(fetch_url | search_web | map_site | cite_source | emit_verdict). "
+            "Prefer search_web / map_site on institution domains over guessing URLs; "
+            "if the evidence is thin, emit_verdict with verdict \"unknown\"."
         )
         return "\n".join(lines)
 
@@ -763,6 +950,13 @@ def verdict_live_aggregate(cases: list[dict[str, Any]]) -> dict[str, Any]:
         )
         aggregate["n_fetches_mean"] = round(
             sum(case["backend_run"]["fetches_used"] for case in cases) / len(cases), 6
+        )
+        aggregate["searches_used"] = sum(
+            case["backend_run"].get("searches_used", 0) for case in cases
+        )
+        aggregate["maps_used"] = sum(case["backend_run"].get("maps_used", 0) for case in cases)
+        aggregate["provider_errors"] = sum(
+            case["backend_run"].get("provider_errors", 0) for case in cases
         )
         aggregate["schema_violations"] = sum(
             case["backend_run"]["schema_violations"] for case in cases
@@ -989,8 +1183,20 @@ def render_verdict_live_summary(report: dict[str, Any]) -> str:
             mode=mode,
             provider=backend_info.get("provider"),
         ),
-        "  limits: max_turns {t} max_fetches {f} (hard, enforced in code)".format(
-            t=backend_info.get("max_turns"), f=backend_info.get("max_fetches")
+        "  limits: max_turns {t} max_fetches {f} max_searches {s} max_maps {m} "
+        "(hard, enforced in code)".format(
+            t=backend_info.get("max_turns"),
+            f=backend_info.get("max_fetches"),
+            s=backend_info.get("max_searches"),
+            m=backend_info.get("max_maps"),
+        ),
+        "  discovery (free providers): searches {s} maps {m} provider_errors {pe} "
+        "(search: {sp}, map: {mp}; no paid services)".format(
+            s=aggregate.get("searches_used"),
+            m=aggregate.get("maps_used"),
+            pe=aggregate.get("provider_errors"),
+            sp=backend_info.get("search_provider"),
+            mp=backend_info.get("map_provider"),
         ),
         "  agreement_rate (verdict==correct): {v}".format(v=aggregate.get("agreement_rate")),
         "  unknown_coverage: {v}  top3_overlap_mean: {t}".format(
@@ -1043,8 +1249,10 @@ __all__ = [
     "ScriptedTurn",
     "StoredPage",
     "VERDICT_LIVE_PURPOSE",
+    "VerdictMapProvider",
     "VerdictModelClient",
     "VerdictPageFetcher",
+    "VerdictSearchProvider",
     "build_audit_worksheet",
     "clamp_audit_fraction",
     "load_live_sessions",

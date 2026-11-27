@@ -62,10 +62,6 @@ _OPEN_FAILURE_PREFIX = "mcp_browser_"
 #: Env var names passed through to the spawned MCP server, unchanged.
 _PASSTHROUGH_ENV_PREFIXES = ("STEALTHFOX_", "INVISIBLE_MCP_")
 
-#: Wait for a lead the search/map providers returned before citing it — the
-#: prompt says it; this constant keeps the journal wording in one place.
-DISCOVERY_NOTE = "discovery only; fetch_url the URL before citing it"
-
 
 @dataclass(frozen=True)
 class ToolAnswer:
