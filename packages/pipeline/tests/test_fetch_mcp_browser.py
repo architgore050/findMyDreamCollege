@@ -287,6 +287,92 @@ def test_browser_open_failure_cause_is_reported_honestly_and_not_cached() -> Non
     assert result.ok
 
 
+def test_browser_open_real_error_fixture_preserves_the_structured_cause() -> None:
+    """The real 0.74.0 refusal: isError=true with structuredContent
+    {opened: false, cause: no_display}. The cause must reach the honest
+    FetchResult (mcp_browser_no_display), not be swallowed by a generic
+    tool-error raise before the open path can read it."""
+    fixture = mcp_fixture("browser_open_error_no_display.json")
+    url = "https://college.ac.in/page"
+    session = FakeSession([answer_from_fixture(fixture)])
+    fetcher = make_fetcher(session)
+
+    result = fetcher.fetch(FetchRequest(url=url))
+
+    assert result.status == 0
+    assert result.error == "mcp_browser_no_display"
+    assert not result.ok
+    assert result.body == b""
+    # the failure must not poison the next attempt either
+    session.script = [open_ok(), navigate_ok(url), read_html("<html>ok</html>")]
+    assert fetcher.fetch(FetchRequest(url=url)).ok
+
+
+def test_browser_open_error_cause_is_scanned_from_text_when_unstructured() -> None:
+    session = FakeSession(
+        [
+            ToolAnswer(
+                structured=None,
+                text="Error: engine still downloading, retry later",
+                is_error=True,
+            )
+        ]
+    )
+    fetcher = make_fetcher(session)
+
+    result = fetcher.fetch(FetchRequest(url="https://college.ac.in/page"))
+
+    assert result.status == 0
+    assert result.error == "mcp_browser_downloading"
+
+
+def test_browser_open_tool_error_without_any_known_cause_is_still_honest() -> None:
+    session = FakeSession([ToolAnswer(structured=None, text="boom", is_error=True)])
+    fetcher = make_fetcher(session)
+
+    result = fetcher.fetch(FetchRequest(url="https://college.ac.in/page"))
+
+    assert result.status == 0
+    assert result.error == "mcp_browser_unknown_cause"
+
+
+def test_navigate_tool_error_still_raises_a_browser_navigation_error() -> None:
+    from fmd.fetch.ladder import BrowserNavigationError
+
+    url = "https://college.ac.in/page"
+    session = FakeSession(
+        [
+            open_ok(),
+            ToolAnswer(structured=None, text="net::ERR_CONNECTION_REFUSED at login", is_error=True),
+        ]
+    )
+    fetcher = make_fetcher(session)
+
+    with pytest.raises(BrowserNavigationError, match="browser_navigate refused"):
+        fetcher.fetch(FetchRequest(url=url))
+
+
+def test_stdio_fake_server_preserves_the_open_error_cause_over_the_wire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SDK must hand isError results back as results (not raise), so the
+    structured cause survives the real spawn path. The trigger var is
+    STEALTHFOX_-prefixed on purpose: that is also what proves the fetcher's
+    env passthrough forwards it to the spawned server."""
+    pytest.importorskip("mcp", reason="the official mcp SDK (crawl extra) is not installed")
+    monkeypatch.setenv("STEALTHFOX_FAKE_MCP_OPEN_ERROR", "no_display")
+    url = "https://college.ac.in/fake"
+    fetcher = InvisiblePlaywrightMCPFetcher(
+        command=sys.executable, args=[str(FAKE_SERVER)], call_timeout_s=30.0
+    )
+    try:
+        result = fetcher.fetch(FetchRequest(url=url))
+        assert result.status == 0
+        assert result.error == "mcp_browser_no_display"
+    finally:
+        fetcher.close()
+
+
 def test_malformed_open_answer_is_honest_too() -> None:
     session = FakeSession([ToolAnswer(structured=None, text="???")])
     fetcher = make_fetcher(session)

@@ -62,6 +62,20 @@ TIER_MCP_BROWSER = "invisible_playwright_mcp"
 #: verbatim in the honest error string so the failure log stays scannable.
 _OPEN_FAILURE_PREFIX = "mcp_browser_"
 
+#: The enumerated causes upstream documents for ``opened=false`` (0.74.0:
+#: profile_locked | no_display | missing_libraries | sandbox_blocked |
+#: launch_failed | downloading | download_failed). The text fallback scans
+#: for exactly these tokens; anything structured passes through verbatim.
+_OPEN_CAUSES = (
+    "profile_locked",
+    "no_display",
+    "missing_libraries",
+    "sandbox_blocked",
+    "launch_failed",
+    "downloading",
+    "download_failed",
+)
+
 #: Env var names passed through to the spawned MCP server, unchanged.
 _PASSTHROUGH_ENV_PREFIXES = ("STEALTHFOX_", "INVISIBLE_MCP_")
 
@@ -318,6 +332,14 @@ class InvisiblePlaywrightMCPFetcher:
         return session
 
     def _call(self, name: str, arguments: dict[str, Any]) -> ToolAnswer:
+        """One MCP tool call.
+
+        Transport failures raise (nothing usable came back). A *tool-level*
+        error (``isError=true``) is returned as-is so the caller can read its
+        ``structuredContent``: upstream reports ``browser_open`` refusals
+        exactly that way (``{opened: false, cause: no_display}``), and raising
+        here would throw the cause away before ``_ensure_browser_open`` sees it.
+        """
         try:
             answer = self._session.call_tool(name, arguments)
         except TimeoutError as exc:
@@ -328,27 +350,52 @@ class InvisiblePlaywrightMCPFetcher:
             raise BrowserNavigationError(
                 classify_browser_error(str(exc)), f"{name} failed: {exc}"
             ) from exc
-        if answer.is_error:
-            raise BrowserNavigationError(
-                classify_browser_error(answer.text), f"{name} refused: {answer.text[:200]}"
-            )
         return answer
+
+    @staticmethod
+    def _raise_tool_error(answer: ToolAnswer, name: str) -> None:
+        """Raise on a tool-level error for calls whose answers carry no
+        structured refusal worth preserving (navigate / read_html)."""
+        if not answer.is_error:
+            return
+        raise BrowserNavigationError(
+            classify_browser_error(answer.text), f"{name} refused: {answer.text[:200]}"
+        )
+
+    @staticmethod
+    def _open_cause(answer: ToolAnswer) -> str:
+        """The upstream contract names a cause for every ``opened=false``.
+
+        Take it from ``structuredContent`` first (the real 0.74.0 error shape),
+        fall back to a known-cause scan of the text for older servers, and
+        keep the result a safe token — it becomes part of the failure-log
+        error string.
+        """
+        raw = _answer_field(answer, ("cause",))
+        cause = str(raw).strip() if raw is not None else ""
+        if not cause:
+            lowered = answer.text.lower()
+            cause = next((c for c in _OPEN_CAUSES if c in lowered), "unknown_cause")
+        safe = "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in cause)
+        return safe[:64] or "unknown_cause"
 
     def _ensure_browser_open(self, url: str) -> FetchResult | None:
         """Open the server's browser once; None means ready to navigate.
 
-        An ``opened=false`` answer is never retried silently: the caller gets
-        an honest status-0 result naming the cause, and the next fetch will
-        attempt a fresh ``browser_open``.
+        An ``opened=false`` answer — structured or ``isError`` — is never
+        retried silently: the caller gets an honest status-0 result naming the
+        cause, and the next fetch will attempt a fresh ``browser_open``.
         """
         if self._opened:
             return None
         answer = self._call("browser_open", {})
         opened = _answer_field(answer, ("opened",))
-        if opened is False:
-            cause = str(_answer_field(answer, ("cause",)) or "unknown_cause")
+        if opened is False or (answer.is_error and opened is None):
+            # The real refusal shape (0.74.0) is isError=true with
+            # structuredContent {opened: false, cause: ...}: report the cause
+            # verbatim (mcp_browser_no_display etc.), never a generic error.
             self._opened = False
-            return self._honest(url, 0, f"{_OPEN_FAILURE_PREFIX}{cause}")
+            return self._honest(url, 0, f"{_OPEN_FAILURE_PREFIX}{self._open_cause(answer)}")
         if opened is not True:
             # A malformed open answer is a server-side problem, not a page.
             self._opened = False
@@ -432,8 +479,10 @@ class InvisiblePlaywrightMCPFetcher:
                 "browser_navigate",
                 {"url": request.url, "wait_until": "domcontentloaded"},
             )
+            self._raise_tool_error(navigate, "browser_navigate")
             status, final_url = self._parse_navigation(navigate, request.url)
             page = self._call("browser_read_html", {"mode": "full"})
+            self._raise_tool_error(page, "browser_read_html")
             body = page.text.encode("utf-8")
         if self.policy.max_page_bytes and len(body) > self.policy.max_page_bytes:
             raise BrowserNavigationError(
