@@ -17,8 +17,12 @@ Contract highlights (docs/mcp-server.md of the pinned upstream):
   ``navigated to <final-url> (HTTP <status>)`` — in the text blocks and in
   ``structuredContent.result`` (the 0.74.0 wire shape; an explicit
   ``status``/``url`` field answer is still parsed for older shapes), so
-  redirects and 404s are visible. ``wait_until="domcontentloaded"`` keeps the
-  page from waiting out a dead analytics beacon.
+  redirects and 404s are visible. ``wait_until`` defaults to
+  ``networkidle`` (``FMD_BROWSER_MCP_WAIT_UNTIL``:
+  ``domcontentloaded|load|networkidle``) so a JS-rendered page is read
+  after the network settles, not as its static shell; a networkidle
+  timeout or navigation error falls back ONCE to ``domcontentloaded``
+  (logged, never silent).
 * ``browser_read_html(mode="full")`` returns the page HTML (structure, noise
   removed, uncapped).
 
@@ -103,6 +107,13 @@ _DISPLAY_ENV_VARS = (
 #: Strict on purpose: the final URL (no spaces) and exactly a three-digit
 #: status; anything else falls through to the explicit-field shape below.
 _NAVIGATION_SENTENCE = re.compile(r"navigated to (?P<url>\S+) \(HTTP (?P<status>\d{3})\)")
+
+#: Navigate wait strategies upstream accepts. The default waits for the
+#: network to settle before reading, so a JS-rendered page is not read as
+#: its static shell (2026-11-27 real-host finding: domcontentloaded returned
+#: the stale shell in 1 of 10 JS fetches).
+_WAIT_UNTIL_CHOICES = ("domcontentloaded", "load", "networkidle")
+_WAIT_UNTIL_DEFAULT = "networkidle"
 
 
 @dataclass(frozen=True)
@@ -337,6 +348,7 @@ class InvisiblePlaywrightMCPFetcher:
         enabled: bool | None = None,
         session_factory: Any | None = None,
         call_timeout_s: float = 60.0,
+        wait_until: str | None = None,
         policy: BrowserPolicy | None = None,
         guard: NetworkGuard | None = None,
     ) -> None:
@@ -347,6 +359,15 @@ class InvisiblePlaywrightMCPFetcher:
         else:
             raw_args = os.environ.get("FMD_BROWSER_MCP_ARGS", "invisible-playwright-mcp==0.74.0")
             self._args = [part for part in str(raw_args).split() if part]
+        if wait_until is None:
+            wait_until = os.environ.get("FMD_BROWSER_MCP_WAIT_UNTIL", _WAIT_UNTIL_DEFAULT)
+        wait_until = str(wait_until).strip().lower()
+        if wait_until not in _WAIT_UNTIL_CHOICES:
+            raise TierUnavailable(
+                "browser MCP tier preflight: FMD_BROWSER_MCP_WAIT_UNTIL="
+                f"{wait_until!r} is not one of {'|'.join(_WAIT_UNTIL_CHOICES)}."
+            )
+        self._wait_until = wait_until
         self._session_factory = session_factory
         self._call_timeout_s = call_timeout_s
         self.policy = policy or BrowserPolicy.from_env()
@@ -526,11 +547,30 @@ class InvisiblePlaywrightMCPFetcher:
             not_ready = self._ensure_browser_open(request.url)
             if not_ready is not None:
                 return not_ready
-            navigate = self._call(
-                "browser_navigate",
-                {"url": request.url, "wait_until": "domcontentloaded"},
-            )
-            self._raise_tool_error(navigate, "browser_navigate")
+            try:
+                navigate = self._call(
+                    "browser_navigate",
+                    {"url": request.url, "wait_until": self._wait_until},
+                )
+                self._raise_tool_error(navigate, "browser_navigate")
+            except BrowserNavigationError:
+                if self._wait_until != "networkidle":
+                    raise
+                # One bounded fallback: networkidle can time out on a page
+                # with a live beacon (or the navigation can error while
+                # waiting). Retry ONCE with domcontentloaded and read what
+                # rendered — an explicit, logged degradation, never a
+                # silently swallowed error over a known-stale shell.
+                logger.warning(
+                    "browser_navigate wait_until=networkidle failed for %s; "
+                    "falling back once to domcontentloaded",
+                    request.url,
+                )
+                navigate = self._call(
+                    "browser_navigate",
+                    {"url": request.url, "wait_until": "domcontentloaded"},
+                )
+                self._raise_tool_error(navigate, "browser_navigate")
             status, final_url = self._parse_navigation(navigate, request.url)
             page = self._call("browser_read_html", {"mode": "full"})
             self._raise_tool_error(page, "browser_read_html")
