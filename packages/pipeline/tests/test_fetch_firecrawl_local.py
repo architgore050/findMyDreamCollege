@@ -99,9 +99,7 @@ def test_scrape_max_age_is_configurable() -> None:
 
 def test_cloud_source_fails_closed_and_is_recorded_as_a_failure() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json=scrape_payload(metadata={"source": "firecrawl-cloud"})
-        )
+        return httpx.Response(200, json=scrape_payload(metadata={"source": "firecrawl-cloud"}))
 
     client = make_client(handler)
     with pytest.raises(FirecrawlCloudHandoffForbidden, match="cloud_handoff_forbidden"):

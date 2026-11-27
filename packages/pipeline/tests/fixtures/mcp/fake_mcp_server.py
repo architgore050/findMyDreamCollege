@@ -91,9 +91,7 @@ def serve() -> None:
                     reply(
                         request_id,
                         {
-                            "protocolVersion": params.get(
-                                "protocolVersion", PROTOCOL_VERSION
-                            ),
+                            "protocolVersion": params.get("protocolVersion", PROTOCOL_VERSION),
                             "capabilities": {"tools": {}},
                             "serverInfo": {"name": "fake-invisible-playwright-mcp", "version": "0"},
                         },

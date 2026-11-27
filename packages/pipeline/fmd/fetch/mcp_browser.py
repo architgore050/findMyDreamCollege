@@ -160,7 +160,9 @@ class RealMcpSession:
         self._stop = asyncio.Event()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
-            target=self._run, args=(stdio_client, ClientSession, params), daemon=True,
+            target=self._run,
+            args=(stdio_client, ClientSession, params),
+            daemon=True,
             name="fmd-mcp-browser",
         )
         self._thread.start()
@@ -183,9 +185,10 @@ class RealMcpSession:
         asyncio.set_event_loop(self._loop)
 
         async def lifespan() -> None:
-            async with stdio_client(params) as (read, write), client_session(
-                read, write
-            ) as session:
+            async with (
+                stdio_client(params) as (read, write),
+                client_session(read, write) as session,
+            ):
                 await session.initialize()
                 self._session = session
                 self._ready.set()
@@ -359,9 +362,7 @@ class InvisiblePlaywrightMCPFetcher:
         status_raw = _answer_field(
             answer, ("status", "http_status", "status_code", "httpstatuscode")
         )
-        final_url = _answer_field(
-            answer, ("url", "final_url", "landed_url", "finalurl")
-        )
+        final_url = _answer_field(answer, ("url", "final_url", "landed_url", "finalurl"))
         if isinstance(final_url, str) and final_url.startswith(("http://", "https://")):
             landed = final_url
         else:
@@ -387,9 +388,7 @@ class InvisiblePlaywrightMCPFetcher:
                 "navigation only issues GET. Refusing rather than downgrading."
             )
         if not self._is_enabled():
-            raise TierUnavailable(
-                "browser MCP tier is disabled (FMD_BROWSER_MCP_ENABLED=0)."
-            )
+            raise TierUnavailable("browser MCP tier is disabled (FMD_BROWSER_MCP_ENABLED=0).")
         if self.guard is not None:
             self.guard.check()
         # The server is stateful with exactly one page: serialize every call.
