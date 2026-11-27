@@ -335,7 +335,7 @@ def test_frontier_repo_backoff_and_domain_accounting(pg_database) -> None:
     repo.update_yield(domain, pages=4, yield_score=0.25)
     assert repo.yield_for_domain(domain) == (1, 0.25)
     repo.record_tier(domain, "invisible_playwright_mcp")
-    assert repo.tier_stats(domain) == {"patchright": 1}
+    assert repo.tier_stats(domain) == {"invisible_playwright_mcp": 1}
 
     until = datetime.now(UTC) + timedelta(hours=6)
     assert repo.is_quarantined(domain) is False
