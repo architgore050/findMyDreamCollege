@@ -12,7 +12,10 @@
 #   scripts/firecrawl_local.sh probe   # GET /health on the local port
 #   scripts/firecrawl_local.sh stop    # kill ONLY the PID this script started
 #
-# Install (never done automatically here): cargo install firecrawl-local
+# Install (never done automatically here; needs Rust/cargo):
+#   cargo install --locked --version "${FIRECRAWL_LOCAL_VERSION:-0.1.1}" firecrawl-local
+# 0.1.1 is the tested version (real-server matrix 2026-11-27: scrape/map/
+# crawl/batch/PDF/DOCX all passed); override FIRECRAWL_LOCAL_VERSION deliberately.
 # Config via env: FIRECRAWL_LOCAL_URL (default http://127.0.0.1:3002)
 
 set -euo pipefail
@@ -23,6 +26,10 @@ LOG_FILE="${STATE_DIR}/firecrawl-local.log"
 LOCAL_URL="${FIRECRAWL_LOCAL_URL:-http://127.0.0.1:3002}"
 HEALTH_PATH="/health"   # pinned: docs.firecrawl.dev/quickstarts/firecrawl-local
 START_TIMEOUT_S="${FIRECRAWL_LOCAL_START_TIMEOUT_S:-30}"
+# Tested version (2026-11-27 local real-server matrix). Env-overridable so an
+# upgrade is a deliberate act, and the opt-in integration test
+# (FMD_FIRECRAWL_INTEGRATION=1) fails loudly on contract drift.
+FIRECRAWL_LOCAL_VERSION="${FIRECRAWL_LOCAL_VERSION:-0.1.1}"
 
 no_cloud_banner() {
   echo "no-cloud guarantee: FIRECRAWL_CLOUD=off — nothing goes to Firecrawl Cloud;"
@@ -36,7 +43,7 @@ ensure_state_dir() {
 require_binary() {
   if ! command -v firecrawl-local >/dev/null 2>&1; then
     echo "firecrawl-local is not on PATH."
-    echo "install it (never auto-installed): cargo install firecrawl-local"
+    echo "install it (never auto-installed): cargo install --locked --version \"${FIRECRAWL_LOCAL_VERSION}\" firecrawl-local"
     exit 1
   fi
 }
