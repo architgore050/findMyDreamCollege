@@ -236,7 +236,11 @@ profiles:
     # scripted sessions (packages/pipeline/tests/fixtures/eval_verdict/live/).
     # required=false on purpose: an unresolved profile must surface as an
     # honest error from the stream, never a silent downgrade to guessing.
+    # Invariant 10: this profile is local/free-only. Disable the global
+    # local -> api fallback so a schema error reaches the backend's existing
+    # json_schema_violation retry instead of being masked by unresolved_provider.
     provider: ${FMD_VERDICT_LIVE_PROVIDER:-local}
+    allow_fallback: false
     model: ${FMD_VERDICT_LIVE_MODEL:-gemma-4-26b-a4b-gguf}
     provider_env: FMD_VERDICT_LIVE_PROVIDER
     model_env: FMD_VERDICT_LIVE_MODEL

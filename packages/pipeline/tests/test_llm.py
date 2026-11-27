@@ -207,6 +207,53 @@ def test_fallback_chain_uses_next_provider(tmp_path: Path) -> None:
     assert result.value == 7
 
 
+def test_verdict_live_schema_error_never_falls_back_to_api() -> None:
+    models = load_registry(CONFIG_DIR, env={}).models
+    assert any(
+        rule.from_provider == "local"
+        and rule.to_provider == "api"
+        and "json_schema_violation" in rule.on
+        for rule in models.fallbacks
+    ), "the test must exercise a real configured local -> api fallback"
+    original = ProviderError("json_schema_violation", "local: invalid verdict action")
+
+    class SchemaFailingProvider:
+        name = "local"
+        kind = "openai_compatible"
+        supports_guided_json = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, **kwargs: Any):
+            self.calls += 1
+            raise original
+
+    class ApiProvider:
+        name = "api"
+        kind = "openai_compatible"
+        supports_guided_json = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, **kwargs: Any):
+            self.calls += 1
+            raise AssertionError("verdict_live must never try the api fallback")
+
+    local = SchemaFailingProvider()
+    api = ApiProvider()
+    router = ModelRouter(models, providers={"local": local, "api": api})
+
+    with pytest.raises(ProviderError) as excinfo:
+        router.call("verdict_live", Answer, "s", "u", "verdict-live:test:turn-1")
+
+    assert excinfo.value is original  # the backend receives the original reason and can retry
+    assert excinfo.value.reason == "json_schema_violation"
+    assert local.calls == 1
+    assert api.calls == 0
+
+
 def test_ping_never_prints_secrets(tmp_path: Path) -> None:
     models = ModelsConfig.model_validate(
         {

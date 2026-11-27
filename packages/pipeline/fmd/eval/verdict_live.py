@@ -34,8 +34,8 @@ Anti-hallucination stance:
 Offline guarantees: :class:`ScriptedModelRouter` and :class:`ScriptedPageFetcher`
 replay committed sessions under
 ``tests/fixtures/eval_verdict/live/sessions/`` — router turns + fake fetch
-responses, no network, no real model. Everything proven about this stream is
-proven on that replay path; a live-model run is the operator's first run (LQ-9).
+responses, no network, no real model. Replay proves the stream's plumbing and
+guards; live-model reports plus the human audit determine research quality.
 """
 
 from __future__ import annotations
@@ -68,11 +68,13 @@ from fmd.llm.providers import ProviderError
 #: enforced in CI — no operator exists in CI.
 AUDIT_GATE = 0.70
 
-#: The audit sample is a random 10-20 % of verdict cases (doc 04 §2.1); the CLI
-#: fraction is clamped into this band. Stratification adds every incorrect and
-#: partially_correct verdict on top, per the same doc.
+#: The audit sample targets a random 10-20 % of verdict cases (doc 04 §2.1),
+#: with a floor of two entries whenever at least two cases exist. The CLI
+#: fraction is clamped into the target band; stratification adds every incorrect
+#: and partially_correct verdict on top, per the same doc.
 AUDIT_FRACTION_MIN = 0.10
 AUDIT_FRACTION_MAX = 0.20
+AUDIT_MIN_SAMPLE = 2
 
 STRATIFIED_VERDICTS = ("incorrect", "partially_correct")
 
@@ -124,9 +126,10 @@ Hard rules:
    verbatim quote relevant to the profile's institutions when you emit, cite
    the most relevant fetched page (even a partial listing page) before
    emitting. A verdict emitted with zero citations is a defect — use another
-   turn to add a citation, or emit "unknown" with the pages cited. Exception:
-   when the user prompt explicitly marks the last turn, do not spend it citing;
-   emit from the citations already collected, using "unknown" if none are sufficient.
+   turn to add a citation, or emit "unknown" with the pages cited. On the
+   penultimate turn, if pages have been fetched but nothing has been cited,
+   cite_source immediately: search_web, map_site, and fetch_url are forbidden
+   on that checkpoint. The final turn is reserved solely for emit_verdict.
 8. DISCOVERY ONLY: search_web and map_site results never enter the evidence
    ledger — they are leads. Evidence still requires fetch_url + cite_source.
 9. NEVER construct a Google (or any other search-engine) search URL and fetch
@@ -509,7 +512,7 @@ class LiveVerdictBackend:
                     ResearchAction,
                     SYSTEM_PROMPT,
                     self._build_user_prompt(
-                        profile, journal, citations, turns_used=stats.turns_used
+                        profile, journal, citations, ledger=ledger, turns_used=stats.turns_used
                     ),
                     f"verdict-live:{profile.profile_id}:turn-{stats.turns_used}",
                 )
@@ -526,6 +529,23 @@ class LiveVerdictBackend:
                 break
 
             assert isinstance(action, ResearchAction)  # narrows BaseModel for mypy/ruff
+
+            # The final turn is a hard emit-only boundary, not merely prompt
+            # guidance. Reject before dispatch so no fetch/search/map/cite side
+            # effect can occur after the research budget is exhausted.
+            if stats.turns_used == self.max_turns and action.action != "emit_verdict":
+                stats.stop_reason = "final_turn_action_rejected"
+                break
+            if (
+                stats.turns_used == self.max_turns
+                and action.action == "emit_verdict"
+                and not citations
+            ):
+                # The penultimate checkpoint was ignored. Never publish a
+                # zero-citation final verdict as if emission succeeded.
+                stats.rejected_verdicts += 1
+                stats.stop_reason = "final_turn_zero_citations"
+                break
 
             if action.action == "fetch_url":
                 journal.append(self._handle_fetch(str(action.url), stats, ledger))
@@ -813,6 +833,7 @@ class LiveVerdictBackend:
         journal: list[str],
         citations: list[Citation],
         *,
+        ledger: dict[str, StoredPage],
         turns_used: int,
     ) -> str:
         lines = [
@@ -868,6 +889,23 @@ class LiveVerdictBackend:
                 "now. If the collected evidence is thin, contradictory, or insufficient "
                 'for a scored verdict, emit verdict "unknown" and name unknown_aspects. '
                 "If you do not emit now, the harness will keep the verdict unknown."
+            )
+        elif turns_used == self.max_turns - 1 and not citations and ledger:
+            lines.append(
+                f"CITATION CHECKPOINT ({turns_used}/{self.max_turns}): pages were fetched, "
+                "but no verbatim citation has been recorded. A zero-citation verdict is a "
+                "defect; cite the most relevant fetched page now."
+            )
+            lines.append("FETCHED PAGES AVAILABLE TO CITE:")
+            lines.extend(f"- {url}" for url in ledger)
+            lines.append("Do NOT call search_web, map_site, or fetch_url on this turn.")
+            lines.append(
+                "NEXT ACTION: cite_source now — respond with exactly one schema-valid "
+                "cite_source action whose quote appears verbatim in a fetched page above."
+            )
+            lines.append(
+                f"The final turn ({self.max_turns}/{self.max_turns}) is reserved solely "
+                "for emit_verdict; use the citation collected here when you emit."
             )
         else:
             lines.append(
@@ -1043,7 +1081,11 @@ class AuditWorksheet(BaseModel):
 
 
 def clamp_audit_fraction(fraction: float) -> float:
-    """The sample is a random 10-20 % of verdict cases (doc 04 §2.1)."""
+    """Clamp the requested fraction into the 10-20 % target band (doc 04 §2.1).
+
+    The band is a target, not a reason to sample fewer than two cases: small-run
+    minimums are applied by :func:`build_audit_worksheet`.
+    """
     return min(AUDIT_FRACTION_MAX, max(AUDIT_FRACTION_MIN, fraction))
 
 
@@ -1060,15 +1102,17 @@ def build_audit_worksheet(
     Deterministic: the same cases + fraction + seed produce the same worksheet.
     Stratification (doc 04 §2.1): every incorrect and partially_correct verdict
     is always sampled; the seeded RNG fills the rest up to the clamped 10-20 %
-    target, so ``n_sampled`` may exceed the random band when the run itself has
-    many failures.
+    target, with a minimum of ``min(2, n_cases)`` entries. Thus ``n_sampled`` may
+    exceed the target band for small runs or when the run itself has many failures.
     """
     fraction_used = clamp_audit_fraction(fraction)
     rng = random.Random(seed)
     required = [case for case in cases if case["verdict"] in STRATIFIED_VERDICTS]
     others = [case for case in cases if case["verdict"] not in STRATIFIED_VERDICTS]
     rng.shuffle(others)
-    target = max(1, round(len(cases) * fraction_used)) if cases else 0
+    target = (
+        max(min(AUDIT_MIN_SAMPLE, len(cases)), round(len(cases) * fraction_used)) if cases else 0
+    )
     sampled = required + others[: max(0, target - len(required))]
     sampled.sort(key=lambda case: case["profile_id"])
     entries = [
@@ -1096,7 +1140,8 @@ def build_audit_worksheet(
         gate=AUDIT_GATE,
         sampling_rule=(
             "all incorrect/partially_correct verdicts + seeded random fill up to the "
-            "clamped 10-20% target (docs/v1/eval/04-verdict-audit-protocol.md §2.1)"
+            "clamped 10-20% target, with a minimum of min(2, n_cases) entries "
+            "(docs/v1/eval/04-verdict-audit-protocol.md §2.1)"
         ),
         n_cases=len(cases),
         entries=entries,
@@ -1125,7 +1170,7 @@ def score_audit_worksheet(worksheet: AuditWorksheet) -> dict[str, Any]:
         for entry in completed
         if entry.operator_agreement is not None and not entry.operator_agreement.citation_ok
     ]
-    if not worksheet.entries or len(completed) < 2:
+    if not worksheet.entries or len(completed) < AUDIT_MIN_SAMPLE:
         result = "INSUFFICIENT"
         reason = (
             f"only {len(completed)} of {len(worksheet.entries)} sampled verdict(s) carry an "
@@ -1247,8 +1292,8 @@ def render_verdict_live_summary(report: dict[str, Any]) -> str:
         )
     if mode == "replay":
         lines.append(
-            "  note: replay path (scripted sessions, offline) — the live stream has NEVER "
-            "run against a real model yet; the first real run is the operator's (LQ-9)"
+            "  note: replay path (scripted sessions, offline) — this validates plumbing, not "
+            "live-model behavior; committed live reports and human audit determine readiness"
         )
     return "\n".join(lines)
 
@@ -1257,6 +1302,7 @@ __all__ = [
     "AUDIT_FRACTION_MAX",
     "AUDIT_FRACTION_MIN",
     "AUDIT_GATE",
+    "AUDIT_MIN_SAMPLE",
     "AuditWorksheet",
     "AuditWorksheetEntry",
     "BackendRunStats",

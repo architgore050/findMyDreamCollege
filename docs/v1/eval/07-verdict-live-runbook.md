@@ -3,10 +3,9 @@
 **Wave:** FMD-CLOUD-024 / w13 (verdict-live)
 **Audience:** the operator of the local host (GPU + model weights). This stream does not run in CI
 beyond the offline replay path.
-**Status: the live stream has NEVER run against a real model yet.** Everything proven so far was
-proven on the replay path — committed scripted sessions replayed offline
-(`packages/pipeline/tests/fixtures/eval_verdict/live/sessions/`, mock provider). **The first real
-run is yours (LQ-9).** Treat this runbook as the sequence of record for that first run.
+**Status: live runs exist, but the human audit gate has not passed.** Committed reports under
+`reports/eval-verdict-live-*.json` record the operator runs; replay tests prove only the plumbing
+and guards. Treat every live result as advisory until the worksheet gate in §4 passes.
 
 The backend and its guarantees live in `fmd/eval/verdict_live.py`; the audit protocol this
 implements is `04-verdict-audit-protocol.md` (§5 records what is now executable). The design of
@@ -22,7 +21,10 @@ the verdict stream is `01-eval-designs.md` §3.
   `export FMD_EXTRACT_PROVIDER=local FMD_SNAPSHOT_DIR=$HOME/fmd-snap2`
   The router profile for this stream is `verdict_live` in `config/models.yaml`; it defaults to the
   local Gemma and is switched with `FMD_VERDICT_LIVE_PROVIDER` / `FMD_VERDICT_LIVE_MODEL` only if
-  you must. Do not point it at a paid API (invariant 10).
+  you must. Do not point it at a paid API (invariant 10). The profile also sets
+  `allow_fallback: false`: a local failure is re-raised unchanged and the router never tries the
+  global `api` fallback. This preserves the backend's `json_schema_violation` retry instead of
+  masking it as `unresolved_provider`.
 - GPU free before you start: `nvidia-smi` shows no other tenant.
 
 ## 2. Start and probe the model server
@@ -51,23 +53,31 @@ uv run python -m fmd.cli eval --eval-kind verdict --stream verdict-live \
   maps per profile. They are enforced in code; raise them only with a reason
   recorded next to the report (doc 01 §3.5: cost and audit hours are the limiting
   factors, not compute).
-- The final model turn is reserved for `emit_verdict`. Its prompt explicitly
-  forbids `search_web`, `map_site`, `fetch_url`, and `cite_source`, and asks for a
-  verdict now using the evidence and citations already collected (or an honest
-  `unknown` if they are insufficient). If the model disobeys, the hard turn cap
-  still degrades the case to `unknown`; the directive never bypasses validation.
+- On the **penultimate turn**, if `citations == 0` and the fetched ledger is non-empty, the prompt
+  issues a citation checkpoint: `cite_source` now, with no `search_web`, `map_site`, or `fetch_url`.
+  The final turn is reserved for emit.
+- The **final model turn is enforced in code as emit-only**. Its prompt forbids `search_web`,
+  `map_site`, `fetch_url`, and `cite_source`, and asks for a verdict now using the evidence and
+  citations already collected (or an honest `unknown` if they are insufficient). A non-emit action
+  is rejected before dispatch, without execution, and the case degrades to `unknown` with
+  `backend_run.stop_reason = final_turn_action_rejected`. A final `emit_verdict` with zero
+  citations is rejected as well and degrades with `final_turn_zero_citations`, so an ignored
+  citation checkpoint cannot publish an uncited success.
 - Every fetch the model requests goes through the fetch ladder (robots.txt honoured, per-domain
   rate limits, truthful UA with contact). If a fetch is refused or fails, the model is told and
   the page cannot be cited.
 - Expect minutes-to-tens-of-minutes per profile. Five canary profiles are committed; a pilot is
   exactly that — do not scale up before the audit gate below has passed once.
 - UNKNOWN verdicts are normal and honest. A case whose `backend_run.stop_reason` is
-  `turn_cap_reached` or `model_error:*` degraded to unknown; do not re-label it.
+  `final_turn_action_rejected`, `final_turn_zero_citations`, `turn_cap_reached`, or `model_error:*`
+  degraded to unknown; do not re-label it.
 
 The same invocation writes the audit worksheet `reports/audit-verdict-live-<ts>.json` (§5 of doc
-04): a seeded random 10–20 % of the run's verdicts, stratified so every `incorrect` and
-`partially_correct` verdict is included, with the full evidence graph, the fetch ledger (url,
-status, sha256, fetched_at) and an empty `operator_agreement` field per sampled case.
+04): the 10–20 % fraction is a target band, with a minimum of `min(2, n_cases)` entries. Sampling is
+seeded and stratified so every `incorrect` and `partially_correct` verdict is included; each entry
+carries the full evidence graph, the fetch ledger (url, status, sha256, fetched_at), and an empty
+`operator_agreement` field. A one-case worksheet can contain only one entry and remains
+`INSUFFICIENT` at the formal gate.
 
 ## 4. The audit worksheet loop (doc 04 §2)
 
@@ -108,10 +118,10 @@ Nothing you started may outlive the run (model server, crawl processes, temporar
 `nvidia-smi` shows more than 100 MiB in use after `stop`, kill the leftover process and record why
 it survived in your run notes.
 
-## 6. Honesty rules for the first real run
+## 6. Honesty rules for live validation
 
-- Label the run as the FIRST live run of this stream; do not present replay-path results as
-  live-model behavior anywhere.
+- Label the run as live-model validation; do not present replay-path results as live-model behavior
+  anywhere.
 - Record the model profile actually served (`scripts/serve_local.sh status`), the report path, the
   worksheet seed, and the audit outcome in `docs/v1/STATE.md` per the local-queue convention.
 - Commit back `reports/eval-verdict-live-<ts>.json` and the completed worksheet; never commit

@@ -27,12 +27,14 @@ from fmd.eval.verdict import (
 from fmd.eval.verdict_live import (
     SYSTEM_PROMPT,
     AuditWorksheet,
+    Citation,
     LiveSession,
     LiveVerdictBackend,
     OperatorAgreement,
     ResearchAction,
     ScriptedModelRouter,
     ScriptedPageFetcher,
+    StoredPage,
     build_audit_worksheet,
     clamp_audit_fraction,
     load_live_sessions,
@@ -144,7 +146,7 @@ def test_loop_terminates_at_turn_and_fetch_cap() -> None:
     verdict, backend = run_one(profile, session)
     assert backend.last_run["turns_used"] == 12  # hard model-turn cap (default)
     assert backend.last_run["fetches_used"] == 6  # hard fetch cap (12 were requested)
-    assert backend.last_run["stop_reason"] == "turn_cap_reached"
+    assert backend.last_run["stop_reason"] == "final_turn_action_rejected"
     assert verdict.verdict == "unknown"  # degraded honestly, never guessed
     assert any("stop_reason" in aspect for aspect in verdict.unknown_aspects)
 
@@ -176,7 +178,7 @@ def test_final_turn_directive_appears_only_on_the_last_turn() -> None:
     profile = inline_profile("live-final-turn-prompt", [])
 
     prompts = [
-        backend._build_user_prompt(profile, [f"turn {turn}"], [], turns_used=turn)
+        backend._build_user_prompt(profile, [f"turn {turn}"], [], ledger={}, turns_used=turn)
         for turn in (1, 2, 3)
     ]
 
@@ -187,7 +189,45 @@ def test_final_turn_directive_appears_only_on_the_last_turn() -> None:
     assert "emit_verdict" in prompts[-1] and "unknown" in prompts[-1]
 
 
-def test_ignored_final_turn_directive_still_degrades_honestly() -> None:
+def test_penultimate_turn_requires_citation_when_a_page_was_fetched() -> None:
+    session = load_live_sessions(SESSIONS_DIR)["live-cap-turn-loop"]
+    backend = make_backend(session, max_turns=3)
+    profile = inline_profile("live-penultimate-checkpoint", [])
+    url = "https://fixture.invalid/live/checkpoint/page"
+    ledger = {
+        url: StoredPage(
+            url=url,
+            final_url=url,
+            status=200,
+            body=b"<html>verbatim evidence</html>",
+            fetched_at="2026-11-22T00:00:00Z",
+        )
+    }
+    citation = Citation(
+        url=url,
+        quote="verbatim evidence",
+        title="Fetched fixture",
+        source_kind="institution",
+    )
+
+    prompt = backend._build_user_prompt(
+        profile, [f"FETCH OK: {url}"], [], ledger=ledger, turns_used=2
+    )
+
+    assert "CITATION CHECKPOINT (2/3)" in prompt
+    assert "cite_source now" in prompt
+    assert "Do NOT call search_web, map_site, or fetch_url" in prompt
+    assert "final turn (3/3) is reserved solely for emit_verdict" in prompt
+    assert url in prompt
+    assert "FINAL TURN (3/3)" not in prompt
+
+    no_fetched_page = backend._build_user_prompt(profile, [], [], ledger={}, turns_used=2)
+    already_cited = backend._build_user_prompt(profile, [], [citation], ledger=ledger, turns_used=2)
+    assert "CITATION CHECKPOINT" not in no_fetched_page
+    assert "CITATION CHECKPOINT" not in already_cited
+
+
+def test_final_turn_citation_is_not_executed_and_zero_citation_run_degrades_honestly() -> None:
     url = "https://fixture.invalid/live/final-disobedience/page"
     session = session_from_turns(
         "live-final-disobedience",
@@ -208,10 +248,48 @@ def test_ignored_final_turn_directive_still_degrades_honestly() -> None:
     verdict, backend = run_one(profile, session, max_turns=2)
 
     assert backend.last_run["turns_used"] == 2
-    assert backend.last_run["stop_reason"] == "turn_cap_reached"
+    assert backend.last_run["stop_reason"] == "final_turn_action_rejected"
+    assert backend.last_run["citations"] == 0
     assert verdict.verdict == "unknown"
-    assert len(verdict.evidence) == 1
+    assert verdict.evidence == []
+    assert "stop_reason: final_turn_action_rejected" in verdict.unknown_aspects
+    assert list(backend.ledger_for("live-final-disobedience")) == [url]
     assert reverify_evidence(backend, profile, verdict) == []
+
+
+def test_zero_citation_final_emit_degrades_honestly() -> None:
+    url = "https://fixture.invalid/live/zero-citation/page"
+    session = session_from_turns(
+        "live-zero-citation-final",
+        [{"url": url, "body": "<html>fetched but never cited</html>"}],
+        [
+            {"action": "fetch_url", "url": url},
+            # Disobey the penultimate citation checkpoint by fetching again.
+            {"action": "fetch_url", "url": url},
+            {
+                "action": "emit_verdict",
+                "verdict": {
+                    "profile_id": "live-zero-citation-final",
+                    "verdict": "correct",
+                    "rationale": "incorrectly claims a supported verdict without citations",
+                    "reference_top3": [AIIMS, PGIMER, CMC],
+                    "as_of": "2026-11-22",
+                },
+            },
+        ],
+    )
+    profile = inline_profile("live-zero-citation-final", [])
+
+    verdict, backend = run_one(profile, session, max_turns=3)
+
+    assert backend.last_run["turns_used"] == 3
+    assert backend.last_run["fetches_used"] == 2
+    assert backend.last_run["citations"] == 0
+    assert backend.last_run["rejected_verdicts"] == 1
+    assert backend.last_run["stop_reason"] == "final_turn_zero_citations"
+    assert verdict.verdict == "unknown"
+    assert verdict.evidence == []
+    assert "stop_reason: final_turn_zero_citations" in verdict.unknown_aspects
 
 
 # ------------------------------------------------------------------- sha256 re-verification
@@ -622,6 +700,71 @@ def test_scripted_search_fetch_cite_session_emits_on_final_turn() -> None:
     ]
 
 
+def test_scripted_penultimate_cite_then_final_emit_succeeds() -> None:
+    class PromptRecordingRouter(ScriptedModelRouter):
+        def __init__(self, session: LiveSession) -> None:
+            super().__init__(session)
+            self.user_prompts: list[str] = []
+
+        def call(self, purpose, schema, system, user, input_ref):
+            self.user_prompts.append(user)
+            return super().call(purpose, schema, system, user, input_ref)
+
+    profile_id = "live-checkpoint-cite-emit"
+    url = "https://fixture.invalid/live/checkpoint-cite-emit/page"
+    session = session_from_turns(
+        profile_id,
+        [{"url": url, "body": "<html>BSc MLT programme evidence</html>"}],
+        [
+            {"action": "fetch_url", "url": url},
+            {
+                "action": "cite_source",
+                "url": url,
+                "quote": "BSc MLT programme evidence",
+                "title": "Programme evidence",
+                "source_kind": "institution",
+            },
+            {
+                "action": "emit_verdict",
+                "verdict": {
+                    "profile_id": profile_id,
+                    "verdict": "unknown",
+                    "rationale": "one cited programme page cannot rank the full shortlist",
+                    "unknown_aspects": ["recognition and admissions evidence for the shortlist"],
+                    "as_of": "2026-11-22",
+                },
+            },
+        ],
+    )
+    router = PromptRecordingRouter(session)
+    backend = LiveVerdictBackend(
+        router,
+        ScriptedPageFetcher(session.pages),
+        max_turns=3,
+    )
+    profile = inline_profile(profile_id, [])
+
+    verdict = backend.respond(profile)
+
+    assert verdict.verdict == "unknown"
+    assert len(verdict.evidence) == 1
+    assert reverify_evidence(backend, profile, verdict) == []
+    assert backend.last_run["turns_used"] == 3
+    assert backend.last_run["fetches_used"] == 1
+    assert backend.last_run["citations"] == 1
+    assert backend.last_run["stop_reason"] == "emitted_verdict"
+    assert ["CITATION CHECKPOINT" in prompt for prompt in router.user_prompts] == [
+        False,
+        True,
+        False,
+    ]
+    assert ["FINAL TURN" in prompt for prompt in router.user_prompts] == [
+        False,
+        False,
+        True,
+    ]
+
+
 def backend_with_providers(
     session: LiveSession,
     *,
@@ -717,7 +860,7 @@ def test_search_cap_override_is_allowed_and_still_enforced() -> None:
     assert backend.max_searches == 2
     assert backend.last_run["searches_used"] == 2
     assert search.queries == ["one", "two"]
-    assert backend.last_run["stop_reason"] == "turn_cap_reached"
+    assert backend.last_run["stop_reason"] == "final_turn_action_rejected"
 
 
 def test_provider_unavailable_is_an_honest_journal_note_not_a_crash() -> None:
@@ -871,7 +1014,7 @@ def test_audit_sampling_is_deterministic_under_fixed_seed() -> None:
     assert ws_a.seed == 13 and ws_a.fraction_used == 0.15 and ws_a.gate == 0.70
     ids = {e.profile_id for e in ws_a.entries}
     assert {"canary-02-partially-correct", "canary-03-incorrect"} <= ids  # stratified
-    assert len(ws_a.entries) == 2  # target max(1, round(5*0.15)); failures always added
+    assert len(ws_a.entries) == 2  # min(2, 5) floor; failures always added
     assert all(e.operator_agreement is None for e in ws_a.entries)  # empty field
     for entry in ws_a.entries:
         assert entry.evidence and entry.fetch_ledger
@@ -900,6 +1043,24 @@ def _fill(ws: AuditWorksheet, agreements: dict[str, dict]) -> AuditWorksheet:
         if entry.profile_id in agreements:
             entry.operator_agreement = OperatorAgreement(**agreements[entry.profile_id])
     return ws
+
+
+def test_audit_sampling_has_a_minimum_of_two_entries_when_available() -> None:
+    cases = synthetic_cases(5)
+    worksheet = build_audit_worksheet(cases, fraction=0.4, seed=13)
+    repeated = build_audit_worksheet(cases, fraction=0.4, seed=13)
+
+    assert worksheet.fraction_used == 0.20  # requested fraction is only clamped to the band
+    assert len(worksheet.entries) == 2  # round(5 * 0.20) == 1, but the floor is two
+    assert [entry.profile_id for entry in worksheet.entries] == [
+        entry.profile_id for entry in repeated.entries
+    ]
+    assert "minimum of min(2, n_cases)" in worksheet.sampling_rule
+
+    one_case = build_audit_worksheet(synthetic_cases(1), fraction=0.4, seed=13)
+    assert len(one_case.entries) == 1
+    _fill(one_case, {one_case.entries[0].profile_id: {"agrees": True}})
+    assert score_audit_worksheet(one_case)["result"] == "INSUFFICIENT"
 
 
 def test_audit_score_computes_agreement_rate_pass_and_fail() -> None:
@@ -986,7 +1147,7 @@ def test_cli_verdict_live_runs_end_to_end_on_mock_provider(
     assert all(case["reverify"]["failures"] == [] for case in report["cases"])
     out = capsys.readouterr().out
     assert "fmd eval (verdict-live)" in out
-    assert "NEVER" in out  # the honesty note about the live stream
+    assert "not live-model behavior" in out  # replay honesty note
 
 
 def test_cli_verdict_live_dry_run_and_limits_parse(mock_provider, capsys) -> None:

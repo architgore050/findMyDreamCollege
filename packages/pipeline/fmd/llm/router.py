@@ -232,7 +232,9 @@ class ModelRouter:
                 last_error = exc
                 reason = _reason(exc)
                 self._record_provider_failure(reason, exc)
-                fallback = self._fallback_for(provider_name, reason)
+                fallback = (
+                    self._fallback_for(provider_name, reason) if profile.allow_fallback else None
+                )
                 if fallback is None:
                     raise
                 provider_name = fallback

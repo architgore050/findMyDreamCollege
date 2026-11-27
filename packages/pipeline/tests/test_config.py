@@ -49,6 +49,13 @@ def test_valid_registry_loads(registry) -> None:
     assert registry.scorer_version and registry.weights_version
 
 
+def test_profile_fallback_is_registry_driven(registry) -> None:
+    # Existing profiles retain the historical fallback behaviour by default;
+    # verdict_live explicitly opts out to protect invariant 10 and schema retries.
+    assert registry.models.profiles["bulk_extract"].allow_fallback is True
+    assert registry.models.profiles["verdict_live"].allow_fallback is False
+
+
 def test_weights_must_sum_to_100(config_dir: Path) -> None:
     path = config_dir / "weights.yaml"
     payload = _read(path)

@@ -530,6 +530,11 @@ class ProfileConfig(ConfigModel):
     model_example: str | None = None
     required: bool = True
     degrade_reason: str | None = None
+    # Registry-driven escape hatch for profiles that must never silently change
+    # provider (for example the free/local-only verdict_live eval). When false,
+    # the router re-raises the original provider error instead of consulting the
+    # global fallback table.
+    allow_fallback: bool = True
 
     @property
     def resolved(self) -> bool:
