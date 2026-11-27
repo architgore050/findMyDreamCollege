@@ -334,7 +334,7 @@ def test_frontier_repo_backoff_and_domain_accounting(pg_database) -> None:
     assert repo.count_for_domain_since(domain, start) == 1
     repo.update_yield(domain, pages=4, yield_score=0.25)
     assert repo.yield_for_domain(domain) == (1, 0.25)
-    repo.record_tier(domain, "patchright")
+    repo.record_tier(domain, "invisible_playwright_mcp")
     assert repo.tier_stats(domain) == {"patchright": 1}
 
     until = datetime.now(UTC) + timedelta(hours=6)

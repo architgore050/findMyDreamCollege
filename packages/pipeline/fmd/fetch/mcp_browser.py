@@ -175,7 +175,7 @@ class RealMcpSession:
                 f"initialize within {connect_timeout:.0f}s"
             )
         if self._error is not None:
-            self._teardown()
+            self.close()
             if isinstance(self._error, TierUnavailable):
                 raise self._error
             raise TierUnavailable(
@@ -187,13 +187,14 @@ class RealMcpSession:
         asyncio.set_event_loop(self._loop)
 
         async def lifespan() -> None:
-            async with stdio_client(params) as (read, write):
-                async with client_session(read, write) as session:
-                    await session.initialize()
-                    self._session = session
-                    self._ready.set()
-                    assert self._stop is not None
-                    await self._stop.wait()
+            async with stdio_client(params) as (read, write), client_session(
+                read, write
+            ) as session:
+                await session.initialize()
+                self._session = session
+                self._ready.set()
+                assert self._stop is not None
+                await self._stop.wait()
 
         try:
             self._loop.run_until_complete(lifespan())
@@ -269,10 +270,11 @@ class InvisiblePlaywrightMCPFetcher:
     ) -> None:
         self._enabled_override = enabled
         self._command = command or os.environ.get("FMD_BROWSER_MCP_COMMAND", "uvx").strip() or "uvx"
-        raw_args = args if args is not None else os.environ.get(
-            "FMD_BROWSER_MCP_ARGS", "invisible-playwright-mcp"
-        )
-        self._args = [part for part in str(raw_args).split() if part]
+        if args is not None:
+            self._args = [str(part) for part in args]
+        else:
+            raw_args = os.environ.get("FMD_BROWSER_MCP_ARGS", "invisible-playwright-mcp")
+            self._args = [part for part in str(raw_args).split() if part]
         self._session_factory = session_factory
         self._call_timeout_s = call_timeout_s
         self.policy = policy or BrowserPolicy.from_env()
@@ -314,7 +316,7 @@ class InvisiblePlaywrightMCPFetcher:
             raise BrowserNavigationError(
                 classify_browser_error(str(exc)), f"{name} timed out"
             ) from exc
-        except (BrokenPipeError, ConnectionError, RuntimeError) as exc:
+        except Exception as exc:  # transport died or the server crashed mid-call
             raise BrowserNavigationError(
                 classify_browser_error(str(exc)), f"{name} failed: {exc}"
             ) from exc
