@@ -20,7 +20,10 @@ Investigate or code directly only when the user asks for it, or when one lookup 
 Any command that can exceed ~2 minutes (crawls, acquisition, model runs, full suites against the DB) follows this protocol:
 
 1. Run it once, in the background (harness background execution or `nohup … &`). Never run it in the foreground and never poll or tail it while waiting — the harness notifies on completion.
-2. Make the script self-contained: log to `/tmp/opencode/<task>/run.log`, print a one-screen final summary as the last output, exit non-zero on failure.
+2. Make the script self-contained: log to `/tmp/opencode/<task>/run.log` via
+   `scripts/run_logged.sh <log> <command...>` (START + exact command + PID,
+   30-second `ps` HEARTBEATs, END + exit code, sibling `.status` file), print a
+   one-screen final summary as the last output, exit non-zero on failure.
 3. Leave the machine as you found it: stop anything you started (`trap`/`finally`: model server, containers, temporary worktrees) and report free GPU memory at the end.
 4. Persist progress per item where the pipeline supports it, so a kill loses only in-flight work.
 5. Never run the same long task twice in parallel.
