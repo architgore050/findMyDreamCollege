@@ -1,0 +1,14 @@
+{
+  "comment": "Defense-in-depth fixture (2026-11-27 finding #7): the cloud taint sits on the TOP-LEVEL object (source=firecrawl-cloud outside data/metadata), which the old two-container check ignored. The deep provenance scan must fail closed on it exactly like metadata-level taint.",
+  "success": true,
+  "source": "firecrawl-cloud",
+  "data": {
+    "metadata": {
+      "sourceURL": "https://college.ac.in/fees",
+      "statusCode": 200,
+      "title": "Fees"
+    },
+    "html": "<html><body>fees (rendered by Firecrawl Cloud)</body></html>",
+    "markdown": "fees (rendered by Firecrawl Cloud)"
+  }
+}

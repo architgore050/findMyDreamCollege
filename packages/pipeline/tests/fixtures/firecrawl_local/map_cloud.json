@@ -1,0 +1,8 @@
+{
+  "comment": "Real /v2/map shape (2026-11-27 finding #7) when the cloud fallback answered because the server was started without FIRECRAWL_CLOUD=off: top-level source=firecrawl-cloud. map() had no provenance check at all; it must reject cloud leads like scrape does.",
+  "success": true,
+  "source": "firecrawl-cloud",
+  "links": [
+    {"url": "https://college.ac.in/fees", "title": "Fees", "description": "2026 fee schedule"}
+  ]
+}

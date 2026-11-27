@@ -19,6 +19,7 @@ from fmd.fetch.firecrawl_local import (
     FirecrawlCloudHandoffForbidden,
     FirecrawlLocalClient,
     FirecrawlLocalFetcher,
+    FirecrawlTargetBlocked,
     MapLink,
 )
 from fmd.fetch.ladder import TIER_FIRECRAWL_LOCAL
@@ -274,6 +275,17 @@ def test_cloud_taint_wins_over_a_local_block_and_fails_closed() -> None:
         make_client(handler).scrape("https://college.ac.in/fees")
 
 
+def test_scrape_top_level_cloud_taint_fails_closed_too() -> None:
+    """Real 0.1.1 shape (finding #7): the cloud taint on the TOP-LEVEL object
+    (outside data/metadata) must be caught like metadata-level taint — the
+    old two-container check ignored it."""
+    client = fixture_client("scrape_cloud_top_level.json")
+
+    with pytest.raises(FirecrawlCloudHandoffForbidden, match="cloud_handoff_forbidden"):
+        client.scrape("https://college.ac.in/fees")
+    client.close()
+
+
 def test_bad_responses_are_typed() -> None:
     def no_data(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"success": True})
@@ -377,6 +389,26 @@ def test_map_limit_is_forwarded() -> None:
     client = make_client(handler)
     client.map("https://college.ac.in", limit=7)
     assert b'"limit":7' in seen["body"].replace(b" ", b"")
+
+
+def test_map_cloud_source_is_rejected_like_scrape() -> None:
+    """Real 0.1.1 shape (finding #7): /v2/map answered by the cloud fallback.
+    map() had no provenance check at all; cloud leads are refused."""
+    client = fixture_client("map_cloud.json")
+
+    with pytest.raises(FirecrawlCloudHandoffForbidden, match="cloud_handoff_forbidden"):
+        client.map("https://college.ac.in")
+    client.close()
+
+
+def test_map_blocked_response_is_refused_not_returned() -> None:
+    """Real 0.1.1 shape (finding #7): a locally blocked map request reports
+    blocked=true; the leads must never reach the discovery output."""
+    client = fixture_client("map_blocked.json")
+
+    with pytest.raises(FirecrawlTargetBlocked, match="target_blocked"):
+        client.map("https://college.ac.in")
+    client.close()
 
 
 # ------------------------------------------------------------------- fetcher + config
