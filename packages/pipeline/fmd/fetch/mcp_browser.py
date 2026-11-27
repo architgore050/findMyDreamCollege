@@ -1,0 +1,445 @@
+"""MCP browser tier: ``invisible-playwright-mcp`` over stdio (v1/free-web-stack).
+
+The third rung of the fetch ladder. Replaces the in-process PatchrightFetcher:
+instead of driving a local Chromium from this process, the tier talks to the
+`invisible-playwright-mcp <https://github.com/oss-invisible/playwright_mcp>`_
+server (MIT, Python >= 3.11) over stdio with the official ``mcp`` SDK. The
+server owns the browser (one page, stateful); we only navigate and read.
+
+Contract highlights (docs/mcp-server.md of the pinned upstream):
+
+* ``browser_open`` is the only opener; other tools refuse while closed. It
+  returns ``{opened: bool, cause?: str}`` — ``cause`` is one of
+  ``profile_locked | no_display | missing_libraries | sandbox_blocked |
+  launch_failed | downloading | download_failed``. Every ``opened=false`` is
+  reported honestly (``mcp_browser_<cause>``); nothing is retried in silence.
+* ``browser_navigate(url, wait_until)`` answers with the HTTP status and the
+  final URL (``structuredContent``; text fallback), so redirects and 404s are
+  visible. ``wait_until="domcontentloaded"`` keeps the page from waiting out a
+  dead analytics beacon.
+* ``browser_read_html(mode="full")`` returns the page HTML (structure, noise
+  removed, uncapped).
+
+Politeness is unchanged: the robots decision and the per-domain rate limit
+happen *before* this tier is called (the ladder's job), no auth/CAPTCHA bypass,
+and the browser presents its own truthful identity. All MCP calls are
+serialized with one lock: the server is stateful with a single page, so two
+concurrent fetches would race each other's navigation.
+
+Config (env, no secrets): ``FMD_BROWSER_MCP_ENABLED`` (default ``1``),
+``FMD_BROWSER_MCP_COMMAND`` (default ``uvx``), ``FMD_BROWSER_MCP_ARGS``
+(default ``invisible-playwright-mcp``). ``STEALTHFOX_*`` and
+``INVISIBLE_MCP_HOME`` env vars are passed through to the spawned server
+unchanged.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+from dataclasses import dataclass
+from typing import Any
+
+from fmd.fetch.ladder import BrowserNavigationError
+from fmd.fetch.types import (
+    FetchRequest,
+    FetchResult,
+    TierUnavailable,
+    UnsupportedReplay,
+)
+from fmd.net.policy import BrowserPolicy, NetworkGuard, classify_browser_error
+
+logger = logging.getLogger(__name__)
+
+#: Ladder tier name (recorded on every snapshot and failure entry).
+TIER_MCP_BROWSER = "invisible_playwright_mcp"
+
+#: Causes the upstream contract expects for ``browser_open`` failures; used
+#: verbatim in the honest error string so the failure log stays scannable.
+_OPEN_FAILURE_PREFIX = "mcp_browser_"
+
+#: Env var names passed through to the spawned MCP server, unchanged.
+_PASSTHROUGH_ENV_PREFIXES = ("STEALTHFOX_", "INVISIBLE_MCP_")
+
+#: Wait for a lead the search/map providers returned before citing it — the
+#: prompt says it; this constant keeps the journal wording in one place.
+DISCOVERY_NOTE = "discovery only; fetch_url the URL before citing it"
+
+
+@dataclass(frozen=True)
+class ToolAnswer:
+    """The one shape of a tool call this module reasons about.
+
+    ``structured`` is the server's ``structuredContent`` (may be ``None``);
+    ``text`` is the concatenated text blocks (the fallback every tool provides).
+    Both the real SDK session and the test fakes produce this, so the parsing
+    below is exercised identically offline.
+    """
+
+    structured: dict[str, Any] | None
+    text: str
+    is_error: bool = False
+
+
+def _env_flag(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() not in {"0", "false", "off", ""}
+
+
+def _passthrough_env() -> dict[str, str]:
+    """Default-safe environment plus the server's own env vars, unchanged."""
+    env: dict[str, str] = {}
+    try:
+        from mcp.client.stdio import get_default_environment
+
+        env.update(get_default_environment())
+    except Exception:  # noqa: BLE001 - env best-effort; never breaks the fetch
+        env.update({"HOME": os.environ.get("HOME", ""), "PATH": os.environ.get("PATH", "")})
+    for key, value in os.environ.items():
+        if key.startswith(_PASSTHROUGH_ENV_PREFIXES) and value != "":
+            env[key] = value
+    return env
+
+
+def _structured_field(structured: dict[str, Any] | None, names: tuple[str, ...]) -> Any:
+    if not structured:
+        return None
+    lowered = {str(key).lower(): value for key, value in structured.items()}
+    for name in names:
+        value = lowered.get(name.lower())
+        if value is not None:
+            return value
+    return None
+
+
+def _answer_field(answer: ToolAnswer, names: tuple[str, ...]) -> Any:
+    value = _structured_field(answer.structured, names)
+    if value is not None:
+        return value
+    lowered = answer.text.lower()
+    for name in names:
+        marker = name.lower() + ":"
+        if marker in lowered:
+            return answer.text.split(marker, 1)[1].split("\n", 1)[0].strip()
+    return None
+
+
+class RealMcpSession:
+    """One spawned MCP server over stdio, driven from a background loop.
+
+    The ``mcp`` SDK is async; the fetch ladder is synchronous. The session
+    starts one daemon thread with its own event loop, enters the stdio +
+    session contexts there, and forwards ``call_tool`` calls via
+    ``run_coroutine_threadsafe``. ``close()`` unwinds the contexts cleanly.
+    """
+
+    def __init__(self, *, command: str, args: list[str], call_timeout_s: float = 60.0) -> None:
+        import asyncio
+
+        self._asyncio = asyncio
+        self._command = command
+        self._args = list(args)
+        self._call_timeout_s = call_timeout_s
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._session: Any = None
+        self._ready = threading.Event()
+        self._error: BaseException | None = None
+        self._stop: asyncio.Event | None = None
+
+    # ------------------------------------------------------------------ lifecycle
+    def start(self) -> None:
+        asyncio = self._asyncio
+        try:
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+        except ModuleNotFoundError as exc:
+            raise TierUnavailable(
+                "browser MCP tier is unavailable: the official `mcp` SDK is not "
+                "installed. Install the crawl extra: `uv sync --extra crawl`."
+            ) from exc
+        params = StdioServerParameters(
+            command=self._command, args=self._args, env=_passthrough_env()
+        )
+        self._stop = asyncio.Event()
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=self._run, args=(stdio_client, ClientSession, params), daemon=True,
+            name="fmd-mcp-browser",
+        )
+        self._thread.start()
+        connect_timeout = max(5.0, self._call_timeout_s)
+        if not self._ready.wait(connect_timeout):
+            raise TierUnavailable(
+                f"browser MCP server ({self._command} {' '.join(self._args)}) did not "
+                f"initialize within {connect_timeout:.0f}s"
+            )
+        if self._error is not None:
+            self._teardown()
+            if isinstance(self._error, TierUnavailable):
+                raise self._error
+            raise TierUnavailable(
+                f"browser MCP server failed to initialize: {self._error}"
+            ) from self._error
+
+    def _run(self, stdio_client, client_session, params) -> None:  # noqa: ANN001 - SDK types
+        asyncio = self._asyncio
+        asyncio.set_event_loop(self._loop)
+
+        async def lifespan() -> None:
+            async with stdio_client(params) as (read, write):
+                async with client_session(read, write) as session:
+                    await session.initialize()
+                    self._session = session
+                    self._ready.set()
+                    assert self._stop is not None
+                    await self._stop.wait()
+
+        try:
+            self._loop.run_until_complete(lifespan())
+        except BaseException as exc:  # transport died or never came up
+            self._error = exc
+            self._ready.set()
+        finally:
+            self._session = None
+            self._loop.close()
+
+    def close(self) -> None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            self._loop = None
+            return
+        if self._stop is not None:
+            loop.call_soon_threadsafe(self._stop.set)
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=10.0)
+            if thread.is_alive() and not loop.is_closed():  # pragma: no cover - hung shutdown
+                loop.call_soon_threadsafe(loop.stop)
+        self._loop = None
+        self._thread = None
+        self._session = None
+
+    # ------------------------------------------------------------------ calls
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> ToolAnswer:
+        session = self._session
+        if session is None:
+            raise RuntimeError("browser MCP session is not open")
+        future = self._asyncio.run_coroutine_threadsafe(
+            session.call_tool(name, arguments or {}), self._loop
+        )
+        try:
+            result = future.result(self._call_timeout_s)
+        except TimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(f"browser MCP tool {name!r} timed out") from exc
+        structured = getattr(result, "structuredContent", None)
+        blocks: list[str] = []
+        for block in result.content or []:
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                blocks.append(text)
+        return ToolAnswer(
+            structured=dict(structured) if isinstance(structured, dict) else None,
+            text="\n".join(blocks),
+            is_error=bool(getattr(result, "isError", False)),
+        )
+
+
+class InvisiblePlaywrightMCPFetcher:
+    """Third tier: the invisible-playwright-mcp server (stealth Firefox).
+
+    One server process per fetcher, one page, one navigation at a time (the
+    lock). ``fetch`` walks the contract: ``browser_open`` once, then
+    ``browser_navigate`` + ``browser_read_html(mode="full")`` for every GET.
+    """
+
+    name = TIER_MCP_BROWSER
+
+    def __init__(
+        self,
+        *,
+        command: str | None = None,
+        args: list[str] | None = None,
+        enabled: bool | None = None,
+        session_factory: Any | None = None,
+        call_timeout_s: float = 60.0,
+        policy: BrowserPolicy | None = None,
+        guard: NetworkGuard | None = None,
+    ) -> None:
+        self._enabled_override = enabled
+        self._command = command or os.environ.get("FMD_BROWSER_MCP_COMMAND", "uvx").strip() or "uvx"
+        raw_args = args if args is not None else os.environ.get(
+            "FMD_BROWSER_MCP_ARGS", "invisible-playwright-mcp"
+        )
+        self._args = [part for part in str(raw_args).split() if part]
+        self._session_factory = session_factory
+        self._call_timeout_s = call_timeout_s
+        self.policy = policy or BrowserPolicy.from_env()
+        self.guard = guard
+        self._lock = threading.Lock()
+        self._session: Any | None = None
+        self._opened = False
+
+    # ------------------------------------------------------------------ internals
+    def _is_enabled(self) -> bool:
+        if self._enabled_override is not None:
+            return self._enabled_override
+        return _env_flag("FMD_BROWSER_MCP_ENABLED", "1")
+
+    def _get_session(self) -> Any:
+        if self._session is not None:
+            return self._session
+        if self._session_factory is not None:
+            self._session = self._session_factory()
+            return self._session
+        session = RealMcpSession(
+            command=self._command, args=self._args, call_timeout_s=self._call_timeout_s
+        )
+        try:
+            session.start()
+        except (FileNotFoundError, PermissionError) as exc:
+            raise TierUnavailable(
+                f"browser MCP command not found: {self._command!r} "
+                f"({' '.join(self._args)}). Install invisible-playwright-mcp or set "
+                "FMD_BROWSER_MCP_COMMAND."
+            ) from exc
+        self._session = session
+        return session
+
+    def _call(self, name: str, arguments: dict[str, Any]) -> ToolAnswer:
+        try:
+            answer = self._session.call_tool(name, arguments)
+        except TimeoutError as exc:
+            raise BrowserNavigationError(
+                classify_browser_error(str(exc)), f"{name} timed out"
+            ) from exc
+        except (BrokenPipeError, ConnectionError, RuntimeError) as exc:
+            raise BrowserNavigationError(
+                classify_browser_error(str(exc)), f"{name} failed: {exc}"
+            ) from exc
+        if answer.is_error:
+            raise BrowserNavigationError(
+                classify_browser_error(answer.text), f"{name} refused: {answer.text[:200]}"
+            )
+        return answer
+
+    def _ensure_browser_open(self, url: str) -> FetchResult | None:
+        """Open the server's browser once; None means ready to navigate.
+
+        An ``opened=false`` answer is never retried silently: the caller gets
+        an honest status-0 result naming the cause, and the next fetch will
+        attempt a fresh ``browser_open``.
+        """
+        if self._opened:
+            return None
+        answer = self._call("browser_open", {})
+        opened = _answer_field(answer, ("opened",))
+        if opened is False:
+            cause = str(_answer_field(answer, ("cause",)) or "unknown_cause")
+            self._opened = False
+            return self._honest(url, 0, f"{_OPEN_FAILURE_PREFIX}{cause}")
+        if opened is not True:
+            # A malformed open answer is a server-side problem, not a page.
+            self._opened = False
+            return self._honest(url, 0, f"{_OPEN_FAILURE_PREFIX}bad_open_answer")
+        self._opened = True
+        return None
+
+    def _honest(self, url: str, status: int, error: str, method: str = "GET") -> FetchResult:
+        return FetchResult(
+            url=url,
+            final_url=url,
+            status=status,
+            fetcher_tier=self.name,
+            error=error,
+            method=method,
+        )
+
+    @staticmethod
+    def _parse_navigation(answer: ToolAnswer, url: str) -> tuple[int, str]:
+        status_raw = _answer_field(
+            answer, ("status", "http_status", "status_code", "httpstatuscode")
+        )
+        final_url = _answer_field(
+            answer, ("url", "final_url", "landed_url", "finalurl")
+        )
+        if isinstance(final_url, str) and final_url.startswith(("http://", "https://")):
+            landed = final_url
+        else:
+            landed = url
+        try:
+            status = int(str(status_raw).strip())
+        except (TypeError, ValueError):
+            raise BrowserNavigationError(
+                classify_browser_error(answer.text),
+                "navigate answer carries no parseable HTTP status",
+            ) from None
+        return status, landed
+
+    # ------------------------------------------------------------------ TierFetcher
+    def fetch(self, request: FetchRequest) -> FetchResult:
+        method = str(request.method or "GET").upper()
+        if method != "GET":
+            # browser_navigate only issues GET. Faking a POST would execute the
+            # page's own JavaScript and render whatever it decides, not replay
+            # the persisted request/body — refuse explicitly instead.
+            raise UnsupportedReplay(
+                f"{self.name} cannot faithfully replay {method} requests; a browser "
+                "navigation only issues GET. Refusing rather than downgrading."
+            )
+        if not self._is_enabled():
+            raise TierUnavailable(
+                "browser MCP tier is disabled (FMD_BROWSER_MCP_ENABLED=0)."
+            )
+        if self.guard is not None:
+            self.guard.check()
+        # The server is stateful with exactly one page: serialize every call.
+        with self._lock:
+            try:
+                self._get_session()
+            except (ModuleNotFoundError, FileNotFoundError, PermissionError):
+                raise
+            except TierUnavailable:
+                raise
+            not_ready = self._ensure_browser_open(request.url)
+            if not_ready is not None:
+                return not_ready
+            navigate = self._call(
+                "browser_navigate",
+                {"url": request.url, "wait_until": "domcontentloaded"},
+            )
+            status, final_url = self._parse_navigation(navigate, request.url)
+            page = self._call("browser_read_html", {"mode": "full"})
+            body = page.text.encode("utf-8")
+        if self.policy.max_page_bytes and len(body) > self.policy.max_page_bytes:
+            raise BrowserNavigationError(
+                classify_browser_error("page too large"),
+                f"page is {len(body)} bytes (cap {self.policy.max_page_bytes})",
+            )
+        if self.guard is not None:
+            self.guard.record_success()
+        return FetchResult(
+            url=request.url,
+            final_url=final_url,
+            status=status,
+            headers={},
+            body=body,
+            fetcher_tier=self.name,
+            method=method,
+        )
+
+    def close(self) -> None:
+        """Terminate the spawned server (or the injected session)."""
+        with self._lock:
+            session = self._session
+            self._session = None
+            self._opened = False
+        if session is None:
+            return
+        closer = getattr(session, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception as exc:  # noqa: BLE001 - close must never raise
+                logger.info("browser MCP close failed: %s", exc)
