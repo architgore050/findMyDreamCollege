@@ -7,6 +7,7 @@ real Firecrawl process or the network.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -24,6 +25,23 @@ from fmd.fetch.ladder import TIER_FIRECRAWL_LOCAL
 from fmd.fetch.types import FetchRequest, TierUnavailable, UnsupportedReplay
 
 SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "firecrawl_local.sh"
+FC_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "firecrawl_local"
+
+
+def fc_fixture(name: str) -> dict:
+    """A committed real-wire payload (Firecrawl Local 0.1.1, local matrix
+    2026-11-27), fed straight through the client so a contract change in the
+    v2 shapes fails loudly offline."""
+    return json.loads((FC_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def fixture_client(name: str) -> FirecrawlLocalClient:
+    payload = fc_fixture(name)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    return make_client(handler)
 
 
 def make_client(handler, *, enabled: bool = True, **kwargs) -> FirecrawlLocalClient:
@@ -83,6 +101,35 @@ def test_scrape_falls_back_to_markdown_when_html_is_empty() -> None:
     client = make_client(handler)
     result = client.scrape("https://college.ac.in/fees")
     assert result.body == b"# fees page"
+
+
+def test_scrape_redirect_reports_the_final_url_not_the_requested_one() -> None:
+    """Real 0.1.1 shape (finding #4): metadata.sourceURL keeps the requested
+    /redirect URL, metadata.url is where the page actually landed. Using
+    sourceURL as final_url would poison provenance with a URL that never
+    rendered the content."""
+    client = fixture_client("scrape_redirect.json")
+
+    result = client.scrape("http://127.0.0.1:18765/redirect")
+
+    assert result.status == 200
+    assert result.ok
+    assert result.final_url == "http://127.0.0.1:18765/ok"
+    assert result.final_url != "http://127.0.0.1:18765/redirect"
+    assert result.body == b"<html><body>ok</body></html>"
+    client.close()
+
+
+def test_scrape_without_metadata_url_keeps_the_sourceurl_fallback() -> None:
+    """Older/sparser shapes without metadata.url must keep working."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=scrape_payload())
+
+    client = make_client(handler)
+    result = client.scrape("https://college.ac.in/fees")
+    assert result.final_url == "https://college.ac.in/fees"
+    client.close()
 
 
 def test_scrape_max_age_is_configurable() -> None:
