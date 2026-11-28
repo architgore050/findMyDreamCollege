@@ -10,6 +10,7 @@ snapshot store; the production constructor uses Postgres repositories.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import threading
 import uuid
@@ -192,9 +193,7 @@ class Orchestrator:
         from fmd.acquire.parse_cache import ParseCache
         from fmd.db.repositories import DocumentParsesRepo
 
-        self._parse_cache_instance = ParseCache(
-            DocumentParsesRepo(self.database), self._store()
-        )
+        self._parse_cache_instance = ParseCache(DocumentParsesRepo(self.database), self._store())
         return self._parse_cache_instance
 
     def _t2_parse_cache(self) -> Any | None:
@@ -489,6 +488,8 @@ class Orchestrator:
         pages: int | None = None,
         device: str | None = None,
         dry_run: bool = False,
+        phased: bool | None = None,
+        line_sink: Callable[[str], None] | None = None,
     ) -> RunSummary:
         """The acquisition stage (W10): convert and cache, zero LLM calls.
 
@@ -496,11 +497,28 @@ class Orchestrator:
         the orchestrator's router is deliberately never handed to the stage.
         ``pages`` is a page budget evaluated only at document boundaries — the
         document that crosses it finishes in full, then acquisition stops.
+
+        ``phased`` (FMD-CLOUD-030): run the stage inside a
+        :class:`ResourcePhaseManager` acquire window — the model server is
+        stopped automatically for a CUDA window and restarted (ready) after,
+        with no manual care and still zero LLM calls. ``None`` defers to the
+        caller; without server control the window degrades to CPU with a
+        recorded reason instead of failing the run.
         """
         summary = self._summary("acquire", dry_run=dry_run)
         from fmd.acquire.tiers import AcquirePolicy
         from fmd.orchestrate.acquire import AcquisitionStage
+        from fmd.orchestrate.gpu_phases import ResourcePhaseManager
 
+        manager = (
+            ResourcePhaseManager(
+                registry=self.registry,
+                device=device or "cuda",
+                line_sink=line_sink,
+            )
+            if phased and not dry_run
+            else None
+        )
         stage = AcquisitionStage(
             snapshots=self.snapshots,
             documents=self.documents,
@@ -510,12 +528,26 @@ class Orchestrator:
             policy=AcquirePolicy.load(acquire=self.registry.acquire),
             tool_version=self.tool_version,
             device=device,
+            progress_sink=line_sink,
         )
-        stage.run(summary=summary, limit=limit, pages_budget=pages, dry_run=dry_run)
+        if manager is not None:
+            with manager.acquire_phase(stage="acquire") as window:
+                stage.run(summary=summary, limit=limit, pages_budget=pages, dry_run=dry_run)
+            summary.metadata["phased"] = True
+            summary.metadata["phase_control"] = window.control
+            summary.metadata["device"] = window.device
+            if window.reason:
+                summary.metadata["phase_reason"] = window.reason
+        else:
+            stage.run(summary=summary, limit=limit, pages_budget=pages, dry_run=dry_run)
+            if phased:
+                # A dry run (or an explicitly requested phase with no window)
+                # records why no server lifecycle ran.
+                summary.metadata["phased"] = False
+                summary.metadata["phase_reason"] = "dry_run" if dry_run else "no_server_control"
         summary.metadata["zero_llm_calls"] = True
         summary.failed = summary.failed or (
-            summary.counts.get("selected", 0) > 0
-            and summary.counts.get("parsed", 0) == 0
+            summary.counts.get("selected", 0) > 0 and summary.counts.get("parsed", 0) == 0
         )
         return self._record(summary, dry_run=dry_run)
 
@@ -595,7 +627,7 @@ class Orchestrator:
                 self._heartbeat(ticks, ingest_summary)
                 if stop.is_set():
                     break
-                extract_summary = self.extract(limit=limit)
+                extract_summary = self._worker_extract(limit=limit)
                 emit(extract_summary)
                 self._heartbeat(ticks, extract_summary)
                 if stop.is_set():
@@ -612,6 +644,61 @@ class Orchestrator:
             # a stopped worker must not leave them running.
             self.close()
         return last_tick
+
+    # -------------------------------------------------------------------- worker
+    def _worker_extract(self, *, limit: int | None = None) -> RunSummary:
+        """The worker's extract tick: the phased batched route when available.
+
+        Automatic (FMD-CLOUD-030): with ``acquire.yaml:batch.phased_extract``
+        on (default), a resolvable server controller and a real (non-replay)
+        router, the tick runs :class:`BatchedRunner` — per cycle stop server →
+        acquire a page-batch on CUDA → start server → extract — so a long
+        worker needs no manual server stop/start and no custom CPU runner.
+        Anything missing (no batch block, no controller, replay fixtures for
+        offline tests) falls back to the fused inline extract.
+        """
+        if not self._phased_extract_enabled():
+            return self.extract(limit=limit)
+        from fmd.orchestrate.batched import BatchedRunner
+
+        batch = getattr(self.registry.acquire, "batch", None)
+        runner = BatchedRunner(
+            orchestrator=self,
+            batch_pages=int(getattr(batch, "pages", 100)),
+            device=str(getattr(batch, "device", "cuda")),
+            keep_server=bool(getattr(batch, "keep_server", False)),
+            poll_timeout_s=int(getattr(batch, "poll_timeout_s", 600)),
+            prefetch_depth=int(getattr(batch, "prefetch_documents", 4)),
+        )
+        summary = runner.run(limit=limit)
+        summary.metadata["route"] = "phased_batched"
+        return summary
+
+    def _phased_extract_enabled(self) -> bool:
+        """Config + environment + router + controller, in that order."""
+        override = os.environ.get("FMD_PHASED_EXTRACT", "").strip().lower()
+        if override in {"off", "0", "false"}:
+            return False
+        batch = getattr(self.registry.acquire, "batch", None)
+        if batch is None or not bool(getattr(batch, "phased_extract", True)):
+            return False
+        from fmd.orchestrate.gpu_phases import resolve_controller
+
+        if resolve_controller(registry=self.registry) is None:
+            return False
+        return not self._router_is_replay()
+
+    def _router_is_replay(self) -> bool:
+        """True when every profile points at replay/mock providers.
+
+        A replay router never contacts the local model server: batching would
+        stop and start a real ``llama-server`` for a run that needs none of
+        it. Offline tests (``build_router(..., mock=True)``) land here.
+        """
+        models = getattr(self.router, "models", None)
+        profiles = getattr(models, "profiles", None) or {}
+        providers = {str(getattr(profile, "provider", "")) for profile in profiles.values()}
+        return bool(providers) and providers <= {"replay", "mock"}
 
     def _heartbeat(self, tick: int, summary: RunSummary | None, *, stopped: bool = False) -> None:
         payload: dict[str, Any] = {

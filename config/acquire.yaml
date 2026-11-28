@@ -337,3 +337,12 @@ batch:
   # disk I/O. The worker touches the object store only — never a converter,
   # never the model server. 0 disables it.
   prefetch_documents: 4
+  # Automatic phase control (FMD-CLOUD-030). phased_acquire: `fmd acquire`
+  # wraps its conversion pass in an automatic stop-convert-restart GPU window
+  # when a server controller is available (still zero LLM calls; CPU with a
+  # recorded reason when there is no controller). phased_extract: the worker's
+  # extract stage uses the batched phased route automatically (no manual
+  # server stop/start). Set either to false to opt out per deployment;
+  # FMD_PHASED_EXTRACT=off overrides the worker route per shell.
+  phased_acquire: true
+  phased_extract: true

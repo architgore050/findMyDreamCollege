@@ -37,6 +37,7 @@ from fmd.llm.providers import (
     json_instruction,
 )
 from fmd.net.policy import NetworkGuard
+from fmd.obs.metrics import emit as metrics_emit
 
 #: Consecutive transient failures after which the endpoint is treated as gone.
 #: Two is too eager (one dropped packet), five wastes a minute on a dead link.
@@ -179,6 +180,19 @@ class ModelRouter:
                 cost=0.0,
                 cache_hit=True,
             )
+            metrics_emit(
+                "llm",
+                purpose,
+                device="cpu",
+                model=cached.model,
+                provider=cached.provider,
+                duration_ms=0,
+                tokens_in=cached.tokens_in,
+                tokens_out=cached.tokens_out,
+                cache_hit=True,
+                input_ref=input_ref,
+                status="ok",
+            )
             return self._validate(schema, cached.content, purpose)
 
         provider_name = profile.provider
@@ -208,6 +222,15 @@ class ModelRouter:
                 latency_ms = int((time.perf_counter() - started) * 1000)
                 validated = self._validate(schema, result.content, purpose)
                 self._network_failures = 0
+                _emit_llm_metric(
+                    purpose,
+                    model=result.model,
+                    provider=provider_name,
+                    latency_ms=latency_ms,
+                    tokens_in=result.tokens_in,
+                    tokens_out=result.tokens_out,
+                    input_ref=input_ref,
+                )
                 cost = _pricing_cost(profile.pricing, result.tokens_in, result.tokens_out)
                 self._run_cost += cost
                 self._daily_cost += cost
@@ -420,6 +443,42 @@ class ModelRouter:
 
         path = _resolve_fixtures_dir(provider.fixtures_dir)
         return path if path.is_dir() else None
+
+
+def _emit_llm_metric(
+    purpose: str,
+    *,
+    model: str,
+    provider: str,
+    latency_ms: int,
+    tokens_in: int | None,
+    tokens_out: int | None,
+    input_ref: str,
+) -> None:
+    """One compute-metrics record per live call (no-op when none is active).
+
+    Throughput is derived from the provider's own usage numbers: decode tok/s
+    needs the server's timing split, which the OpenAI-compatible payload does
+    not expose, so ``total_tps`` is the honest (tokens / wall) figure and the
+    prefill/decode fields stay None unless a provider reports them.
+    """
+    seconds = latency_ms / 1000.0
+    total_tps: float | None = None
+    if seconds > 0 and (tokens_in is not None or tokens_out is not None):
+        total_tps = ((tokens_in or 0) + (tokens_out or 0)) / seconds
+    metrics_emit(
+        "llm",
+        purpose,
+        device="cpu",
+        model=model,
+        provider=provider,
+        duration_ms=latency_ms,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        total_tps=total_tps,
+        input_ref=input_ref,
+        status="ok",
+    )
 
 
 def _reason(exc: LLMError) -> str:

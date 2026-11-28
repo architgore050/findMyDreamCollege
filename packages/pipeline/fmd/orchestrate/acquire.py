@@ -20,8 +20,10 @@ the runbook contract, not a new decision.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +31,7 @@ from fmd.acquire.errors import ACQUISITION_FAILED_PREFIX, AcquisitionFailed
 from fmd.acquire.parse_cache import ParseCache, acquire_document, guard_conversion_error
 from fmd.acquire.tiers import AcquirePolicy
 from fmd.extract.pipeline import target_for_document
+from fmd.obs.metrics import emit as metrics_emit
 from fmd.orchestrate.extract import DEFAULT_TOOL_VERSION
 from fmd.orchestrate.ledger import RunSummary
 from fmd.store import SnapshotNotFound, SnapshotStore
@@ -86,6 +89,7 @@ class AcquisitionStage:
         t1: Any = None,
         device: str | None = None,
         t2_parse_cache: ParseCache | Any | None = None,
+        progress_sink: Any | None = None,
     ) -> None:
         self.snapshots = snapshots
         self.documents = documents
@@ -97,6 +101,10 @@ class AcquisitionStage:
         self.t0 = t0
         self.t1 = t1
         self.device = device
+        #: Per-document progress lines (id, pages, device, seconds, cache hit),
+        #: flushed immediately so a long run's log says what happened instead
+        #: of only "still running". None ⇒ silent (tests, batched inner loop).
+        self.progress_sink = progress_sink
 
     # ------------------------------------------------------------------ selection
     def plan(
@@ -200,8 +208,11 @@ class AcquisitionStage:
             if dry_run:
                 self._record_plan(summary, item)
                 continue
+            started = time.perf_counter()
             outcome = self._acquire_one(item, summary, data_for=data_for)
+            seconds = time.perf_counter() - started
             if outcome is None:
+                self._progress(item, pages=None, seconds=seconds, outcome="failed_or_abstained")
                 continue
             parsed += 1
             pages = int(outcome.get("pages") or 0)
@@ -209,10 +220,29 @@ class AcquisitionStage:
                 summary.bump("pages", pages)
             if not item.cache_hit:
                 converted_pages += pages
+            self._progress(item, pages=pages, seconds=seconds, outcome="converted_or_cached")
         summary.bump("parsed", parsed)
         summary.metadata["device"] = self.device or _current_device()
         summary.metadata["pages_budget"] = pages_budget
         summary.metadata["zero_llm_calls"] = True
+
+    def _progress(
+        self,
+        item: AcquisitionItem,
+        *,
+        pages: int | None,
+        seconds: float,
+        outcome: str,
+    ) -> None:
+        """One flushed per-document line: id, pages, device, seconds, cache hit."""
+        if self.progress_sink is None:
+            return
+        with contextlib.suppress(Exception):  # progress must never fail the doc
+            self.progress_sink(
+                f"[acquire] doc={item.document_id} pages={pages if pages is not None else '-'} "
+                f"device={self.device or _current_device() or 'cpu'} seconds={seconds:.1f} "
+                f"cache_hit={item.cache_hit} status={outcome}"
+            )
 
     def _record_plan(self, summary: RunSummary, item: AcquisitionItem) -> None:
         if item.cache_hit:
@@ -247,10 +277,22 @@ class AcquisitionStage:
             for cache in (self.parse_cache, self.t2_parse_cache):
                 if cache is None:
                     continue
+                started = time.perf_counter()
                 doc, provenance = cache.lookup(item.sha256, self.policy)
                 if doc is not None:
                     hit_info = provenance.as_dict()
                     summary.bump("cache_hits")
+                    metrics_emit(
+                        "acquire",
+                        "cache_hit",
+                        device=_current_device(),
+                        documents=1,
+                        pages=hit_info.get("pages"),
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        cache_hit=True,
+                        ocr_engine=str(getattr(cache, "tier", "") or ""),
+                        status="ok",
+                    )
                     summary.outcomes.append(
                         {
                             **item.as_dict(),
@@ -316,6 +358,7 @@ class AcquisitionStage:
             )
             return None
         document = self.documents.get(item.document_id)
+        started = time.perf_counter()
         try:
             doc, provenance = acquire_document(
                 data,
@@ -333,6 +376,14 @@ class AcquisitionStage:
             reason = str(getattr(exc, "reason", None) or guard_conversion_error(exc))
             self._mark_needs_review(document, reason)
             summary.bump("failed")
+            metrics_emit(
+                "acquire",
+                "convert",
+                device=_current_device(),
+                documents=1,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                status=f"acquisition_failed:{reason}",
+            )
             summary.fail(
                 "acquire",
                 reason,
@@ -355,6 +406,14 @@ class AcquisitionStage:
             # the next document; the reason is recorded, never guessed away.
             reason = guard_conversion_error(exc)
             summary.bump("abstained")
+            metrics_emit(
+                "acquire",
+                "convert",
+                device=_current_device(),
+                documents=1,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                status=f"abstained:{reason}",
+            )
             summary.outcomes.append(
                 {
                     **item.as_dict(),
@@ -375,6 +434,17 @@ class AcquisitionStage:
                 summary.bump("cache_stores")
             else:
                 summary.bump("cache_store_skipped")
+        metrics_emit(
+            "acquire",
+            "convert",
+            device=_current_device(),
+            documents=1,
+            pages=pages,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            cache_hit=info.get("mode") == "cache",
+            ocr_engine=f"{getattr(doc, 'tool', '') or ''}/{getattr(doc, 'tier', '') or ''}",
+            status="cache_hit" if info.get("mode") == "cache" else "ok",
+        )
         summary.outcomes.append(
             {
                 **item.as_dict(),

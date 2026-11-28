@@ -642,6 +642,17 @@ class AcquireBatchConfig(ConfigModel):
     #: (object store only — never a converter or the model server). 0 disables
     #: the prefetch worker; the acquire loop then reads live as before.
     prefetch_documents: int = 4
+    #: Automatic phase control for ``fmd acquire`` (FMD-CLOUD-030): when a
+    #: server controller is available, acquisition runs inside an automatic
+    #: stop-convert-restart GPU window (still zero LLM calls); without one it
+    #: degrades to CPU with a recorded reason. Disable for a strictly
+    #: no-server-touching acquire run.
+    phased_acquire: bool = True
+    #: Automatic phased route for the worker's extract stage: when the batch
+    #: config and a server controller exist, the worker drives the batched
+    #: stop→acquire→start→extract cycles instead of the fused CPU loop — no
+    #: manual server stop/start. ``FMD_PHASED_EXTRACT=off`` overrides per shell.
+    phased_extract: bool = True
 
 
 class AcquireCacheConfig(ConfigModel):

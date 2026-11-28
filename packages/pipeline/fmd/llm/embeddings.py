@@ -30,6 +30,7 @@ import hashlib
 import inspect
 import math
 import os
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -42,6 +43,7 @@ from fmd.llm.providers import (
     _probe_get,
 )
 from fmd.net.policy import NetworkGuard, RetryPolicy, Timeouts
+from fmd.obs.metrics import emit as metrics_emit
 
 __all__ = [
     "EmbeddingBackend",
@@ -241,6 +243,7 @@ class OpenAIEmbeddings(EmbeddingBackend):
     def embed(self, texts: Sequence[str]) -> EmbeddingBatch:
         if not texts:
             return EmbeddingBatch(vectors=(), model=self.model, backend=self.name, dim=self.dim)
+        started = time.perf_counter()
         vectors: list[list[float]] = []
         tokens_in = 0
         has_tokens = False
@@ -253,6 +256,18 @@ class OpenAIEmbeddings(EmbeddingBackend):
             if chunk_tokens is not None:
                 has_tokens = True
                 tokens_in += int(chunk_tokens)
+        metrics_emit(
+            "embeddings",
+            self.name,
+            device="cpu",
+            model=self.model,
+            provider=self.kind,
+            documents=len(texts),
+            batch_size=self.batch_size,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            tokens_in=tokens_in if has_tokens else None,
+            status="ok",
+        )
         batch = _validate_batch(
             vectors=vectors,
             texts=texts,
@@ -346,12 +361,24 @@ class SentenceTransformersEmbeddings(EmbeddingBackend):
             ) from exc
         import numpy as np
 
+        started = time.perf_counter()
         array = encoder.encode(
             list(texts),
             batch_size=self.batch_size,
             normalize_embeddings=True,
             convert_to_numpy=True,
             show_progress_bar=False,
+        )
+        metrics_emit(
+            "embeddings",
+            self.name,
+            device=self.device,
+            model=self.model,
+            provider=self.kind,
+            documents=len(texts),
+            batch_size=self.batch_size,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            status="ok",
         )
         vectors: list[list[float]] = [row.tolist() for row in np.asarray(array, dtype=float)]
         return _validate_batch(

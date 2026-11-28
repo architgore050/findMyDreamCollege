@@ -36,6 +36,11 @@ class NotImplementedYet(RuntimeError):
 UNIMPLEMENTED: dict[str, tuple[str, str]] = {}
 
 
+def _stderr_line(text: str) -> None:
+    """Progress lines go to stderr, flushed — stdout stays machine-readable."""
+    print(text, file=sys.stderr, flush=True)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fmd",
@@ -155,9 +160,29 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     acquire_parser.add_argument(
         "--device",
-        choices=["cpu", "cuda"],
+        choices=["auto", "cpu", "cuda"],
         default=None,
-        help="Docling device for this run (overrides FMD_DOCLING_DEVICE/config)",
+        help="Docling device for this run: cpu|cuda override FMD_DOCLING_DEVICE/"
+        "config; auto picks cuda when a GPU with enough free VRAM is visible, "
+        "else cpu (with the reason recorded)",
+    )
+    acquire_phased = acquire_parser.add_mutually_exclusive_group()
+    acquire_phased.add_argument(
+        "--phased",
+        dest="phased",
+        action="store_true",
+        default=None,
+        help="automatic resource phases: stop the model server for a CUDA "
+        "acquisition window, restart it ready afterwards — no manual "
+        "stop/start, still zero LLM calls (default: acquire.yaml "
+        "batch.phased_acquire)",
+    )
+    acquire_phased.add_argument(
+        "--no-phased",
+        dest="phased",
+        action="store_false",
+        default=None,
+        help="never touch the server in this acquire run (plain CPU/env behaviour)",
     )
     acquire_parser.add_argument(
         "--dry-run",
@@ -927,36 +952,54 @@ def _batch_settings(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _cmd_extract_batched(args: argparse.Namespace) -> int:
+    from fmd.obs.metrics import metrics_scope
     from fmd.orchestrate.batched import BatchedRunner
 
     settings = _batch_settings(args)
     orchestrator, database = _orchestrator(args)
     try:
-        runner = BatchedRunner(
-            orchestrator=orchestrator,
-            batch_pages=settings["pages"],
-            device=settings["device"],
-            keep_server=settings["keep_server"],
-            poll_timeout_s=settings["poll_timeout_s"],
-            prefetch_depth=settings["prefetch_documents"],
-            server_script=settings["server_script"],
-        )
-        summary = runner.run(limit=args.limit, dry_run=args.dry_run)
+        with metrics_scope():
+            runner = BatchedRunner(
+                orchestrator=orchestrator,
+                batch_pages=settings["pages"],
+                device=settings["device"],
+                keep_server=settings["keep_server"],
+                poll_timeout_s=settings["poll_timeout_s"],
+                prefetch_depth=settings["prefetch_documents"],
+                server_script=settings["server_script"],
+            )
+            summary = runner.run(limit=args.limit, dry_run=args.dry_run)
     finally:
         database.close()
     print(summary.as_json())
     return 1 if summary.failed else 0
 
 
+def _acquire_phased_flag(args: argparse.Namespace) -> bool:
+    """--phased/--no-phased wins; default is acquire.yaml batch.phased_acquire."""
+    value = getattr(args, "phased", None)
+    if value is not None:
+        return bool(value)
+    registry = load_registry(args.config_dir)
+    batch = getattr(registry.acquire, "batch", None)
+    return bool(getattr(batch, "phased_acquire", True))
+
+
 def _cmd_acquire(args: argparse.Namespace) -> int:
+    from fmd.obs.metrics import metrics_scope
+
     orchestrator, database = _orchestrator(args)
+    phased = _acquire_phased_flag(args)
     try:
-        summary = orchestrator.acquire(
-            limit=args.limit,
-            pages=args.pages,
-            device=args.device,
-            dry_run=args.dry_run,
-        )
+        with metrics_scope():
+            summary = orchestrator.acquire(
+                limit=args.limit,
+                pages=args.pages,
+                device=args.device,
+                dry_run=args.dry_run,
+                phased=phased,
+                line_sink=_stderr_line,
+            )
     finally:
         database.close()
     print(summary.as_json())
@@ -1273,16 +1316,19 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_worker(args: argparse.Namespace) -> int:
+    from fmd.obs.metrics import metrics_scope
+
     _warn_placeholder_user_agent()
     orchestrator, database = _orchestrator(args)
     summaries: list[Any] = []
     try:
-        summaries = orchestrator.worker(
-            limit=args.limit,
-            idle_seconds=args.idle_seconds,
-            max_ticks=args.max_ticks,
-            on_summary=lambda summary: print(summary.as_json(), flush=True),
-        )
+        with metrics_scope():
+            summaries = orchestrator.worker(
+                limit=args.limit,
+                idle_seconds=args.idle_seconds,
+                max_ticks=args.max_ticks,
+                on_summary=lambda summary: print(summary.as_json(), flush=True),
+            )
     finally:
         database.close()
     return 1 if any(summary.failed for summary in summaries) else 0
@@ -1302,9 +1348,7 @@ def _cmd_failures(args: argparse.Namespace) -> int:
         print(json.dumps(agg, indent=2))
         return 0
 
-    rows: list[tuple[str, dict]] = [
-        (name, entry) for name, entry in agg["by_institution"].items()
-    ]
+    rows: list[tuple[str, dict]] = [(name, entry) for name, entry in agg["by_institution"].items()]
     unresolved = agg["unresolved"]
     if unresolved["n"] > 0:
         rows.append(("(unresolved)", unresolved))
@@ -1588,8 +1632,12 @@ def _cmd_eval_verdict(args: argparse.Namespace) -> int:
         )
         return 2
     repo_root = Path(__file__).resolve().parents[3]
-    fixture_dir = Path(args.fixture_path) if args.fixture_path else (
-        repo_root / "packages" / "pipeline" / "tests" / "fixtures" / "eval_verdict" / "profiles"
+    fixture_dir = (
+        Path(args.fixture_path)
+        if args.fixture_path
+        else (
+            repo_root / "packages" / "pipeline" / "tests" / "fixtures" / "eval_verdict" / "profiles"
+        )
     )
     try:
         profiles = load_profile_fixtures(fixture_dir)
@@ -1644,9 +1692,7 @@ def _cmd_eval_audit_score(args: argparse.Namespace) -> int:
     )
     for disagreement in outcome["disagreements"]:
         print(
-            "  disagreement: {profile_id} agent={agent_verdict} — {reason}".format(
-                **disagreement
-            )
+            "  disagreement: {profile_id} agent={agent_verdict} — {reason}".format(**disagreement)
         )
     if outcome["fabricated_citations"]:
         print(
@@ -1723,8 +1769,12 @@ def _cmd_eval_verdict_live(args: argparse.Namespace) -> int:
     from fmd.llm.router import ModelRouter
 
     repo_root = Path(__file__).resolve().parents[3]
-    fixture_dir = Path(args.fixture_path) if args.fixture_path else (
-        repo_root / "packages" / "pipeline" / "tests" / "fixtures" / "eval_verdict" / "profiles"
+    fixture_dir = (
+        Path(args.fixture_path)
+        if args.fixture_path
+        else (
+            repo_root / "packages" / "pipeline" / "tests" / "fixtures" / "eval_verdict" / "profiles"
+        )
     )
     sessions_dir = fixture_dir.parent / "live" / "sessions"
     try:
@@ -1792,9 +1842,10 @@ def _cmd_eval_verdict_live(args: argparse.Namespace) -> int:
             if blockers:
                 print(
                     "fmd eval: the verdict_live model profile does not resolve on this "
-                    "host: " + "; ".join(blockers) + ". " + profile_remediation(
-                        router.models, VERDICT_LIVE_PURPOSE
-                    ),
+                    "host: "
+                    + "; ".join(blockers)
+                    + ". "
+                    + profile_remediation(router.models, VERDICT_LIVE_PURPOSE),
                     file=sys.stderr,
                 )
                 return 1
