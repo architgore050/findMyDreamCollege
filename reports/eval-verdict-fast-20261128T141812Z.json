@@ -1,0 +1,320 @@
+{
+  "aggregate": {
+    "agreement_rate": 0.4,
+    "audit_failures": 0,
+    "incorrect_rate": 0.2,
+    "n_cases": 5,
+    "n_profiles": 5,
+    "partial_rate": 0.2,
+    "top3_overlap_mean": 1.2,
+    "unknown_coverage": 0.2
+  },
+  "cases": [
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": false,
+            "fetched_at": "2026-11-22T18:39:52Z",
+            "quote": "All India Institute of Medical Sciences, Delhi ... Rank 1",
+            "sha256": "dda9ee1bb9fef22ec4103b9c4dd870f78948ae0ac2f09c3c0446adc07cb78d04",
+            "source_kind": "ranking",
+            "title": "NIRF 2025 Medical rank list",
+            "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-22T00:00:00Z",
+            "quote": "The B.Sc. Medical Laboratory Technology programme runs 4 years with a 12-month internship.",
+            "sha256": "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11",
+            "source_kind": "fixture",
+            "title": "Fixture: institutional curriculum page (offline canary)",
+            "url": "https://fixture.invalid/research/canary-01/aiims-curriculum"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-22T00:00:00Z",
+            "quote": "Admissions to allied health sciences are through the institution's own entrance process.",
+            "sha256": "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22",
+            "source_kind": "fixture",
+            "title": "Fixture: allied-health programme page (offline canary)",
+            "url": "https://fixture.invalid/research/canary-01/cmc-allied-health"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 3,
+        "n_external": 2,
+        "selected_programmes": [
+          {
+            "evidence_tier": "rich",
+            "institution_name": "All India Institute of Medical Sciences, Delhi",
+            "programme": "B.Sc. Medical Laboratory Technology"
+          },
+          {
+            "evidence_tier": "rich",
+            "institution_name": "Christian Medical College",
+            "programme": "B.Sc. Medical Laboratory Technology"
+          }
+        ]
+      },
+      "product_top3": [
+        "All India Institute of Medical Sciences, Delhi",
+        "Post Graduate Institute of Medical Education and Research",
+        "Christian Medical College"
+      ],
+      "profile_id": "canary-01-correct",
+      "rationale": "The product's top-3 matches the reference built from the committed NIRF 2025 Medical table and two independently researched institution pages; no counter-evidence found for any recommended programme.",
+      "reference_top3": [
+        "All India Institute of Medical Sciences, Delhi",
+        "Post Graduate Institute of Medical Education and Research",
+        "Christian Medical College"
+      ],
+      "top3_overlap": 3,
+      "unknown_aspects": [],
+      "verdict": "correct"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-22T00:00:00Z",
+            "quote": "No current accreditation or recognition record was locatable for this institution.",
+            "sha256": "cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33",
+            "source_kind": "fixture",
+            "title": "Fixture: recognition status check (offline canary)",
+            "url": "https://fixture.invalid/research/canary-02/vidya-recognition-check"
+          },
+          {
+            "external": false,
+            "fetched_at": "2026-11-22T18:39:52Z",
+            "quote": "Christian Medical College ... Rank 3",
+            "sha256": "dda9ee1bb9fef22ec4103b9c4dd870f78948ae0ac2f09c3c0446adc07cb78d04",
+            "source_kind": "ranking",
+            "title": "NIRF 2025 Medical rank list",
+            "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 2,
+        "n_external": 1,
+        "selected_programmes": [
+          {
+            "evidence_tier": "thin",
+            "institution_name": "Vidya Institute of Allied Health Sciences",
+            "programme": "B.Sc. Medical Laboratory Technology"
+          },
+          {
+            "evidence_tier": "rich",
+            "institution_name": "All India Institute of Medical Sciences, Delhi",
+            "programme": "B.Sc. Medical Laboratory Technology"
+          },
+          {
+            "evidence_tier": "rich",
+            "institution_name": "Christian Medical College",
+            "programme": "B.Sc. Medical Laboratory Technology"
+          }
+        ]
+      },
+      "product_top3": [
+        "Vidya Institute of Allied Health Sciences",
+        "All India Institute of Medical Sciences, Delhi",
+        "City Care Paramedical College, Hyderabad"
+      ],
+      "profile_id": "canary-02-partially-correct",
+      "rationale": "AIIMS Delhi is defensible and matches the reference, but the product's #1 (Vidya Institute) has thin evidence and a better-supported programme (CMC Vellore) exists in the researched reference set.",
+      "reference_top3": [
+        "All India Institute of Medical Sciences, Delhi",
+        "Christian Medical College",
+        "Post Graduate Institute of Medical Education and Research"
+      ],
+      "top3_overlap": 1,
+      "unknown_aspects": [],
+      "verdict": "partially_correct"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-22T00:00:00Z",
+            "quote": "The institute does not appear in the regulator's current list of recognised allied-health programmes.",
+            "sha256": "dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44",
+            "source_kind": "fixture",
+            "title": "Fixture: regulator record contradicting recognition claim (offline canary)",
+            "url": "https://fixture.invalid/research/canary-03/sunrise-recognition-refuted"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-22T00:00:00Z",
+            "quote": "The programme publishes intake, curriculum and internship hours on an official page.",
+            "sha256": "ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55",
+            "source_kind": "fixture",
+            "title": "Fixture: evidence-rich alternative (offline canary)",
+            "url": "https://fixture.invalid/research/canary-03/aiims-programme-record"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 2,
+        "n_external": 2,
+        "selected_programmes": [
+          {
+            "evidence_tier": "none",
+            "institution_name": "Sunrise Institute of Paramedical Sciences",
+            "programme": "B.Sc. MLT (Lateral Entry)"
+          },
+          {
+            "evidence_tier": "thin",
+            "institution_name": "City Care Paramedical College, Hyderabad",
+            "programme": "B.Sc. Medical Laboratory Technology"
+          },
+          {
+            "evidence_tier": "rich",
+            "institution_name": "All India Institute of Medical Sciences, Delhi",
+            "programme": "B.Sc. Medical Laboratory Technology"
+          }
+        ]
+      },
+      "product_top3": [
+        "Sunrise Institute of Paramedical Sciences",
+        "City Care Paramedical College, Hyderabad",
+        "Vidya Institute of Allied Health Sciences"
+      ],
+      "profile_id": "canary-03-incorrect",
+      "rationale": "The product's #1 has a single self-published claim and no recognisable accreditation trail; independently checked sources contradict its recognition status, and three evidence-rich programmes exist that the product did not surface.",
+      "reference_top3": [
+        "All India Institute of Medical Sciences, Delhi",
+        "Christian Medical College",
+        "Post Graduate Institute of Medical Education and Research"
+      ],
+      "top3_overlap": 0,
+      "unknown_aspects": [],
+      "verdict": "incorrect"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-22T00:00:00Z",
+            "quote": "The searched institution names do not occur in the state list within the research budget.",
+            "sha256": "ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66ff66",
+            "source_kind": "fixture",
+            "title": "Fixture: state allied-health list search result (offline canary)",
+            "url": "https://fixture.invalid/research/canary-04/state-list-search"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 1,
+        "n_external": 1,
+        "selected_programmes": [
+          {
+            "evidence_tier": "none",
+            "institution_name": "Malabar Allied Health Academy, Kozhikode",
+            "programme": "B.Sc. Medical Laboratory Technology"
+          },
+          {
+            "evidence_tier": "none",
+            "institution_name": "Coastal Institute of Health Sciences",
+            "programme": "B.Sc. Medical Laboratory Technology"
+          },
+          {
+            "evidence_tier": "none",
+            "institution_name": "Backwater Paramedical College",
+            "programme": "B.Sc. Medical Laboratory Technology"
+          }
+        ]
+      },
+      "product_top3": [
+        "Malabar Allied Health Academy, Kozhikode",
+        "Coastal Institute of Health Sciences",
+        "Backwater Paramedical College"
+      ],
+      "profile_id": "canary-04-unknown",
+      "rationale": "None of the three recommended institutions appears in any public ranking, accreditation list, or citable programme page found within the research budget; no source supports or refutes the order, so the verdict is unknown rather than guessed.",
+      "reference_top3": [],
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "recognition status of all three recommended institutions",
+        "internship structure (hours/months) at each institution",
+        "whether a better-evidenced programme exists in the same state"
+      ],
+      "verdict": "unknown"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-22T00:00:00Z",
+            "quote": "The programme records 1800 internship hours across the final year.",
+            "sha256": "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12",
+            "source_kind": "fixture",
+            "title": "Fixture: internship hours record (offline canary)",
+            "url": "https://fixture.invalid/research/canary-05/pgimer-internship-record"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-22T00:00:00Z",
+            "quote": "No independent record of this institution was found in the searched lists.",
+            "sha256": "cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34",
+            "source_kind": "fixture",
+            "title": "Fixture: absent-record search for the honest negative (offline canary)",
+            "url": "https://fixture.invalid/research/canary-05/lakeview-no-record"
+          },
+          {
+            "external": false,
+            "fetched_at": "2026-11-22T18:39:52Z",
+            "quote": "Post Graduate Institute of Medical Education and Research ... Rank 2",
+            "sha256": "dda9ee1bb9fef22ec4103b9c4dd870f78948ae0ac2f09c3c0446adc07cb78d04",
+            "source_kind": "ranking",
+            "title": "NIRF 2025 Medical rank list",
+            "url": "https://www.nirfindia.org/Rankings/2025/MedicalRanking.html"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 3,
+        "n_external": 2,
+        "selected_programmes": [
+          {
+            "evidence_tier": "rich",
+            "institution_name": "Post Graduate Institute of Medical Education and Research",
+            "programme": "B.Sc. Medical Laboratory Technology"
+          },
+          {
+            "evidence_tier": "none",
+            "institution_name": "Lakeview Institute of Paramedical Education",
+            "programme": "B.Sc. Medical Laboratory Technology"
+          }
+        ]
+      },
+      "product_top3": [
+        "Post Graduate Institute of Medical Education and Research",
+        "All India Institute of Medical Sciences, Delhi",
+        "Lakeview Institute of Paramedical Education"
+      ],
+      "profile_id": "canary-05-correct-thin-negative",
+      "rationale": "Both evidence-rich recommendations hold under independent research; the third product pick has no citable support and is excluded from the reference, which is why overlap with the product top-3 is 2 of 3 rather than 3 of 3.",
+      "reference_top3": [
+        "All India Institute of Medical Sciences, Delhi",
+        "Post Graduate Institute of Medical Education and Research",
+        "Christian Medical College"
+      ],
+      "top3_overlap": 2,
+      "unknown_aspects": [],
+      "verdict": "correct"
+    }
+  ],
+  "eval_kind": "product",
+  "generated_at": "2026-11-28T14:18:12Z",
+  "ok": true,
+  "proxy_label": null,
+  "schema_version": 1,
+  "stream": "verdict-fast",
+  "truth": {}
+}
