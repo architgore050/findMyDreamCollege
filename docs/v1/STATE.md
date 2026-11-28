@@ -252,7 +252,10 @@ risks).
   failed the external-citation audit; cases 2–5 passed. Fresh worksheet:
   `reports/audit-verdict-live-rerun.json` — 2 entries (`canary-02` with 5
   citations, `canary-05` with 7), operator fields empty. Report:
-  `reports/eval-verdict-live-rerun.json`. GPU cleanup verified at 14 MiB.
+  `reports/eval-verdict-live-rerun.json`. Setup degradation: the pinned MCP
+  engine's upstream release/direct asset returned 404, so browser fetches
+  degraded to Firecrawl Local; no substitute browser was used. GPU cleanup
+  verified at 14 MiB.
 - **Post-fix2 live verdict run** (2026-11-28): no-fallback + citation
   checkpoint + minimum-2 sampling fixes worked: **4/5 `emitted_verdict`,
   0 turn-cap stops**, 5 SearXNG searches, 4 Firecrawl maps, 3 schema violations
