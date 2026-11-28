@@ -232,6 +232,7 @@ class BatchedRunner:
         t0: Any = None,
         t1: Any = None,
         prefetch_depth: int = 4,
+        gpu_memory_probe: Any | None = None,
     ) -> None:
         self.orchestrator = orchestrator
         #: Double buffering (wave v1-w4): while one cycle's extraction phase
@@ -249,6 +250,9 @@ class BatchedRunner:
         # passed straight through to the acquisition stage and the extractor.
         self.t0 = t0
         self.t1 = t1
+        # Injected VRAM probe for the shared phase manager (test seam; the
+        # default in production stays the manager's own nvidia-smi probe).
+        self._gpu_memory_probe = gpu_memory_probe
         self._sizing_policy_instance: Any = None
         self.line_sink = line_sink or _stderr_line
         self.controller = (
@@ -532,6 +536,7 @@ class BatchedRunner:
                 poll_timeout_s=self.poll_timeout_s,
                 keep_server=self.keep_server,
                 line_sink=self.line_sink,
+                gpu_memory_probe=self._gpu_memory_probe,
                 on_restarted=lambda window: self._submit_prefetch(remaining, self._prefetch_buffer),
             )
             while remaining and not stop.is_set():

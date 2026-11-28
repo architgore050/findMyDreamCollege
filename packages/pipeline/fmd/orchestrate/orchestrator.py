@@ -491,6 +491,7 @@ class Orchestrator:
         phased: bool | None = None,
         line_sink: Callable[[str], None] | None = None,
         controller: Any | None = None,
+        gpu_memory_probe: Any | None = None,
     ) -> RunSummary:
         """The acquisition stage (W10): convert and cache, zero LLM calls.
 
@@ -506,7 +507,9 @@ class Orchestrator:
         caller; without server control the window degrades to CPU with a
         recorded reason instead of failing the run. ``controller`` is the test
         seam (and an embedded-caller override); the default resolves the
-        registry's own server script.
+        registry's own server script. ``gpu_memory_probe`` is the optional VRAM
+        probe seam for the window; production keeps the manager's nvidia-smi
+        default.
         """
         summary = self._summary("acquire", dry_run=dry_run)
         from fmd.acquire.tiers import AcquirePolicy
@@ -519,6 +522,7 @@ class Orchestrator:
                 registry=self.registry,
                 device=device or "cuda",
                 line_sink=line_sink,
+                gpu_memory_probe=gpu_memory_probe,
             )
             if phased and not dry_run
             else None

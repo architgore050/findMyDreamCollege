@@ -161,6 +161,11 @@ class FakeController:
         self.stopped = False
 
 
+def _ample_gpu_probe():
+    """Fake VRAM probe: ample free memory so the phase manager stays SCRIPTED."""
+    return {"vram_used_mib": 0.0, "vram_free_mib": 16303.0, "vram_total_mib": 16303.0}
+
+
 class BatchedHarness:
     """Full orchestrator + runner with recorded events and per-doc pages."""
 
@@ -197,6 +202,9 @@ class BatchedHarness:
         )
         self.controller = FakeController(events=self.events)
         self.lines: list[str] = []
+        # Tests must not depend on host GPU state: inject a fake probe so
+        # control stays SCRIPTED even on a machine with a starved real card.
+        self.gpu_memory_probe = _ample_gpu_probe
         self.runner = BatchedRunner(
             orchestrator=self.orchestrator,
             controller=self.controller,
@@ -205,6 +213,7 @@ class BatchedHarness:
             t0=CountingT0(),
             t1=self.t1,
             line_sink=self.lines.append,
+            gpu_memory_probe=self.gpu_memory_probe,
         )
 
     def add_document(self, url: str, marker: str, pages: int, *, store_bytes: bytes | None = None):

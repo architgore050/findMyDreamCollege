@@ -281,7 +281,11 @@ def test_orchestrator_acquire_phased_drives_the_server_lifecycle(tmp_path) -> No
     harness.add_document("https://college.ac.in/r.pdf", "r", 3)
 
     summary = harness.orchestrator.acquire(
-        limit=5, phased=True, line_sink=harness.lines.append, controller=harness.controller
+        limit=5,
+        phased=True,
+        line_sink=harness.lines.append,
+        controller=harness.controller,
+        gpu_memory_probe=harness.gpu_memory_probe,  # host-independent: keep SCRIPTED
     )
 
     assert summary.metadata["zero_llm_calls"] is True
