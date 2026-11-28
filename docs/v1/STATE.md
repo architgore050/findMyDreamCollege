@@ -181,6 +181,14 @@ risks).
 
 ## Merged to main (verified via GitHub API)
 
+- PR #17 (automatic GPU resource phases + compute metrics): `ResourcePhaseManager`
+  time-shares the single GPU (stop LLM → CUDA Docling → restart ready), `fmd acquire
+  --phased` defaults on, worker auto-routes to the batched phased path,
+  `fmd/obs/metrics.py` emits app-only JSONL with GPU/CPU sampler, and
+  `fmd metrics summary` ranks the bottleneck. Four host-dependent tests were fixed
+  by injecting the existing fake VRAM probe (no phase logic changed). Verifier
+  intake: ruff clean, offline **1715/99**, DB **1808/6**, golden 1.0, replay OK;
+  CI #16/#17 were in progress at check time. Merged at `bcf8fa2`.
 - Local subagent branches `v1/crawler-contact-env` +
   `v1/verdict-live-turn-budget`: `FMD_CONTACT_EMAIL` builds a truthful default
   UA (explicit `FMD_USER_AGENT` still wins; crawl/worker warn on missing or
