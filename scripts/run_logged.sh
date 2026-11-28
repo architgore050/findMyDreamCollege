@@ -54,12 +54,25 @@ cleanup() {
 }
 trap cleanup INT TERM
 
+# Observability extras (FMD-CLOUD-030): the HEARTBEAT answers "what is the
+# bottleneck?" while a long run is still going. Lines are appended only when
+# the tool exists — the START/END/.status contract is untouched.
+gpu_line() {
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+  nvidia-smi \
+    --query-gpu=utilization.gpu,memory.used,memory.total,power.draw \
+    --format=csv,noheader,nounits 2>/dev/null | head -1
+}
+
 while kill -0 "$CHILD_PID" 2>/dev/null; do
   sleep "$HEARTBEAT_S"
   if kill -0 "$CHILD_PID" 2>/dev/null; then
     {
       echo "[$(now)] HEARTBEAT"
       ps -o pid,ppid,etime,%cpu,%mem,stat,cmd -p "$CHILD_PID" | sed 's/^/  /'
+      if gpu=$(gpu_line) && [ -n "$gpu" ]; then
+        echo "  GPU util%,mem_used_mib,mem_total_mib,power_w: $gpu"
+      fi
     } >>"$LOG"
   fi
 done

@@ -191,6 +191,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "convert nothing, write nothing",
     )
 
+    metrics_parser = subparsers.add_parser(
+        "metrics",
+        help="compute metrics recorded under data/compute-metrics (FMD-CLOUD-030)",
+    )
+    metrics_sub = metrics_parser.add_subparsers(dest="metrics_kind", required=True)
+    metrics_summary = metrics_sub.add_parser(
+        "summary",
+        help="p50/p95 duration and tok/s by stage+device, GPU vs CPU time, "
+        "cache-hit rates, and one ranked bottleneck line",
+    )
+    metrics_summary.add_argument(
+        "--run-id",
+        default=None,
+        help="aggregate one run only (default: every *.jsonl in the metrics dir)",
+    )
+    metrics_summary.add_argument(
+        "--json",
+        action="store_true",
+        help="print the summary as JSON instead of the text table",
+    )
+    metrics_summary.add_argument(
+        "--metrics-dir",
+        default=None,
+        help="override the metrics root (default: FMD_METRICS_DIR, else "
+        "data/compute-metrics of the repository checkout)",
+    )
+
     plan_parser = subparsers.add_parser(
         "plan",
         help="plan documents that should be extractable but are not (recovery/backfill)",
@@ -1004,6 +1031,32 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
         database.close()
     print(summary.as_json())
     return 1 if summary.failed else 0
+
+
+def _metrics_root(explicit: str | None) -> Path:
+    """--metrics-dir wins, then FMD_METRICS_DIR, then the repo default."""
+    if explicit:
+        return Path(explicit).expanduser()
+    from fmd.obs.metrics import default_metrics_root
+
+    return default_metrics_root()
+
+
+def _cmd_metrics(args: argparse.Namespace) -> int:
+    from fmd.obs.metrics import render_summary, summarize
+
+    root = _metrics_root(getattr(args, "metrics_dir", None))
+    run_id = getattr(args, "run_id", None)
+    summary = summarize(root, run_id=run_id)
+    if getattr(args, "json", False):
+        print(json.dumps(summary, indent=2, sort_keys=True, default=str))
+        return 0
+    if not summary["records"]:
+        suffix = f" for run_id={run_id}" if run_id else ""
+        print(f"no compute metrics found under {root}{suffix}")
+        return 1
+    print(render_summary(summary))
+    return 0
 
 
 def _cmd_plan(args: argparse.Namespace) -> int:
@@ -2817,6 +2870,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_extract(args)
         if args.command == "acquire":
             return _cmd_acquire(args)
+        if args.command == "metrics":
+            return _cmd_metrics(args)
         if args.command == "plan":
             return _cmd_plan(args)
         if args.command == "classify-report":
