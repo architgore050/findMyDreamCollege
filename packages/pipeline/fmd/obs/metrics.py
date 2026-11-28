@@ -224,7 +224,7 @@ def query_process_usage(pid: int | None = None) -> dict[str, float] | None:
 class _NullSampler:
     """Stand-in when sampling is off or the factory fails; all fields None."""
 
-    def __enter__(self) -> "_NullSampler":
+    def __enter__(self) -> _NullSampler:
         return self
 
     def __exit__(self, *exc: Any) -> None:
@@ -275,7 +275,7 @@ class ResourceSampler:
             thread.join(timeout=self.interval_s * 2 + 1.0)
         self._thread = None
 
-    def __enter__(self) -> "ResourceSampler":
+    def __enter__(self) -> ResourceSampler:
         self.start()
         return self
 
@@ -430,10 +430,8 @@ class ComputeMetrics:
             except Exception:  # sampling stays best-effort on the way out too
                 pass
             rec.setdefault("status", "ok")
-            try:
+            with contextlib.suppress(Exception):  # metrics never fail the phase
                 self.record(**rec)
-            except Exception:  # metrics must never fail the phase they timed
-                pass
 
     # ------------------------------------------------------------------ reading
     def read(self, run_id: str | None = None) -> list[dict[str, Any]]:
@@ -482,10 +480,8 @@ def emit(stage: str, phase: str, *, device: str | None = None, **fields: Any) ->
     sink = _active
     if sink is None:
         return
-    try:
+    with contextlib.suppress(Exception):  # metrics never break the measured layer
         sink.record(stage=stage, phase=phase, device=device, **fields)
-    except Exception:  # metrics must never break the measured layer
-        pass
 
 
 @contextlib.contextmanager
@@ -545,9 +541,7 @@ def summarize(
             if rec.get("total_tps") is not None and float(rec["total_tps"]) > 0
         ]
         cache_flags = [bool(rec["cache_hit"]) for rec in items if rec.get("cache_hit") is not None]
-        cache_hits = [
-            int(rec["cache_hits"]) for rec in items if rec.get("cache_hits") is not None
-        ]
+        cache_hits = [int(rec["cache_hits"]) for rec in items if rec.get("cache_hits") is not None]
         row: dict[str, Any] = {
             "stage": stage,
             "device": device,

@@ -24,6 +24,9 @@ never split across cycles, and never cached or extracted while incomplete.
 Server control is injected, not hardcoded: any object with ``stop()``,
 ``start()`` and ``wait_ready(timeout_s)`` works; the default adapter shells out
 to ``scripts/serve_local.sh`` (``config/acquire.yaml:batch.server_script``).
+The lifecycle itself lives in :mod:`fmd.orchestrate.gpu_phases`
+(:class:`ResourcePhaseManager`) so ``fmd acquire --phased`` and the worker's
+automatic phased route drive the identical stop → acquire → restart window.
 Every exit path — conversion failure, LLM failure, SIGINT, a start failure —
 leaves the server **stopped** (try/finally) unless ``keep_server`` is set.
 
@@ -36,161 +39,35 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import queue
 import signal
-import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
-
-import httpx
+from typing import Any
 
 from fmd.acquire.errors import AcquisitionFailed
 from fmd.extract.pipeline import target_for_document
-from fmd.orchestrate.acquire import DEVICE_ENV, AcquisitionStage
+from fmd.obs.metrics import emit as metrics_emit
+from fmd.orchestrate.acquire import AcquisitionStage
 from fmd.orchestrate.extract import DEFAULT_TOOL_VERSION, Extractor
+from fmd.orchestrate.gpu_phases import (  # noqa: F401 — re-exported (tests import from here)
+    DEGRADED,
+    SCRIPTED,
+    SERVER_CONTROL_OFF,
+    NullServerController,
+    ResourcePhaseManager,
+    ScriptServerController,
+    ServerControlError,
+    ServerController,
+    control_off,
+    pin_device_env,
+    resolve_controller,
+    resolve_script,
+)
 from fmd.orchestrate.ledger import RunSummary, utcnow
-
-#: Forces degraded mode for one run (no server control, no GPU batch window).
-SERVER_CONTROL_OFF = "off"
-DEGRADED = "degraded"
-SCRIPTED = "scripted"
-
-
-class ServerControlError(RuntimeError):
-    """A stop/start/readiness operation failed; the cycle aborts, server stopped."""
-
-
-class ServerController(Protocol):
-    """The seam the batched runner drives. Tests inject a fake.
-
-    ``stop``/``start`` are "ensure" operations: calling them twice in a row is
-    legal. ``wait_ready`` polls until the server answers ``/health`` or raises
-    :class:`ServerControlError` after ``timeout_s``.
-    """
-
-    def stop(self) -> None: ...
-
-    def start(self) -> None: ...
-
-    def wait_ready(self, timeout_s: float) -> None: ...
-
-
-def resolve_script(path: str | Path) -> Path:
-    """Resolve the server script: absolute, cwd-relative, then repo-relative."""
-    candidate = Path(path).expanduser()
-    if candidate.is_absolute():
-        return candidate
-    if candidate.is_file():
-        return candidate
-    here = Path(__file__).resolve()
-    for parent in (here, *here.parents):
-        resolved = parent / candidate
-        if resolved.is_file():
-            return resolved
-    return candidate
-
-
-class ScriptServerController:
-    """Default adapter: shells out to a start|stop|status|probe script and
-    polls ``/health`` on the local text model's URL.
-
-    The script contract is ``scripts/serve_local.sh``'s: ``stop`` SIGTERMs the
-    process group, ``start`` backgrounds the server (no-op when already
-    healthy), and readiness is the model server's own ``/health`` endpoint —
-    derived from the registry's local provider base URL with any ``/v1``
-    suffix stripped.
-    """
-
-    def __init__(
-        self,
-        script: str | Path,
-        *,
-        base_url: str | None = None,
-        poll_interval_s: float = 2.0,
-        timeout_s: float = 60.0,
-    ) -> None:
-        self.script = resolve_script(script)
-        self.base_url = (base_url or "").rstrip("/")
-        self.poll_interval_s = poll_interval_s
-        self.timeout_s = timeout_s
-
-    # ------------------------------------------------------------------ helpers
-    def _run(self, action: str) -> None:
-        if not self.script.is_file():
-            raise ServerControlError(
-                f"server script {str(self.script)!r} does not exist; set "
-                "acquire.yaml:batch.server_script or run with FMD_SERVER_CONTROL=off "
-                "for degraded CPU mode"
-            )
-        try:
-            result = subprocess.run(
-                [str(self.script), action],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_s,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise ServerControlError(f"server script {action!r} timed out: {exc}") from exc
-        if result.returncode != 0:
-            raise ServerControlError(
-                f"server script {action!r} exited {result.returncode}: "
-                f"{(result.stderr or result.stdout or '').strip()[:500]}"
-            )
-
-    @property
-    def health_url(self) -> str:
-        root = self.base_url
-        if root.endswith("/v1"):
-            root = root[: -len("/v1")]
-        return f"{root}/health"
-
-    # ------------------------------------------------------------------ control
-    def stop(self) -> None:
-        self._run("stop")
-
-    def start(self) -> None:
-        self._run("start")
-
-    def wait_ready(self, timeout_s: float) -> None:
-        if not self.base_url:
-            raise ServerControlError(
-                "no local model URL configured; cannot poll /health (set "
-                "FMD_LOCAL_LLM_URL or providers.local.base_url)"
-            )
-        deadline = time.monotonic() + max(timeout_s, 0.0)
-        last_error: str | None = None
-        while time.monotonic() < deadline:
-            try:
-                response = httpx.get(self.health_url, timeout=min(self.poll_interval_s, 10.0))
-                if response.status_code == 200:
-                    return
-                last_error = f"/health answered {response.status_code}"
-            except httpx.HTTPError as exc:
-                last_error = str(exc)
-            time.sleep(self.poll_interval_s)
-        raise ServerControlError(
-            f"server not ready after {timeout_s:g}s at {self.health_url}"
-            + (f" (last: {last_error})" if last_error else "")
-        )
-
-
-class NullServerController:
-    """Degraded-mode controller: server control is explicitly off."""
-
-    def stop(self) -> None:
-        return None
-
-    def start(self) -> None:
-        return None
-
-    def wait_ready(self, timeout_s: float) -> None:
-        return None
 
 
 @dataclass(frozen=True)
@@ -375,22 +252,19 @@ class BatchedRunner:
         self._sizing_policy_instance: Any = None
         self.line_sink = line_sink or _stderr_line
         self.controller = (
-            controller if controller is not None else self._default_controller(server_script)
+            controller
+            if controller is not None
+            else resolve_controller(
+                server_script=server_script,
+                registry=getattr(self.orchestrator, "registry", None),
+            )
         )
+        #: The shared phase manager is built lazily in ``_run_cycles`` so a
+        #: caller that swaps ``runner.controller`` after construction (tests,
+        #: the worker) is honoured at cycle time, not frozen at init.
+        self._phases: ResourcePhaseManager | None = None
 
     # ------------------------------------------------------------------ wiring
-    def _default_controller(self, server_script: str | Path | None) -> ServerController | None:
-        if os.environ.get("FMD_SERVER_CONTROL", "").strip().lower() == SERVER_CONTROL_OFF:
-            return None
-        script = server_script
-        if not script:
-            batch = getattr(getattr(self.orchestrator, "registry", None), "acquire", None)
-            script = getattr(getattr(batch, "batch", None), "server_script", None)
-        if not script:
-            return None
-        registry = getattr(self.orchestrator, "registry", None)
-        base_url = _local_base_url(registry)
-        return ScriptServerController(script, base_url=base_url)
 
     def _parse_cache(self) -> Any | None:
         getter = getattr(self.orchestrator, "_parse_cache", None)
@@ -495,7 +369,7 @@ class BatchedRunner:
             started_at=utcnow(),
             dry_run=dry_run,
         )
-        if os.environ.get("FMD_SERVER_CONTROL", "").strip().lower() == SERVER_CONTROL_OFF:
+        if control_off():
             # The operator's switch wins, even over an injected controller.
             return self._run_degraded(summary, limit=limit, dry_run=dry_run)
         if self.controller is None:
@@ -519,7 +393,7 @@ class BatchedRunner:
         if dry_run:
             work = self._resolve_queue(limit=limit, summary=summary)
             return self._run_dry(summary, work, degraded=True)
-        restore_device = _pin_device_env("cpu")
+        restore_device = pin_device_env("cpu")
         try:
             inner = self.orchestrator.extract(limit=limit, record=False)
         finally:
@@ -645,9 +519,21 @@ class BatchedRunner:
             if self.prefetch_depth > 0
             else None
         )
+        # The shared phase manager owns the per-cycle server lifecycle. The
+        # prefetch hook runs between the restart and the readiness poll — the
+        # GPU window is open and the poll loop leaves the CPU idle — exactly
+        # where the inline version used to submit it.
         cycle_index = 0
         try:
             remaining = list(work)
+            self._phases = ResourcePhaseManager(
+                controller=controller,
+                device=self.device,
+                poll_timeout_s=self.poll_timeout_s,
+                keep_server=self.keep_server,
+                line_sink=self.line_sink,
+                on_restarted=lambda window: self._submit_prefetch(remaining, self._prefetch_buffer),
+            )
             while remaining and not stop.is_set():
                 cycle_index += 1
                 cycle_summary = self._run_cycle(
@@ -735,6 +621,8 @@ class BatchedRunner:
         """
         controller = self.controller
         assert controller is not None
+        manager = self._phases
+        assert manager is not None
         cycle = RunSummary(
             run_id=self.orchestrator.run_id_factory(),
             stage="extract_batched",
@@ -745,60 +633,61 @@ class BatchedRunner:
         acquired: list[WorkItem] = []
         total_pages = 0
         line_pages = 0
+        window_device = self.device
         try:
-            # 1) ensure stopped — Docling needs the VRAM the 26B holds at 64k.
-            controller.stop()
-            # 2) acquire the batch on the configured device (zero LLM calls),
-            #    taking documents one at a time until the page total is reached.
-            while remaining and not stop.is_set():
-                item = remaining[0]
-                known = self._pages_for(item.snapshot.sha256)
-                if total_pages >= self.batch_pages:
-                    break
-                if known is not None and total_pages > 0 and total_pages + known > self.batch_pages:
-                    # A known-size document that would cross the limit is never
-                    # started: it is deferred to the next cycle, whole.
-                    break
-                if known is not None:
-                    # The parse already exists (converted on an earlier cycle
-                    # or run): nothing to acquire, the document goes straight
-                    # to the extract phase — no second cache hit counted.
+            # 1-2) one automatic acquire window from the shared phase manager:
+            #      ensure stopped → pin the device env → acquire the batch on
+            #      the configured device (zero LLM calls), taking documents one
+            #      at a time until the page total is reached → (on clean exit)
+            #      restart the server and wait for /health.
+            with manager.acquire_phase(
+                device=self.device, stage="extract_batched", stop_event=stop
+            ) as window:
+                window_device = window.device
+                while remaining and not stop.is_set():
+                    item = remaining[0]
+                    known = self._pages_for(item.snapshot.sha256)
+                    if total_pages >= self.batch_pages:
+                        break
+                    if (
+                        known is not None
+                        and total_pages > 0
+                        and total_pages + known > self.batch_pages
+                    ):
+                        # A known-size document that would cross the limit is
+                        # never started: deferred to the next cycle, whole.
+                        break
+                    if known is not None:
+                        # The parse already exists (converted on an earlier
+                        # cycle or run): nothing to acquire, the document goes
+                        # straight to the extract phase — no second cache hit
+                        # counted.
+                        remaining.pop(0)
+                        total_pages += int(known)
+                        line_pages += int(known)
+                        acquired.append(item)
+                        continue
+                    buffer = self._prefetch_buffer
+                    data_for = (lambda sha, b=buffer: b.take(sha)) if buffer is not None else None
+                    stage.run(
+                        summary=cycle,
+                        selected=[item.snapshot],
+                        dry_run=False,
+                        data_for=data_for,
+                    )
+                    pages_after = self._pages_for(item.snapshot.sha256)
                     remaining.pop(0)
-                    total_pages += int(known)
-                    line_pages += int(known)
+                    if pages_after is None:
+                        # Conversion failed for this document: nothing cached,
+                        # the batch continues with the next one. The stage
+                        # recorded the reason; extraction simply does not see
+                        # this document.
+                        continue
+                    total_pages += int(pages_after)
+                    line_pages += int(pages_after)
                     acquired.append(item)
-                    continue
-                buffer = self._prefetch_buffer
-                data_for = (lambda sha, b=buffer: b.take(sha)) if buffer is not None else None
-                stage.run(
-                    summary=cycle,
-                    selected=[item.snapshot],
-                    dry_run=False,
-                    data_for=data_for,
-                )
-                pages_after = self._pages_for(item.snapshot.sha256)
-                remaining.pop(0)
-                if pages_after is None:
-                    # Conversion failed for this document: nothing cached, the
-                    # batch continues with the next one. The stage recorded the
-                    # reason; extraction simply does not see this document.
-                    continue
-                total_pages += int(pages_after)
-                line_pages += int(pages_after)
-                acquired.append(item)
-            # 3) ensure started and /health ready — skipped when an interrupt
-            #    already ended the run: never start a server nobody will use.
-            if not stop.is_set():
-                controller.start()
-                # 3b) double buffering: the GPU window is now open (the server
-                #     owns the card and the poll loop leaves the CPU idle) —
-                #     read the *next* batch's bytes off-thread so the next
-                #     server-stopped window spends its time converting, not
-                #     on disk I/O. The worker touches the object store only.
-                buffer = self._prefetch_buffer
-                if buffer is not None:
-                    self._submit_prefetch(remaining, buffer)
-                controller.wait_ready(self.poll_timeout_s)
+            # The window exited: the manager has restarted the server (or
+            # skipped it for an interrupt) and the prefetch hook already ran.
             # 4) extract exactly the documents that acquired a parse this cycle
             #    (allow_convert=True: a payload that failed verification falls
             #    back to inline CPU conversion rather than losing the doc).
@@ -831,7 +720,17 @@ class BatchedRunner:
             pages=line_pages,
             cache_hits=cycle.counts.get("cache_hits", 0),
             seconds=seconds,
-            device=self.device,
+            device=window_device,
+        )
+        metrics_emit(
+            "extract_batched",
+            f"cycle:{cycle_index}",
+            device=window_device,
+            documents=len(acquired),
+            pages=line_pages,
+            cache_hits=cycle.counts.get("cache_hits", 0),
+            duration_ms=int(seconds * 1000),
+            status="interrupted" if stop.is_set() else ("aborted" if abort else "ok"),
         )
         cycle.metadata["abort"] = cycle.metadata.get("abort", False)
         if stop.is_set():
@@ -879,33 +778,11 @@ def _stderr_line(text: str) -> None:
     print(text, file=sys.stderr, flush=True)
 
 
-def _pin_device_env(device: str):
-    """Pin ``FMD_DOCLING_DEVICE`` for a degraded run; restore after."""
-    previous = os.environ.get(DEVICE_ENV)
-
-    def restore() -> None:
-        if previous is None:
-            os.environ.pop(DEVICE_ENV, None)
-        else:
-            os.environ[DEVICE_ENV] = previous
-
-    os.environ[DEVICE_ENV] = device
-    return restore
-
-
-def _local_base_url(registry: Any) -> str | None:
-    """The local text model's base URL from the registry (env-interpolated)."""
-    models = getattr(registry, "models", None)
-    providers = getattr(models, "providers", None) or {}
-    local = providers.get("local")
-    url = getattr(local, "base_url", None)
-    return str(url) if url else None
-
-
 __all__ = [
     "BatchedRunner",
     "DEGRADED",
     "NullServerController",
+    "PrefetchBuffer",
     "SCRIPTED",
     "SERVER_CONTROL_OFF",
     "ScriptServerController",
