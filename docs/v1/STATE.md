@@ -246,6 +246,13 @@ risks).
   quality not yet proven. Report + empty operator worksheet committed:
   `reports/eval-verdict-live-20261127T172435Z.json`,
   `reports/audit-verdict-live-20261127T172435Z.json`. **Human audit pending.**
+- **Repeat live verdict run** (2026-11-28): 4/5 `emitted_verdict`,
+  0 turn-cap stops; labels 1 `partially_correct` + 4 `unknown`; 5 searches,
+  2 maps, 1 schema violation retried, no paid fallback. Only `canary-01`
+  failed the external-citation audit; cases 2–5 passed. Fresh worksheet:
+  `reports/audit-verdict-live-rerun.json` — 2 entries (`canary-02` with 5
+  citations, `canary-05` with 7), operator fields empty. Report:
+  `reports/eval-verdict-live-rerun.json`. GPU cleanup verified at 14 MiB.
 - **Post-fix2 live verdict run** (2026-11-28): no-fallback + citation
   checkpoint + minimum-2 sampling fixes worked: **4/5 `emitted_verdict`,
   0 turn-cap stops**, 5 SearXNG searches, 4 Firecrawl maps, 3 schema violations

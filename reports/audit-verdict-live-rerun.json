@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "stream": "verdict-live",
+  "generated_at": "2026-11-28T05:25:33Z",
+  "seed": 13,
+  "fraction_requested": 0.4,
+  "fraction_used": 0.2,
+  "gate": 0.7,
+  "sampling_rule": "all incorrect/partially_correct verdicts + seeded random fill up to the clamped 10-20% target, with a minimum of min(2, n_cases) entries (docs/v1/eval/04-verdict-audit-protocol.md \u00a72.1)",
+  "n_cases": 5,
+  "entries": [
+    {
+      "profile_id": "canary-02-partially-correct",
+      "verdict": "partially_correct",
+      "rationale": "The product correctly identifies All India Institute of Medical Sciences (AIIMS), Delhi as a provider of B.Sc. Medical Laboratory Technology, which is a highly reputable institution in India. However, the shortlist includes Vidya Institute of Allied Health Sciences and City Care Paramedical College, Hyderabad, which are less prominent or harder to verify as top-tier institutions compared to other major providers found in research (e.g., St. Peters Institute of Higher Education and Research or Apollo University). While the product's top match is a valid institution, the overall ranking quality is mixed.",
+      "reference_top3": [
+        "All India Institute of Medical Sciences, Delhi | B.Sc. Medical Laboratory Technology",
+        "St. Peters Institute of Higher Education and Research | B.Sc. in Medical Laboratory Technology",
+        "Apollo University | BSc MLT Course"
+      ],
+      "selected_programmes": [],
+      "evidence": [
+        {
+          "url": "https://spiher.ac.in/b-sc-in-medical-laboratory-technology/",
+          "title": "B.Sc. in Medical Laboratory Technology \u2013 St. Peters Institute of Higher Education and Research",
+          "quote": "B.Sc. in Medical Laboratory Technology",
+          "sha256": "741f0bc307b6e39a6c245514efbb8e7750a94c47dd13c1fbd3436b74d136fb1f",
+          "fetched_at": "2026-11-28T05:24:24Z",
+          "source_kind": "institution",
+          "external": true
+        },
+        {
+          "url": "https://spiher.ac.in/b-sc-in-medical-laboratory-technology/",
+          "title": "B.Sc. in Medical Laboratory Technology \u2013 St. Peters Institute of Higher Education and Research",
+          "quote": "B.Sc. in Medical Laboratory Technology",
+          "sha256": "741f0bc307b6e39a6c245514efbb8e7750a94c47dd13c1fbd3436b74d136fb1f",
+          "fetched_at": "2026-11-28T05:24:24Z",
+          "source_kind": "institution",
+          "external": true
+        },
+        {
+          "url": "https://spiher.ac.in/b-sc-in-medical-laboratory-technology/",
+          "title": "B.Sc. in Medical Laboratory Technology \u2013 St. Peters Institute of Higher Education and Research",
+          "quote": "B.Sc. in Medical Laboratory Technology",
+          "sha256": "741f0bc307b6e39a6c245514efbb8e7750a94c47dd13c1fbd3436b74d136fb1f",
+          "fetched_at": "2026-11-28T05:24:24Z",
+          "source_kind": "institution",
+          "external": true
+        },
+        {
+          "url": "https://spiher.ac.in/b-sc-in-medical-laboratory-technology/",
+          "title": "B.Sc. in Medical Laboratory Technology \u2013 St. Peters Institute of Higher Education and Research",
+          "quote": "B.Sc. in Medical Laboratory Technology",
+          "sha256": "741f0bc307b6e39a6c245514efbb8e7750a94c47dd13c1fbd3436b74d136fb1f",
+          "fetched_at": "2026-11-28T05:24:24Z",
+          "source_kind": "institution",
+          "external": true
+        },
+        {
+          "url": "https://apollouniversity.edu.in/course/bsc-medical-laboratory-technology/",
+          "title": "BSc MLT Course - Duration, Syllabus, Eligibility, Admission",
+          "quote": "BSc MLT Course - Duration, Syllabus, Eligibility, Admission",
+          "sha256": "ba6c02c4a0f65485ffe221b33a680c0263e47257ddc91db79e77525ca8aff49c",
+          "fetched_at": "2026-11-28T05:24:31Z",
+          "source_kind": "institution",
+          "external": true
+        }
+      ],
+      "audit_failures": [],
+      "reverify_failures": [],
+      "fetch_ledger": [
+        {
+          "url": "https://spiher.ac.in/b-sc-in-medical-laboratory-technology/",
+          "final_url": "https://spiher.ac.in/b-sc-in-medical-laboratory-technology/",
+          "status": 200,
+          "sha256": "741f0bc307b6e39a6c245514efbb8e7750a94c47dd13c1fbd3436b74d136fb1f",
+          "fetched_at": "2026-11-28T05:24:24Z",
+          "n_bytes": 276284
+        },
+        {
+          "url": "https://apollouniversity.edu.in/course/bsc-medical-laboratory-technology/",
+          "final_url": "https://apollouniversity.edu.in/course/bsc-medical-laboratory-technology/",
+          "status": 200,
+          "sha256": "ba6c02c4a0f65485ffe221b33a680c0263e47257ddc91db79e77525ca8aff49c",
+          "fetched_at": "2026-11-28T05:24:31Z",
+          "n_bytes": 142297
+        }
+      ],
+      "unknown_aspects": [],
+      "as_of": "2026-11-22",
+      "operator_agreement": null
+    },
+    {
+      "profile_id": "canary-05-correct-thin-negative",
+      "verdict": "unknown",
+      "rationale": "The research is insufficient to verify the product's shortlist. While the product claims B.Sc. Medical Laboratory Technology is offered at PGIMER, AIIMS Delhi, and Lakeview Institute of Paramedical Education, the available research failed to confirm these specific programmes at these institutions. The attempt to fetch the AIIMS website was blocked by robots.txt, and the only successfully fetched external source (Sacred Heart College, Kochi) is unrelated to the target institutions or the specific programme in the shortlist. Consequently, I cannot validate the accuracy of the product's ranking or the existence of the courses at the listed institutions.",
+      "reference_top3": [],
+      "selected_programmes": [],
+      "evidence": [
+        {
+          "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses",
+          "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "quote": "Sacred Heart College, Kochi Courses &amp; Fees Structure 2027",
+          "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+          "fetched_at": "2026-11-28T05:25:21Z",
+          "source_kind": "institution",
+          "external": true
+        },
+        {
+          "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses",
+          "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "quote": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+          "fetched_at": "2026-11-28T05:25:21Z",
+          "source_kind": "institution",
+          "external": true
+        },
+        {
+          "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses",
+          "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "quote": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+          "fetched_at": "2026-11-28T05:25:21Z",
+          "source_kind": "institution",
+          "external": true
+        },
+        {
+          "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses",
+          "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "quote": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+          "fetched_at": "2026-11-28T05:25:21Z",
+          "source_kind": "institution",
+          "external": true
+        },
+        {
+          "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses",
+          "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "quote": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+          "fetched_at": "2026-11-28T05:25:21Z",
+          "source_kind": "institution",
+          "external": true
+        },
+        {
+          "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses",
+          "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "quote": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+          "fetched_at": "2026-11-28T05:25:21Z",
+          "source_kind": "institution",
+          "external": true
+        },
+        {
+          "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses",
+          "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "quote": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+          "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+          "fetched_at": "2026-11-28T05:25:21Z",
+          "source_kind": "institution",
+          "external": true
+        }
+      ],
+      "audit_failures": [],
+      "reverify_failures": [],
+      "fetch_ledger": [
+        {
+          "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses",
+          "final_url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses",
+          "status": 200,
+          "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+          "fetched_at": "2026-11-28T05:25:21Z",
+          "n_bytes": 1026747
+        }
+      ],
+      "unknown_aspects": [
+        "existence of B.Sc. Medical Laboratory Technology at PGIMER",
+        "existence of B.Sc. Medical Laboratory Technology at AIIMS Delhi",
+        "existence of B.Sc. Medical Laboratory Technology at Lakeview Institute of Paramedical Education"
+      ],
+      "as_of": "2026-11-22",
+      "operator_agreement": null
+    }
+  ]
+}

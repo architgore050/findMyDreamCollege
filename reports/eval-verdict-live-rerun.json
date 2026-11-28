@@ -1,0 +1,470 @@
+{
+  "aggregate": {
+    "agreement_rate": 0.0,
+    "audit_failures": 1,
+    "incorrect_rate": 0.0,
+    "maps_used": 2,
+    "n_cases": 5,
+    "n_fetches_mean": 3.6,
+    "n_profiles": 5,
+    "n_turns_mean": 12.0,
+    "partial_rate": 0.2,
+    "provider_errors": 0,
+    "reverify_failures": 0,
+    "schema_violations": 1,
+    "searches_used": 5,
+    "top3_overlap_mean": 0.0,
+    "unknown_coverage": 0.8
+  },
+  "backend": {
+    "map_provider": "firecrawl_local",
+    "max_fetches": 6,
+    "max_maps": 2,
+    "max_searches": 1,
+    "max_turns": 12,
+    "mode": "live",
+    "provider": "local",
+    "purpose": "verdict_live",
+    "search_provider": "searxng",
+    "sessions_dir": null
+  },
+  "cases": [
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [],
+        "failures": [
+          "circularity guard: verdict cites no source outside the product's ingested evidence (needs >= 1 external source)"
+        ],
+        "n_evidence": 0,
+        "n_external": 0,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 0,
+        "fetches_used": 5,
+        "maps_used": 1,
+        "profile_id": "canary-01-correct",
+        "provider_errors": 0,
+        "rejected_verdicts": 1,
+        "schema_violations": 0,
+        "searches_used": 1,
+        "stop_reason": "final_turn_zero_citations",
+        "turns_used": 12
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-28T05:23:37Z",
+          "final_url": "https://www.manipal.edu/academics/programs/bsc-medical-laboratory-technology-mchp-manipal",
+          "n_bytes": 1344216,
+          "sha256": "7d2a9cfd4b3c476c12a9cd6c14b2747392c503ddb0dd944d61ca9471ac72f7e4",
+          "status": 200,
+          "url": "https://www.manipal.edu/academics/programs/bsc-medical-laboratory-technology-mchp-manipal"
+        }
+      ],
+      "product_top3": [
+        "All India Institute of Medical Sciences, Delhi",
+        "Post Graduate Institute of Medical Education and Research",
+        "Christian Medical College"
+      ],
+      "profile_id": "canary-01-correct",
+      "rationale": "Live research stopped before producing a citable verdict (stop_reason: final_turn_zero_citations). No score is invented for incomplete research; the verdict stays unknown per the anti-hallucination rules.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 0
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "stop_reason: final_turn_zero_citations",
+        "research incomplete: the reference top-3 was never derived"
+      ],
+      "verdict": "unknown"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:24:24Z",
+            "quote": "B.Sc. in Medical Laboratory Technology",
+            "sha256": "741f0bc307b6e39a6c245514efbb8e7750a94c47dd13c1fbd3436b74d136fb1f",
+            "source_kind": "institution",
+            "title": "B.Sc. in Medical Laboratory Technology \u2013 St. Peters Institute of Higher Education and Research",
+            "url": "https://spiher.ac.in/b-sc-in-medical-laboratory-technology/"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:24:24Z",
+            "quote": "B.Sc. in Medical Laboratory Technology",
+            "sha256": "741f0bc307b6e39a6c245514efbb8e7750a94c47dd13c1fbd3436b74d136fb1f",
+            "source_kind": "institution",
+            "title": "B.Sc. in Medical Laboratory Technology \u2013 St. Peters Institute of Higher Education and Research",
+            "url": "https://spiher.ac.in/b-sc-in-medical-laboratory-technology/"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:24:24Z",
+            "quote": "B.Sc. in Medical Laboratory Technology",
+            "sha256": "741f0bc307b6e39a6c245514efbb8e7750a94c47dd13c1fbd3436b74d136fb1f",
+            "source_kind": "institution",
+            "title": "B.Sc. in Medical Laboratory Technology \u2013 St. Peters Institute of Higher Education and Research",
+            "url": "https://spiher.ac.in/b-sc-in-medical-laboratory-technology/"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:24:24Z",
+            "quote": "B.Sc. in Medical Laboratory Technology",
+            "sha256": "741f0bc307b6e39a6c245514efbb8e7750a94c47dd13c1fbd3436b74d136fb1f",
+            "source_kind": "institution",
+            "title": "B.Sc. in Medical Laboratory Technology \u2013 St. Peters Institute of Higher Education and Research",
+            "url": "https://spiher.ac.in/b-sc-in-medical-laboratory-technology/"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:24:31Z",
+            "quote": "BSc MLT Course - Duration, Syllabus, Eligibility, Admission",
+            "sha256": "ba6c02c4a0f65485ffe221b33a680c0263e47257ddc91db79e77525ca8aff49c",
+            "source_kind": "institution",
+            "title": "BSc MLT Course - Duration, Syllabus, Eligibility, Admission",
+            "url": "https://apollouniversity.edu.in/course/bsc-medical-laboratory-technology/"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 5,
+        "n_external": 5,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 5,
+        "fetches_used": 3,
+        "maps_used": 1,
+        "profile_id": "canary-02-partially-correct",
+        "provider_errors": 0,
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "searches_used": 1,
+        "stop_reason": "emitted_verdict",
+        "turns_used": 12
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-28T05:24:24Z",
+          "final_url": "https://spiher.ac.in/b-sc-in-medical-laboratory-technology/",
+          "n_bytes": 276284,
+          "sha256": "741f0bc307b6e39a6c245514efbb8e7750a94c47dd13c1fbd3436b74d136fb1f",
+          "status": 200,
+          "url": "https://spiher.ac.in/b-sc-in-medical-laboratory-technology/"
+        },
+        {
+          "fetched_at": "2026-11-28T05:24:31Z",
+          "final_url": "https://apollouniversity.edu.in/course/bsc-medical-laboratory-technology/",
+          "n_bytes": 142297,
+          "sha256": "ba6c02c4a0f65485ffe221b33a680c0263e47257ddc91db79e77525ca8aff49c",
+          "status": 200,
+          "url": "https://apollouniversity.edu.in/course/bsc-medical-laboratory-technology/"
+        }
+      ],
+      "product_top3": [
+        "Vidya Institute of Allied Health Sciences",
+        "All India Institute of Medical Sciences, Delhi",
+        "City Care Paramedical College, Hyderabad"
+      ],
+      "profile_id": "canary-02-partially-correct",
+      "rationale": "The product correctly identifies All India Institute of Medical Sciences (AIIMS), Delhi as a provider of B.Sc. Medical Laboratory Technology, which is a highly reputable institution in India. However, the shortlist includes Vidya Institute of Allied Health Sciences and City Care Paramedical College, Hyderabad, which are less prominent or harder to verify as top-tier institutions compared to other major providers found in research (e.g., St. Peters Institute of Higher Education and Research or Apollo University). While the product's top match is a valid institution, the overall ranking quality is mixed.",
+      "reference_top3": [
+        "All India Institute of Medical Sciences, Delhi | B.Sc. Medical Laboratory Technology",
+        "St. Peters Institute of Higher Education and Research | B.Sc. in Medical Laboratory Technology",
+        "Apollo University | BSc MLT Course"
+      ],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 5
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [],
+      "verdict": "partially_correct"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:24:51Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:24:51Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:24:51Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:24:51Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:24:51Z",
+            "quote": "Department of Para Medical Science",
+            "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+            "source_kind": "institution",
+            "title": "Department of Para Medical Science - Sunrise University",
+            "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 5,
+        "n_external": 5,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 5,
+        "fetches_used": 4,
+        "maps_used": 0,
+        "profile_id": "canary-03-incorrect",
+        "provider_errors": 0,
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "searches_used": 1,
+        "stop_reason": "emitted_verdict",
+        "turns_used": 12
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-28T05:24:51Z",
+          "final_url": "https://www.sunriseuniversity.in/department-of-para-medical-science",
+          "n_bytes": 128134,
+          "sha256": "de69048304959ae40657caa537d3ec368868f17aada50e061753d3280c0070b9",
+          "status": 200,
+          "url": "https://www.sunriseuniversity.in/department-of-para-medical-science"
+        }
+      ],
+      "product_top3": [
+        "Sunrise Institute of Paramedical Sciences",
+        "City Care Paramedical College, Hyderabad",
+        "Vidya Institute of Allied Health Sciences"
+      ],
+      "profile_id": "canary-03-incorrect",
+      "rationale": "The research is insufficient to verify the full shortlist. While the first institution (Sunrise Institute of Paramedical Sciences / Sunrise University) was investigated, the fetched page content was truncated and did not provide explicit confirmation of a 'B.Sc. MLT (Lateral Entry)' programme. Furthermore, no information was retrieved regarding 'City Care Paramedical College, Hyderabad' or 'Vidya Institute of Allied Health Sciences'. Without evidence for the remaining two institutions, a complete verdict cannot be rendered.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 5
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "existence and programme details for City Care Paramedical College, Hyderabad",
+        "existence and programme details for Vidya Institute of Allied Health Sciences",
+        "explicit confirmation of Lateral Entry for B.Sc. MLT at Sunrise University"
+      ],
+      "verdict": "unknown"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:25:09Z",
+            "quote": "Muthoot College of Allied Health Sciences",
+            "sha256": "fa68e73d6f4505a40fb39ea591ab403492882e93be938af5d5fc4d41021c1acb",
+            "source_kind": "institution",
+            "title": "Muthoot College of Allied Health Sciences",
+            "url": "https://muthoothealthcareahs.com/course-mlt"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 1,
+        "n_external": 1,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 1,
+        "fetches_used": 4,
+        "maps_used": 0,
+        "profile_id": "canary-04-unknown",
+        "provider_errors": 0,
+        "rejected_verdicts": 0,
+        "schema_violations": 1,
+        "searches_used": 1,
+        "stop_reason": "emitted_verdict",
+        "turns_used": 12
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-28T05:25:09Z",
+          "final_url": "https://muthoothealthcareahs.com/course-mlt",
+          "n_bytes": 28843,
+          "sha256": "fa68e73d6f4505a40fb39ea591ab403492882e93be938af5d5fc4d41021c1acb",
+          "status": 200,
+          "url": "https://muthoothealthcareahs.com/course-mlt"
+        }
+      ],
+      "product_top3": [
+        "Malabar Allied Health Academy, Kozhikode",
+        "Coastal Institute of Health Sciences",
+        "Backwater Paramedical College"
+      ],
+      "profile_id": "canary-04-unknown",
+      "rationale": "The research was unable to verify the existence or accreditation of the specific institutions listed in the product's shortlist (Malabar Allied Health Academy, Coastal Institute of Health Sciences, and Backwater Paramedical College) within the state of Kerala. While external research identified other institutions offering B.Sc. Medical Laboratory Technology in Kerala, such as Muthoot College of Allied Health Sciences, there is no citable evidence to confirm or refute the product's specific rankings for the requested institutions.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 1
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "existence and accreditation of Malabar Allied Health Academy",
+        "existence and accreditation of Coastal Institute of Health Sciences",
+        "existence and accreditation of Backwater Paramedical College"
+      ],
+      "verdict": "unknown"
+    },
+    {
+      "as_of": "2026-11-22",
+      "audit": {
+        "evidence": [
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:25:21Z",
+            "quote": "Sacred Heart College, Kochi Courses &amp; Fees Structure 2027",
+            "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+            "source_kind": "institution",
+            "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:25:21Z",
+            "quote": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+            "source_kind": "institution",
+            "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:25:21Z",
+            "quote": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+            "source_kind": "institution",
+            "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:25:21Z",
+            "quote": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+            "source_kind": "institution",
+            "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:25:21Z",
+            "quote": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+            "source_kind": "institution",
+            "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:25:21Z",
+            "quote": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+            "source_kind": "institution",
+            "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses"
+          },
+          {
+            "external": true,
+            "fetched_at": "2026-11-28T05:25:21Z",
+            "quote": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+            "source_kind": "institution",
+            "title": "Sacred Heart College, Kochi Courses & Fees Structure 2027",
+            "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses"
+          }
+        ],
+        "failures": [],
+        "n_evidence": 7,
+        "n_external": 7,
+        "selected_programmes": []
+      },
+      "backend_run": {
+        "citations": 7,
+        "fetches_used": 2,
+        "maps_used": 0,
+        "profile_id": "canary-05-correct-thin-negative",
+        "provider_errors": 0,
+        "rejected_verdicts": 0,
+        "schema_violations": 0,
+        "searches_used": 1,
+        "stop_reason": "emitted_verdict",
+        "turns_used": 12
+      },
+      "fetch_ledger": [
+        {
+          "fetched_at": "2026-11-28T05:25:21Z",
+          "final_url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses",
+          "n_bytes": 1026747,
+          "sha256": "fcd47f2d4243691c9db6ebda54bdc8aa65b3668561cac574ce9613e2ce915c78",
+          "status": 200,
+          "url": "https://www.careers360.com/colleges/sacred-heart-college-kochi/courses"
+        }
+      ],
+      "product_top3": [
+        "Post Graduate Institute of Medical Education and Research",
+        "All India Institute of Medical Sciences, Delhi",
+        "Lakeview Institute of Paramedical Education"
+      ],
+      "profile_id": "canary-05-correct-thin-negative",
+      "rationale": "The research is insufficient to verify the product's shortlist. While the product claims B.Sc. Medical Laboratory Technology is offered at PGIMER, AIIMS Delhi, and Lakeview Institute of Paramedical Education, the available research failed to confirm these specific programmes at these institutions. The attempt to fetch the AIIMS website was blocked by robots.txt, and the only successfully fetched external source (Sacred Heart College, Kochi) is unrelated to the target institutions or the specific programme in the shortlist. Consequently, I cannot validate the accuracy of the product's ranking or the existence of the courses at the listed institutions.",
+      "reference_top3": [],
+      "reverify": {
+        "failures": [],
+        "n_evidence": 7
+      },
+      "top3_overlap": 0,
+      "unknown_aspects": [
+        "existence of B.Sc. Medical Laboratory Technology at PGIMER",
+        "existence of B.Sc. Medical Laboratory Technology at AIIMS Delhi",
+        "existence of B.Sc. Medical Laboratory Technology at Lakeview Institute of Paramedical Education"
+      ],
+      "verdict": "unknown"
+    }
+  ],
+  "eval_kind": "product",
+  "generated_at": "2026-11-28T05:25:33Z",
+  "ok": true,
+  "proxy_label": null,
+  "schema_version": 1,
+  "stream": "verdict-live",
+  "truth": {}
+}
