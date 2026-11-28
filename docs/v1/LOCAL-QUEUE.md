@@ -54,17 +54,23 @@ components. If below target, crawl more (never fabricate).
 Commit back: counts recorded in `docs/v1/STATE.md` § evidence targets.
 Blocks: definition-of-done #7, release decision (rc vs final).
 
-### LQ-4: real-GPU validation of the resource-phased batched runner (wave 4)
+### LQ-4: real-GPU validation of the resource-phased batched runner (wave 4 + FMD-CLOUD-030)
 Why local: **GPU** — tests fake all GPU paths; only a real run proves the
 windowing is safe (one CUDA consumer at a time).
 Command:
   set -a && . .env && set +a
   export FMD_SNAPSHOT_DIR=$HOME/fmd-snap2
-  uv run python -m fmd.cli extract --batched --batch-pages 8   # Docling+OCR inside the server-stopped GPU window
+  # Automatic phases (runbook §6.2): NO manual serve_local.sh stop/start.
+  uv run python -m fmd.cli acquire --limit 5 --phased            # stop -> CUDA convert -> restart ready
+  uv run python -m fmd.cli extract --batched --batch-pages 8     # Docling+OCR inside the server-stopped GPU window
+  uv run python -m fmd.cli worker --max-ticks 1                  # extract tick routes phased automatically
+  uv run python -m fmd.cli metrics summary                       # per stage+device p50/p95, GPU vs CPU time, bottleneck
 Expected: `nvidia-smi` shows never more than one CUDA consumer; run summary
-`ok:true`; no `docling_cuda_oom`.
-Commit back: run summary JSON (`--json`? check `fmd extract --help` for summary output; stdout JSON) +
-any timing constants adjusted from measurement.
+`ok:true`; no `docling_cuda_oom`; per-document `[acquire] doc=…` progress
+lines on stderr; `data/compute-metrics/<run_id>.jsonl` exists; the metrics
+summary's bottleneck line names the real cost centre.
+Commit back: run summary JSON (stdout), `fmd metrics summary` output,
+and any timing constants adjusted from measurement.
 Blocks: wave 4 verification.
 
 ### LQ-5: T2 OCR real-engine cache validation (wave 3)

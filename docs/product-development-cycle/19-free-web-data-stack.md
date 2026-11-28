@@ -27,6 +27,16 @@ moves down the ladder; 404/410 stays terminal on the first tier; robots.txt is
 honoured before any tier runs; failures land in the append-only scrape-failure
 log (`docs/product-development-cycle/18-scrape-failures.md`).
 
+**Local compute is part of the free stack, and it now manages itself**
+(FMD-CLOUD-030, 2026-11-28): the 26B text model and Docling share the one GPU
+through automatic resource phases (`fmd/orchestrate/gpu_phases.py`) — `fmd
+acquire` stops the server, converts on CUDA, restarts it ready; `fmd extract
+--batched` and the worker's extract tick do the same per cycle. No manual
+`serve_local.sh stop/start` around conversions, and no paid inference:
+`fmd metrics summary` (append-only JSONL under `data/compute-metrics/`) and
+the `run_logged.sh` GPU heartbeat are the observability that keeps the free
+stack auditable — see the inference runbook §6.2.
+
 ## 2. Invisible Playwright MCP browser tier
 
 The in-process PatchrightFetcher is gone. The third tier now drives the

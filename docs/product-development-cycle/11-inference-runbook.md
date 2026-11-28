@@ -1138,7 +1138,8 @@ docker compose -f infra/docker-compose.yml exec api \
   python -m fmd.cli llm doctor --live
 
 # 3) the ordered evidence pass: acquire -> extract -> verify -> score
-#    (acquire = CPU Docling; never start a second GPU model here)
+#    (automatic phases per §6.2: acquire/extract time-share the one GPU by
+#    stopping/restarting the model server themselves — no second CUDA consumer)
 docker compose -f infra/docker-compose.yml exec api \
   python -m fmd.cli extract --limit 3
 docker compose -f infra/docker-compose.yml exec api \
@@ -1242,6 +1243,68 @@ T2/OCR output is not cached (acquisition of scans re-runs OCR every time); a
 Docling library upgrade is recorded in the payload but does not invalidate
 stored parses; the GPU path is validated only through fakes in CI — the
 operator runs the real pass.
+
+### 6.2 Automatic resource phases + compute metrics (FMD-CLOUD-030, 2026-11-28)
+
+The batched window above was trapped inside `fmd extract --batched`, and a
+standalone `fmd acquire` still defaulted to CPU Docling (the 50-college E2E
+run spent ~2 h on CPU acquisition — 21 then 2 parses per ~100 min — while the
+26B sat on the GPU, and its logs only said "still running"). The server
+lifecycle is now a reusable phase manager, and the phases are **automatic**:
+
+* **`fmd/orchestrate/gpu_phases.py` (`ResourcePhaseManager`)** — the
+  `ScriptServerController`/stop/start/readiness machinery extracted from
+  `BatchedRunner` (which now uses it per cycle; no second implementation).
+  `acquire_phase(device)` = ensure server stopped → pin
+  `FMD_DOCLING_DEVICE`+`FMD_OCR_DEVICE` → yield → finally restart + poll
+  `/health` ready (try/finally on every exit path). The VRAM verdict is taken
+  **after** the stop (with a resident 26B the card always looks starved);
+  a card still below `min_free_vram_gib` after the stop degrades that window
+  to CPU with the reason recorded instead of OOM-ing Docling.
+* **`fmd acquire --phased`** — default on (`acquire.yaml:batch.phased_acquire`):
+  the conversion pass runs inside an automatic stop-convert-restart window
+  (still **zero LLM calls**), and the summary records
+  `phased/phase_control/phase_reason`. Without server control
+  (`FMD_SERVER_CONTROL=off`, no script) or on a starved card it degrades to
+  CPU with the reason in the summary — a run never fails purely for missing
+  GPU control. `--device auto` picks CUDA when a GPU with enough free VRAM is
+  visible, else CPU. **No manual server stop/start:**
+  `fmd acquire --limit 500` alone phases the whole backlog; a phased acquire
+  leaves the model server running and `/health`-ready, so the next
+  `fmd extract` (or worker tick) consumes the parses immediately. A
+  per-document progress line (`[acquire] doc=… pages=… device=… seconds=…
+  cache_hit=…`) flushes to stderr, so logs say what happened, not only
+  "still running".
+* **The worker phases itself** — `acquire.yaml:batch.phased_extract` (default
+  on): when a server controller exists and the router is a real provider (not
+  replay fixtures), the worker's extract tick runs the batched phased route
+  (`stop → acquire page-batch on CUDA → start → extract`) with no manual care.
+  `FMD_PHASED_EXTRACT=off` overrides per shell.
+* **Compute metrics** (`fmd/obs/metrics.py`) — append-only JSONL under
+  `data/compute-metrics/<run_id>.jsonl` (gitignored except a README; no user
+  data: `input_ref` is the content-hash reference). Per stage/phase/task:
+  device, model/provider, duration, documents/pages/cache hits, tokens and
+  tok/s, OCR engine, and a 5 s `ResourceSampler` (nvidia-smi util/mem/power +
+  ps cpu%/rss around each phase; absent tools record null, never crash).
+  Emission points: every router call (live + cache hits), every acquisition
+  conversion/cache hit, batched cycles, phase windows, embedding providers.
+  Read it back with **`fmd metrics summary [--run-id <id>] [--json]`** —
+  p50/p95 duration and tok/s by stage+device, total GPU vs CPU time,
+  cache-hit rates, and one ranked bottleneck line. `scripts/run_logged.sh`
+  heartbeats now include a `GPU util%,mem_used_mib,mem_total_mib,power_w`
+  line when nvidia-smi exists (START/END/.status contract unchanged).
+
+```bash
+# the whole evidence pass, automatically phased — no manual server control:
+uv run python -m fmd.cli acquire --limit 500            # stops server, CUDA Docling, restarts ready
+uv run python -m fmd.cli extract --batched --limit 500  # per cycle: stop -> acquire -> start -> extract
+uv run python -m fmd.cli metrics summary --run-id <id>  # "what was the bottleneck?"
+```
+
+Still true: `FMD_SERVER_CONTROL=off` is the operator's switch for a strictly
+CPU run, `keep_server` is the only exit path that leaves the server up during
+a batched run, and the GPU path is validated only through fakes in CI — the
+operator runs the real pass (LQ-4).
 ## 7. Offline mode (no outbound network)
 
 Set three variables in the shell (or `.env`); `.env.example` carries the same

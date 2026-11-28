@@ -29,6 +29,13 @@ byte-identical to the `~/Downloads` copies.
   `engine_fingerprint`), tests `test_orchestrate_batched.py`,
   `test_parse_cache.py`, `test_parse_cache_t2.py`, `test_parse_cache_db.py`.
   No correction needed.
+- FMD-CLOUD-030 (2026-11-28) verified present: automatic resource phases
+  (`packages/pipeline/fmd/orchestrate/gpu_phases.py`, `ResourcePhaseManager`,
+  used by `BatchedRunner` and `fmd acquire --phased`, worker auto-route) and
+  compute metrics (`packages/pipeline/fmd/obs/metrics.py`, JSONL under
+  `data/compute-metrics/`, `fmd metrics summary`), tests
+  `test_orchestrate_gpu_phases.py`, `test_obs_metrics.py`,
+  `test_run_logged_heartbeat.py`. Real-GPU validation remains LQ-4.
 
 ## V1 state as of now
 
