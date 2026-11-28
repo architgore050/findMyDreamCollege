@@ -35,6 +35,12 @@ data/*
 # append-only evidence of what the scraper lost to blocked/failed fetches
 !data/scrape-failures/
 !data/scrape-failures/**
+# compute metrics (fmd/obs/metrics.py): append-only JSONL telemetry, one file
+# per run_id. Host telemetry is not evidence — only the README is committed.
+!data/compute-metrics/
+data/compute-metrics/*
+!data/compute-metrics/README.md
+
 snapshots/
 *.parquet
 *.warc
