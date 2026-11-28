@@ -423,7 +423,8 @@ class ComputeMetrics:
             rec["status"] = rec.get("status") or f"error:{type(exc).__name__}"
             raise
         finally:
-            rec["duration_ms"] = int((time.perf_counter() - started) * 1000)
+            # A caller that timed the body itself (fields/assignment) wins.
+            rec.setdefault("duration_ms", int((time.perf_counter() - started) * 1000))
             try:
                 sampler.__exit__(None, None, None)
                 rec.update(sampler.summary())

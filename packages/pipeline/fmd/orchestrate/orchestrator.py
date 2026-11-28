@@ -490,6 +490,7 @@ class Orchestrator:
         dry_run: bool = False,
         phased: bool | None = None,
         line_sink: Callable[[str], None] | None = None,
+        controller: Any | None = None,
     ) -> RunSummary:
         """The acquisition stage (W10): convert and cache, zero LLM calls.
 
@@ -503,7 +504,9 @@ class Orchestrator:
         stopped automatically for a CUDA window and restarted (ready) after,
         with no manual care and still zero LLM calls. ``None`` defers to the
         caller; without server control the window degrades to CPU with a
-        recorded reason instead of failing the run.
+        recorded reason instead of failing the run. ``controller`` is the test
+        seam (and an embedded-caller override); the default resolves the
+        registry's own server script.
         """
         summary = self._summary("acquire", dry_run=dry_run)
         from fmd.acquire.tiers import AcquirePolicy
@@ -512,6 +515,7 @@ class Orchestrator:
 
         manager = (
             ResourcePhaseManager(
+                controller=controller,
                 registry=self.registry,
                 device=device or "cuda",
                 line_sink=line_sink,
@@ -528,6 +532,8 @@ class Orchestrator:
             policy=AcquirePolicy.load(acquire=self.registry.acquire),
             tool_version=self.tool_version,
             device=device,
+            t0=self.t0,
+            t1=self.t1,
             progress_sink=line_sink,
         )
         if manager is not None:
@@ -689,16 +695,17 @@ class Orchestrator:
         return not self._router_is_replay()
 
     def _router_is_replay(self) -> bool:
-        """True when every profile points at replay/mock providers.
+        """True unless some profile provably points at a real provider.
 
         A replay router never contacts the local model server: batching would
         stop and start a real ``llama-server`` for a run that needs none of
-        it. Offline tests (``build_router(..., mock=True)``) land here.
+        it. Offline tests (``build_router(..., mock=True)``) and any stub
+        router land here — the conservative default is to keep the fused path.
         """
         models = getattr(self.router, "models", None)
         profiles = getattr(models, "profiles", None) or {}
         providers = {str(getattr(profile, "provider", "")) for profile in profiles.values()}
-        return bool(providers) and providers <= {"replay", "mock"}
+        return not (providers - {"replay", "mock"})
 
     def _heartbeat(self, tick: int, summary: RunSummary | None, *, stopped: bool = False) -> None:
         payload: dict[str, Any] = {

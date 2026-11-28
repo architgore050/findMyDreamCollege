@@ -183,7 +183,7 @@ class ModelRouter:
             metrics_emit(
                 "llm",
                 purpose,
-                device="cpu",
+                device="cuda" if cached.provider == "local" else "cpu",
                 model=cached.model,
                 provider=cached.provider,
                 duration_ms=0,
@@ -469,7 +469,9 @@ def _emit_llm_metric(
     metrics_emit(
         "llm",
         purpose,
-        device="cpu",
+        # The local 26B is GPU-resident (runbook §6); hosted/replay providers
+        # bill no card of ours. This is what makes GPU-vs-CPU time honest.
+        device="cuda" if provider == "local" else "cpu",
         model=model,
         provider=provider,
         duration_ms=latency_ms,
