@@ -34,10 +34,12 @@ fix the ordering and the budget:
 from __future__ import annotations
 
 import heapq
+import logging
 import math
 import re
 from collections.abc import Iterable
 from typing import Any
+from urllib.parse import urlsplit
 
 from fmd.adapters.base import BaseAdapter, SourceUnavailable, anchors, resolve
 from fmd.adapters.links import (
@@ -48,6 +50,8 @@ from fmd.adapters.links import (
     same_site,
 )
 from fmd.discover.base import DocumentRef
+
+logger = logging.getLogger(__name__)
 
 #: Default ordering weights. They exist only to order a crawl queue, and every
 #: one of them is overridable from ``params.link_weights`` (invariant 7).
@@ -314,11 +318,31 @@ class InstitutionSiteAdapter(BaseAdapter):
         decisions: list[LinkDecision] = []
         seen: set[str] = set()
         for href, label in anchors(text):
-            decision = self._classify(href, label)
-            if decision is None:
+            try:
+                # urllib raises on malformed authorities (for example an
+                # unmatched IPv6 bracket), including inside classify_link.
+                parts = urlsplit(href)
+                if (parts.scheme and not parts.netloc) or (parts.netloc and not parts.hostname):
+                    logger.debug("Skipping institution link without a host: %r", href)
+                    continue
+                # Accessing port validates values that urlsplit leaves lazy.
+                _ = parts.port
+
+                decision = self._classify(href, label)
+                if decision is None:
+                    continue
+                url = resolve(base_url, decision.url)
+                parts = urlsplit(url)
+                if parts.scheme not in ("http", "https") or not parts.hostname:
+                    logger.debug("Skipping institution link without an HTTP host: %r", href)
+                    continue
+                _ = parts.port
+                on_site = same_site(base_url, url)
+            except ValueError as exc:
+                # A single bad href must not abort discovery for the source.
+                logger.debug("Skipping malformed institution link %r: %s", href, exc)
                 continue
-            url = resolve(base_url, decision.url)
-            if url in seen or not same_site(base_url, url):
+            if url in seen or not on_site:
                 continue
             seen.add(url)
             score = self._score(decision)

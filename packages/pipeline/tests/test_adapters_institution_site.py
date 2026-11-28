@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 from test_adapters_support import (
     FakeLadder,
@@ -66,6 +68,34 @@ def test_navigation_stays_on_the_registrable_domain(adapter) -> None:
     # The fixture links an off-site social profile in spirit only; nothing here
     # may leave mtct.ac.in.
     assert all("mtct.ac.in" in url for url in nav)
+
+
+@pytest.mark.parametrize(
+    "malformed_href",
+    [
+        "http://[::1/files/malformed-placement.pdf",
+        "https://example.ac.in:invalid/files/malformed-placement.pdf",
+        "https:///files/malformed-placement.pdf",
+    ],
+    ids=["invalid-ipv6", "invalid-port", "missing-host"],
+)
+def test_malformed_urls_do_not_abort_listing(
+    adapter, malformed_href: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="fmd.adapters.institution_site")
+    base_url = "https://example.ac.in/downloads"
+    html = (
+        '<a href="/files/placement-report-2025.pdf">Placement Report</a>'
+        f'<a href="{malformed_href}">Malformed placement report</a>'
+        '<a href="/naac/ssr">NAAC SSR</a>'
+    )
+
+    refs = adapter.parse_listing(html, base_url=base_url)
+    nav = adapter.parse_navigation(html, base_url=base_url)
+
+    assert [ref.url for ref in refs] == ["https://example.ac.in/files/placement-report-2025.pdf"]
+    assert nav == ["https://example.ac.in/naac/ssr"]
+    assert malformed_href in caplog.text
 
 
 def test_bounded_crawl_yields_documents_and_survives_404_pages(registry) -> None:
